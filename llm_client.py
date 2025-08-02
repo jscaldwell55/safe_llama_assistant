@@ -37,46 +37,68 @@ class HuggingFaceClient:
             "parameters": parameters
         }
         
-        try:
-            logger.info(f"Sending request to HF endpoint: {self.endpoint}")
-            response = requests.post(
-                self.endpoint, 
-                headers=self.headers, 
-                json=payload,
-                timeout=30
-            )
-            response.raise_for_status()
-            
-            result = response.json()
-            
-            # Handle different response formats from HF Inference Endpoints
-            if isinstance(result, list) and len(result) > 0:
-                if "generated_text" in result[0]:
-                    generated_text = result[0]["generated_text"]
-                    # Remove the original prompt from the response if it's included
+        # Retry logic for service unavailable errors
+        max_retries = 3
+        retry_delay = 2  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Sending request to HF endpoint: {self.endpoint} (attempt {attempt + 1}/{max_retries})")
+                response = requests.post(
+                    self.endpoint, 
+                    headers=self.headers, 
+                    json=payload,
+                    timeout=30
+                )
+                response.raise_for_status()
+                
+                result = response.json()
+                
+                # Handle different response formats from HF Inference Endpoints
+                if isinstance(result, list) and len(result) > 0:
+                    if "generated_text" in result[0]:
+                        generated_text = result[0]["generated_text"]
+                        # Remove the original prompt from the response if it's included
+                        if generated_text.startswith(prompt):
+                            generated_text = generated_text[len(prompt):].strip()
+                        return generated_text
+                    else:
+                        return str(result[0])
+                elif isinstance(result, dict) and "generated_text" in result:
+                    generated_text = result["generated_text"]
                     if generated_text.startswith(prompt):
                         generated_text = generated_text[len(prompt):].strip()
                     return generated_text
                 else:
-                    return str(result[0])
-            elif isinstance(result, dict) and "generated_text" in result:
-                generated_text = result["generated_text"]
-                if generated_text.startswith(prompt):
-                    generated_text = generated_text[len(prompt):].strip()
-                return generated_text
-            else:
-                logger.warning(f"Unexpected response format: {result}")
-                return str(result)
-                
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed: {e}")
-            return f"[Error: Request failed - {str(e)}]"
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode JSON response: {e}")
-            return "[Error: Invalid response format]"
-        except Exception as e:
-            logger.error(f"Unexpected error during model inference: {e}")
-            return f"[Error: {str(e)}]"
+                    logger.warning(f"Unexpected response format: {result}")
+                    return str(result)
+                    
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 503 and attempt < max_retries - 1:
+                    logger.warning(f"Service unavailable (503), retrying in {retry_delay} seconds...")
+                    import time
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                else:
+                    logger.error(f"HTTP error after {attempt + 1} attempts: {e}")
+                    return f"[Error: Request failed - {str(e)}]"
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Request failed, retrying in {retry_delay} seconds: {e}")
+                    import time
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    logger.error(f"Request failed after {max_retries} attempts: {e}")
+                    return f"[Error: Request failed - {str(e)}]"
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to decode JSON response: {e}")
+                return "[Error: Invalid response format]"
+            except Exception as e:
+                logger.error(f"Unexpected error during model inference: {e}")
+                return f"[Error: {str(e)}]"
     
     def health_check(self) -> bool:
         """

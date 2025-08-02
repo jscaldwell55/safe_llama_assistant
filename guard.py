@@ -70,12 +70,19 @@ class GuardAgent:
             Tuple[str, str]: (verdict, reasoning)
         """
         try:
-            guard_output_clean = guard_output.strip().upper()
+            guard_output_clean = guard_output.strip()
+            
+            # Check if this is an error response from the LLM client
+            if guard_output_clean.startswith("[Error:"):
+                logger.error(f"Guard agent received error response: {guard_output_clean}")
+                return "REJECT", f"Guard service unavailable: {guard_output_clean}"
+            
+            guard_output_upper = guard_output_clean.upper()
             
             # Simple keyword-based parsing for APPROVE/REJECT
-            if "APPROVE" in guard_output_clean:
+            if "APPROVE" in guard_output_upper:
                 return "APPROVE", "Response approved by guard"
-            elif "REJECT" in guard_output_clean:
+            elif "REJECT" in guard_output_upper:
                 return "REJECT", "Response rejected by guard"
             else:
                 # If unclear, err on the side of caution
