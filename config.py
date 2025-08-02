@@ -1,7 +1,11 @@
 import os
 
 # Hugging Face Configuration
-HF_TOKEN = os.getenv("HF_TOKEN")  # Set your Hugging Face token as environment variable
+try:
+    import streamlit as st
+    HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
+except ImportError:
+    HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
 HF_ENDPOINT = os.getenv("HF_ENDPOINT", "https://gqcc35s8tz0h3y0m.us-east-1.aws.endpoints.huggingface.cloud/")
 
 # Model Configuration
