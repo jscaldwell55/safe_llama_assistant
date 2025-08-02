@@ -154,12 +154,28 @@ with st.sidebar:
     with st.expander("System Status"):
         if st.button("Check System Health"):
             with st.spinner("Checking system health..."):
+                # Check HF endpoint
                 hf_healthy = hf_client.health_check()
-                
                 if hf_healthy:
                     st.success("✅ Hugging Face endpoint is healthy")
                 else:
                     st.error("❌ Hugging Face endpoint is not responding")
+                
+                # Check RAG system
+                from rag import rag_system
+                if rag_system.index is not None:
+                    st.success(f"✅ RAG index loaded ({len(rag_system.texts)} chunks)")
+                else:
+                    st.warning("⚠️ No RAG index found")
+                    if st.button("Build Index from Sample Data"):
+                        with st.spinner("Building index..."):
+                            try:
+                                from rag import build_index
+                                build_index(force_rebuild=True)
+                                st.success("✅ Index built successfully!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Failed to build index: {e}")
 
 # Main interface
 st.markdown("### Ask me anything about our knowledge base")
