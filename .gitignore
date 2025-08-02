@@ -66,13 +66,13 @@ config.json
 .secrets
 
 # FAISS Index files (these are large and can be regenerated)
-faiss_index/
-*.index
-*.pkl
+# faiss_index/  # Commented out to include pre-built index
+# *.index  # Commented out to include pre-built index
+# *.pkl  # Commented out to include pre-built index
 
 # Data files (may contain sensitive information)
-data/
-*.pdf
+# data/  # Commented out to include sample data
+# *.pdf  # Commented out to include sample PDFs
 *.csv
 # *.txt  # Commented out to allow requirements.txt
 # *.json  # Commented out to allow package.json if needed
