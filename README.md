@@ -50,14 +50,18 @@ pip install -r requirements.txt
 
 ### 2. Configuration
 
-Set your Hugging Face credentials:
+Create a `.env` file from the example:
 
 ```bash
-export HF_TOKEN="your_huggingface_token"
-export HF_ENDPOINT="your_inference_endpoint_url"
+cp .env.example .env
 ```
 
-Or modify `config.py` directly.
+Edit `.env` and add your Hugging Face credentials:
+
+```env
+HF_TOKEN=your_huggingface_token
+HF_ENDPOINT=your_inference_endpoint_url
+```
 
 ### 3. Prepare Data
 
@@ -247,6 +251,24 @@ Key log events:
 - API call successes/failures
 
 ## 🚀 Production Deployment
+
+### Streamlit Cloud Deployment
+
+1. **Fork this repository** to your GitHub account
+
+2. **Deploy to Streamlit Cloud**:
+   - Go to [share.streamlit.io](https://share.streamlit.io)
+   - Connect your GitHub account
+   - Select this repository
+   - Set the main file path to `app.py`
+
+3. **Configure Environment Variables** in Streamlit Cloud:
+   ```
+   HF_TOKEN = your_huggingface_token
+   HF_ENDPOINT = your_inference_endpoint_url
+   ```
+
+4. **Deploy** - Streamlit Cloud will automatically install dependencies from `requirements.txt`
 
 ### Environment Variables
 

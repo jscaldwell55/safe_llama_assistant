@@ -73,9 +73,9 @@ faiss_index/
 # Data files (may contain sensitive information)
 data/
 *.pdf
-*.txt
 *.csv
-*.json
+# *.txt  # Commented out to allow requirements.txt
+# *.json  # Commented out to allow package.json if needed
 
 # Temporary files
 tmp/
