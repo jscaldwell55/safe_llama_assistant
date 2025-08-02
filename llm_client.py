@@ -1,0 +1,153 @@
+import requests
+import json
+import logging
+from typing import Dict, Any, Optional
+from config import HF_TOKEN, HF_ENDPOINT, MODEL_PARAMS
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class HuggingFaceClient:
+    """Client for interacting with Hugging Face Inference Endpoints"""
+    
+    def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_ENDPOINT):
+        self.token = token
+        self.endpoint = endpoint
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+    
+    def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Generate a response from the Hugging Face model.
+        
+        Args:
+            prompt (str): The input prompt to send to the model
+            parameters (dict, optional): Model generation parameters
+            
+        Returns:
+            str: The generated response text
+        """
+        if parameters is None:
+            parameters = MODEL_PARAMS.copy()
+        
+        payload = {
+            "inputs": prompt,
+            "parameters": parameters
+        }
+        
+        try:
+            logger.info(f"Sending request to HF endpoint: {self.endpoint}")
+            response = requests.post(
+                self.endpoint, 
+                headers=self.headers, 
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            # Handle different response formats from HF Inference Endpoints
+            if isinstance(result, list) and len(result) > 0:
+                if "generated_text" in result[0]:
+                    generated_text = result[0]["generated_text"]
+                    # Remove the original prompt from the response if it's included
+                    if generated_text.startswith(prompt):
+                        generated_text = generated_text[len(prompt):].strip()
+                    return generated_text
+                else:
+                    return str(result[0])
+            elif isinstance(result, dict) and "generated_text" in result:
+                generated_text = result["generated_text"]
+                if generated_text.startswith(prompt):
+                    generated_text = generated_text[len(prompt):].strip()
+                return generated_text
+            else:
+                logger.warning(f"Unexpected response format: {result}")
+                return str(result)
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed: {e}")
+            return f"[Error: Request failed - {str(e)}]"
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to decode JSON response: {e}")
+            return "[Error: Invalid response format]"
+        except Exception as e:
+            logger.error(f"Unexpected error during model inference: {e}")
+            return f"[Error: {str(e)}]"
+    
+    def health_check(self) -> bool:
+        """
+        Check if the Hugging Face endpoint is available.
+        
+        Returns:
+            bool: True if endpoint is healthy, False otherwise
+        """
+        try:
+            test_payload = {
+                "inputs": "Hello",
+                "parameters": {"max_new_tokens": 1}
+            }
+            response = requests.post(
+                self.endpoint,
+                headers=self.headers,
+                json=test_payload,
+                timeout=10
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return False
+
+# Global client instance
+hf_client = HuggingFaceClient()
+
+def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Convenience function for calling the Hugging Face model.
+    
+    Args:
+        prompt (str): The input prompt
+        parameters (dict, optional): Model generation parameters
+        
+    Returns:
+        str: The generated response
+    """
+    return hf_client.generate_response(prompt, parameters)
+
+def call_base_assistant(prompt: str) -> str:
+    """
+    Call the base assistant with optimized parameters.
+    
+    Args:
+        prompt (str): The formatted prompt for the base assistant
+        
+    Returns:
+        str: The assistant's response
+    """
+    base_params = MODEL_PARAMS.copy()
+    base_params.update({
+        "temperature": 0.2,  # Lower temperature for more consistent responses
+        "top_p": 0.8
+    })
+    return hf_client.generate_response(prompt, base_params)
+
+def call_guard_agent(prompt: str) -> str:
+    """
+    Call the guard agent using the same base model with optimized parameters.
+    
+    Args:
+        prompt (str): The formatted prompt for the guard agent
+        
+    Returns:
+        str: The guard agent's verdict
+    """
+    guard_params = MODEL_PARAMS.copy()
+    guard_params.update({
+        "temperature": 0.1,  # Very low temperature for consistent evaluation
+        "max_new_tokens": 50,  # Short responses for guard decisions
+        "top_p": 0.7
+    })
+    return hf_client.generate_response(prompt, guard_params)
