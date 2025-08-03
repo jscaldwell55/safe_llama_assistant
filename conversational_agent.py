@@ -40,7 +40,7 @@ class ConversationalAgent:
     """
     
     def __init__(self):
-        self.fallback_message = "I'm sorry, I don't seem to have any information on that. Can I help you with something else?"
+        self.fallback_message = "I don't have information on that specific topic in our knowledge base. Could you tell me more about what you're looking for, or would you like me to help with something else?"
         
         # Conversational elements that don't require RAG content
         self.social_patterns = {

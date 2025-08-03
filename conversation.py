@@ -29,7 +29,7 @@ class ConversationContext:
 class ConversationManager:
     """Manages conversational state and context building"""
     
-    def __init__(self, max_turns: int = 6, session_timeout_minutes: int = 30):
+    def __init__(self, max_turns: int = 999999, session_timeout_minutes: int = 30):
         self.max_turns = max_turns
         self.session_timeout = timedelta(minutes=session_timeout_minutes)
         self.conversation: Optional[ConversationContext] = None
@@ -160,10 +160,20 @@ class ConversationManager:
         starts_with_followup = any(query_lower.startswith(pattern) for pattern in follow_up_patterns)
         contains_pronouns = any(pronoun in query_lower for pronoun in pronouns)
         
-        # Short questions are often follow-ups
-        is_short_question = len(query.split()) <= 4 and '?' in query
+        # Short questions with critical safety keywords should not be treated as follow-ups
+        critical_safety_keywords = ['children', 'child', 'kids', 'baby', 'infant', 'pregnant', 'pregnancy', 
+                                  'elderly', 'senior', 'suicide', 'overdose', 'emergency', 'urgent', 
+                                  'dangerous', 'death', 'fatal', 'liver', 'kidney', 'heart']
         
-        return starts_with_followup or contains_pronouns or is_short_question
+        has_critical_keywords = any(keyword in query_lower for keyword in critical_safety_keywords)
+        
+        # Only treat short questions as follow-ups if they don't contain critical safety keywords
+        # and they have other follow-up indicators
+        is_short_followup = (len(query.split()) <= 4 and '?' in query and 
+                           not has_critical_keywords and 
+                           (starts_with_followup or contains_pronouns))
+        
+        return starts_with_followup or contains_pronouns or is_short_followup
     
     def get_enhanced_query(self, original_query: str) -> str:
         """Enhance query with conversation context for better retrieval"""

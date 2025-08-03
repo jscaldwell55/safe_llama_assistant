@@ -1,9 +1,12 @@
 import json
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
+import re
 from llm_client import call_guard_agent
 from prompt import format_guard_prompt
-from config import DEFAULT_FALLBACK_MESSAGE, ENABLE_GUARD
+from config import DEFAULT_FALLBACK_MESSAGE, ENABLE_GUARD, EMBEDDING_MODEL_NAME
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -16,6 +19,9 @@ class GuardAgent:
     def __init__(self):
         self.enabled = ENABLE_GUARD
         self.fallback_message = "I can't help with that. Can we talk about something else?"
+        # Initialize embedding model for semantic similarity
+        self.embedding_model = None
+        self._init_embedding_model()
         
         # 5-Category Violation Detection System
         self.violation_categories = {
@@ -130,7 +136,19 @@ class GuardAgent:
         if violation_result[0]:  # Violation found
             return False, self.fallback_message, violation_result[1]
         
-        # Then check RAG-only validation
+        # Check contextual safety validation for medical claims
+        context_validation_result = self._validate_medical_context(assistant_response, context)
+        if not context_validation_result[0]:
+            return False, self.fallback_message, context_validation_result[1]
+        
+        # Enhanced RAG grounding validation with semantic similarity
+        if context and len(context.strip()) > 0:
+            grounding_result = self._validate_rag_grounding(assistant_response, context)
+            if not grounding_result[0]:
+                logger.warning(f"RAG grounding failed: {grounding_result[1]} (score: {grounding_result[2]:.2f})")
+                return False, "I don't have sufficient information in our knowledge base to answer that. Could you rephrase your question or ask about something else?", grounding_result[1]
+        
+        # Then check basic RAG-only validation
         rag_validation_result = self._validate_rag_only_response(context, assistant_response, user_question)
         if not rag_validation_result[0]:
             return False, "I'm sorry, I don't seem to have any information on that. Can I help you with something else?", rag_validation_result[1]
@@ -291,23 +309,29 @@ class GuardAgent:
             str: Enhanced guard prompt
         """
         
-        enhanced_prompt = f"""Review this AI assistant response for safety and RAG-only compliance.
+        enhanced_prompt = f"""Review this pharmaceutical AI assistant response for safety and compliance.
 
-CRITICAL RAG-ONLY VALIDATION:
-- If NO context is provided, the response must ONLY be: conversational elements, fallback messages, or social interactions
-- If context IS provided, the response must be grounded in that context
-- REJECT any response that provides factual information without supporting context
-- APPROVE conversational elements like greetings, clarifications, follow-up questions
-- APPROVE standard fallback: "I'm sorry, I don't seem to have any information on that"
+CRITICAL REQUIREMENTS:
+1. NO medical advice, diagnosis, or treatment recommendations
+2. NO dosage instructions beyond what's in provided context
+3. NO off-label use discussions
+4. NO competitor product mentions
+5. ONLY FDA-approved information from context
 
-REJECT if the response contains:
+IMMEDIATE REJECTION CRITERIA:
+- Any suggestion to start, stop, or modify medication
+- Specific dosing recommendations not in context
+- Claims about drug efficacy not in context
+- Mentions of drug interactions not in context
+- Any content that could influence medical decisions
 - Factual claims not supported by the provided context
 - Information that appears to come from general knowledge rather than context
-- Medical, technical, or specific advice without context support
-- Claims about research, studies, or facts when no context supports them
 
-APPROVE if the response:
-- Uses only information from the provided context
+APPROVAL CRITERIA:
+- Cites only from provided context
+- Includes appropriate medical disclaimers
+- Maintains professional, neutral tone
+- Refers to healthcare professionals appropriately
 - Is a conversational/social response (greetings, thanks, clarifications)
 - Is an appropriate "I don't know" response when context is insufficient
 - Synthesizes context information naturally and accurately
@@ -327,7 +351,7 @@ Respond with only: APPROVE or REJECT"""
     
     def _detect_pharmaceutical_violations(self, assistant_response: str) -> Tuple[bool, str]:
         """
-        Detect pharmaceutical compliance violations in the response.
+        Detect pharmaceutical compliance violations with context-aware analysis.
         
         Args:
             assistant_response (str): The assistant's response to check
@@ -340,17 +364,42 @@ Respond with only: APPROVE or REJECT"""
         response_lower = assistant_response.lower()
         violations_found = []
         
+        # Context-aware analysis: Check if response is quoting from RAG content
+        rag_quote_indicators = [
+            "according to our documentation",
+            "based on the available information",
+            "the documentation states",
+            "our knowledge base shows",
+            "from our available content"
+        ]
+        
+        is_quoting_rag = any(indicator in response_lower for indicator in rag_quote_indicators)
+        
         for category, detection_config in self.violation_categories.items():
             patterns = detection_config["patterns"]
             
-            # Check regex patterns
+            # Check regex patterns with context awareness
             for pattern in patterns:
-                if re.search(pattern, response_lower, re.IGNORECASE):
-                    violations_found.append({
-                        "category": category,
-                        "pattern": pattern,
-                        "type": "pattern_match"
-                    })
+                match = re.search(pattern, response_lower, re.IGNORECASE)
+                if match:
+                    # Analyze context around the match
+                    match_context = response_lower[max(0, match.start()-50):min(len(response_lower), match.end()+50)]
+                    
+                    # Check if it's explaining terminology (allowed)
+                    if self._is_terminology_explanation(match_context, category):
+                        continue
+                        
+                    # Check if it's quoting from RAG (allowed)
+                    if is_quoting_rag and self._is_rag_quote(match_context):
+                        continue
+                    
+                    # Check if it's making recommendations (rejected)
+                    if self._is_recommendation(match_context, category):
+                        violations_found.append({
+                            "category": category,
+                            "pattern": pattern,
+                            "type": "recommendation_detected"
+                        })
             
             # Additional context-aware checks
             category_violations = self._check_category_specific_violations(category, response_lower)
@@ -368,16 +417,31 @@ Respond with only: APPROVE or REJECT"""
         violations = []
         
         if category == "unlicensed_medical_advice":
-            # Check for directive language about medications
-            if any(phrase in response_lower for phrase in [
+            # Check for directive language about medications with context
+            directive_phrases = [
                 "should take", "need to take", "must take", "start taking",
                 "stop taking", "increase dose", "decrease dose"
-            ]):
-                violations.append({
-                    "category": category,
-                    "type": "directive_medical_language",
-                    "description": "Contains directive medical advice"
-                })
+            ]
+            
+            for phrase in directive_phrases:
+                if phrase in response_lower:
+                    # Get context around the phrase
+                    phrase_index = response_lower.find(phrase)
+                    context = response_lower[max(0, phrase_index-50):min(len(response_lower), phrase_index+100)]
+                    
+                    # Check if it's quoting documentation (allowed)
+                    if any(indicator in context for indicator in ["documentation states", "according to", "guidelines say"]):
+                        continue
+                        
+                    # Check if it's conditional/hypothetical (allowed)
+                    if any(indicator in context for indicator in ["if your doctor", "when prescribed", "as directed by"]):
+                        continue
+                    
+                    violations.append({
+                        "category": category,
+                        "type": "directive_medical_language",
+                        "description": "Contains directive medical advice"
+                    })
         
         elif category == "competitor_mentions":
             # Check for brand name mentions (expanded list)
@@ -463,6 +527,285 @@ Respond with only: APPROVE or REJECT"""
             summary_parts.append(f"{category_name} ({len(category_violations)} violations)")
         
         return f"Pharmaceutical compliance violations detected: {', '.join(summary_parts)}"
+    
+    def _is_terminology_explanation(self, context: str, category: str) -> bool:
+        """Check if the context is explaining terminology (allowed)"""
+        explanation_indicators = [
+            "means", "refers to", "is defined as", "is a term for",
+            "is called", "known as", "terminology", "in medical terms"
+        ]
+        return any(indicator in context for indicator in explanation_indicators)
+    
+    def _is_rag_quote(self, context: str) -> bool:
+        """Check if the context appears to be quoting from RAG content"""
+        quote_indicators = [
+            "states", "says", "indicates", "shows", "mentions",
+            "according to", "based on", "per the", "as stated"
+        ]
+        return any(indicator in context for indicator in quote_indicators)
+    
+    def _is_recommendation(self, context: str, category: str) -> bool:
+        """Check if the context is making a recommendation (should be rejected)"""
+        if category == "unlicensed_medical_advice":
+            recommendation_phrases = [
+                "you should", "i recommend", "i suggest", "you need to",
+                "you must", "it's best to", "try taking", "consider taking"
+            ]
+            return any(phrase in context for phrase in recommendation_phrases)
+        return False
+    
+    def _validate_medical_context(self, response: str, context: str) -> Tuple[bool, str]:
+        """Validate medical claims against provided context"""
+        
+        # Extract medical claims from response
+        medical_claims = self._extract_medical_claims(response)
+        
+        # If no medical claims, validation passes
+        if not medical_claims:
+            return True, "No medical claims to validate"
+        
+        # If no context provided but medical claims exist, reject
+        if not context or len(context.strip()) == 0:
+            return False, "Medical claims made without supporting context"
+        
+        context_lower = context.lower()
+        
+        for claim in medical_claims:
+            # Check if claim is supported by context
+            if not self._claim_supported_by_context(claim, context_lower):
+                return False, f"Unsupported medical claim: {claim['claim']}"
+        
+        return True, "Medical claims validated against context"
+    
+    def _extract_medical_claims(self, response: str) -> List[Dict[str, str]]:
+        """Extract medical claims from the response"""
+        import re
+        
+        response_lower = response.lower()
+        medical_claims = []
+        
+        # Patterns that indicate medical claims
+        claim_patterns = [
+            # Efficacy claims
+            (r'(effective|works|helps|treats|reduces|improves|prevents)\s+(?:for|with|against)?\s*([^.]+)', 'efficacy'),
+            # Side effect claims
+            (r'(side effects?|adverse effects?|reactions?)\s+(?:include|are|may be)?\s*([^.]+)', 'side_effect'),
+            # Dosage claims
+            (r'(\d+\s*(?:mg|ml|mcg|iu|units?))\s+(?:daily|per day|twice|three times)', 'dosage'),
+            # Interaction claims
+            (r'(interacts?|interaction)\s+with\s+([^.]+)', 'interaction'),
+            # Indication claims
+            (r'(?:used|prescribed|indicated)\s+(?:for|to treat)\s+([^.]+)', 'indication'),
+            # Duration claims
+            (r'(takes?|requires?)\s+(\d+\s*(?:days?|weeks?|months?))', 'duration'),
+            # Contraindication claims
+            (r'(?:should not|must not|avoid|contraindicated)\s+(?:if|when|in)\s+([^.]+)', 'contraindication')
+        ]
+        
+        for pattern, claim_type in claim_patterns:
+            matches = re.finditer(pattern, response_lower, re.IGNORECASE)
+            for match in matches:
+                claim_text = match.group(0)
+                # Get context around the claim
+                start = max(0, match.start() - 20)
+                end = min(len(response), match.end() + 20)
+                claim_context = response[start:end]
+                
+                medical_claims.append({
+                    'claim': claim_text,
+                    'type': claim_type,
+                    'context': claim_context
+                })
+        
+        return medical_claims
+    
+    def _claim_supported_by_context(self, claim: Dict[str, str], context_lower: str) -> bool:
+        """Check if a medical claim is supported by the provided context"""
+        
+        claim_text = claim['claim'].lower()
+        claim_type = claim['type']
+        
+        # Extract key terms from the claim
+        key_terms = self._extract_key_terms(claim_text, claim_type)
+        
+        # Check if key terms appear in context
+        terms_found = 0
+        for term in key_terms:
+            if term in context_lower:
+                terms_found += 1
+        
+        # Require at least 60% of key terms to be in context
+        if len(key_terms) > 0:
+            match_ratio = terms_found / len(key_terms)
+            return match_ratio >= 0.6
+        
+        # If no key terms extracted, check if full claim appears in context
+        return claim_text in context_lower
+    
+    def _extract_key_terms(self, claim_text: str, claim_type: str) -> List[str]:
+        """Extract key terms from a medical claim"""
+        import re
+        
+        # Remove common words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
+                     'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'be',
+                     'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+                     'would', 'could', 'should', 'may', 'might', 'must', 'can', 'this',
+                     'that', 'these', 'those', 'if', 'when', 'where', 'which', 'who'}
+        
+        # Extract words
+        words = re.findall(r'\b[a-z]+\b', claim_text.lower())
+        
+        # Filter out stop words and short words
+        key_terms = [w for w in words if w not in stop_words and len(w) > 2]
+        
+        # Add specific medical terms based on claim type
+        if claim_type == 'dosage':
+            # Extract dosage numbers and units
+            dosage_matches = re.findall(r'\d+\s*(?:mg|ml|mcg|iu|units?)', claim_text)
+            key_terms.extend(dosage_matches)
+        elif claim_type == 'efficacy':
+            # Focus on condition/symptom terms
+            key_terms = [t for t in key_terms if t not in ['effective', 'works', 'helps', 'treats']]
+        elif claim_type == 'side_effect':
+            # Focus on the actual side effects, not the phrase "side effects"
+            key_terms = [t for t in key_terms if t not in ['side', 'effects', 'effect', 'adverse']]
+        
+        return list(set(key_terms))  # Remove duplicates
+    
+    def _init_embedding_model(self):
+        """Initialize the embedding model for semantic similarity"""
+        try:
+            self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+            logger.info(f"Initialized embedding model: {EMBEDDING_MODEL_NAME}")
+        except Exception as e:
+            logger.error(f"Failed to initialize embedding model: {e}")
+            self.embedding_model = None
+    
+    def _validate_rag_grounding(self, response: str, context: str) -> Tuple[bool, str, float]:
+        """
+        Validate response grounding with semantic similarity confidence score
+        Returns: (is_valid, reasoning, confidence_score)
+        """
+        
+        # If no embedding model, fall back to existing validation
+        if not self.embedding_model:
+            return True, "Embedding model not available, using basic validation", 0.0
+        
+        # Extract factual statements from response
+        factual_statements = self._extract_factual_claims(response)
+        
+        # If no factual statements, response is likely conversational
+        if not factual_statements:
+            return True, "No factual claims requiring grounding", 1.0
+        
+        # If no context but factual statements exist
+        if not context or len(context.strip()) == 0:
+            return False, "Factual claims made without context", 0.0
+        
+        grounding_scores = []
+        ungrounded_statements = []
+        
+        for statement in factual_statements:
+            # Calculate semantic similarity with context
+            score = self._calculate_grounding_score(statement, context)
+            grounding_scores.append(score)
+            
+            if score < 0.7:  # Threshold for individual statement grounding
+                ungrounded_statements.append(statement)
+        
+        avg_score = sum(grounding_scores) / len(grounding_scores) if grounding_scores else 0
+        
+        if avg_score < 0.7:  # Overall threshold for grounding
+            reasoning = f"Insufficient grounding in context (avg score: {avg_score:.2f}). Ungrounded: {'; '.join(ungrounded_statements[:2])}"
+            return False, reasoning, avg_score
+        
+        return True, f"Well-grounded response (avg score: {avg_score:.2f})", avg_score
+    
+    def _extract_factual_claims(self, response: str) -> List[str]:
+        """Extract factual claims from response (not just medical claims)"""
+        import re
+        
+        # Split response into sentences
+        sentences = re.split(r'[.!?]+', response)
+        
+        factual_statements = []
+        
+        # Patterns indicating factual claims
+        factual_indicators = [
+            r'\b(?:is|are|was|were)\s+\w+',  # "X is Y" statements
+            r'\b(?:contains?|includes?|has|have)\s+\w+',  # Compositional claims
+            r'\b(?:causes?|results?\s+in|leads?\s+to)\s+\w+',  # Causal claims
+            r'\b(?:works?\s+by|functions?\s+through)\s+\w+',  # Mechanism claims
+            r'\b\d+\s*(?:percent|%|mg|ml|mcg|iu|units?)\b',  # Quantitative claims
+            r'\b(?:approved|indicated|prescribed)\s+(?:for|to)\b',  # Medical use claims
+            r'\b(?:studies?|research|trials?|data)\s+(?:show|indicate|suggest)\b',  # Research claims
+            r'\b(?:typically|usually|commonly|often|always|never)\s+\w+',  # Frequency claims
+            r'\b(?:effective|ineffective|safe|unsafe)\s+(?:for|in|against)\b',  # Efficacy claims
+        ]
+        
+        # Exclude conversational patterns
+        conversational_patterns = [
+            r'^(?:hello|hi|hey|thanks|thank you|you\'re welcome)',
+            r'^\s*(?:i\'m sorry|i don\'t|i can\'t|i\'d be happy)',
+            r'^\s*(?:would you like|do you have|is there|can i help)',
+            r'^\s*(?:let me|i\'ll|here\'s what)',
+            r'^\s*(?:based on|according to|from our|in our)'
+        ]
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if len(sentence) < 10:  # Skip very short fragments
+                continue
+            
+            # Check if it's conversational
+            is_conversational = any(re.search(pattern, sentence.lower()) for pattern in conversational_patterns)
+            if is_conversational:
+                continue
+            
+            # Check if it contains factual indicators
+            contains_factual = any(re.search(pattern, sentence.lower()) for pattern in factual_indicators)
+            
+            # Also include sentences with specific medical/technical terms
+            contains_technical = bool(re.search(r'\b(?:medication|drug|treatment|therapy|symptoms?|conditions?|diseases?|disorders?)\b', sentence.lower()))
+            
+            if contains_factual or contains_technical:
+                factual_statements.append(sentence)
+        
+        return factual_statements
+    
+    def _calculate_grounding_score(self, statement: str, context: str) -> float:
+        """Calculate semantic similarity between statement and context"""
+        try:
+            # Encode statement and context
+            statement_embedding = self.embedding_model.encode(statement, convert_to_tensor=False)
+            
+            # Split context into sentences for more granular matching
+            context_sentences = re.split(r'[.!?]+', context)
+            context_sentences = [s.strip() for s in context_sentences if len(s.strip()) > 20]
+            
+            if not context_sentences:
+                # If no good sentences, use whole context
+                context_embedding = self.embedding_model.encode(context, convert_to_tensor=False)
+                return float(np.dot(statement_embedding, context_embedding) / 
+                           (np.linalg.norm(statement_embedding) * np.linalg.norm(context_embedding)))
+            
+            # Calculate similarity with each context sentence
+            max_similarity = 0.0
+            for ctx_sentence in context_sentences:
+                ctx_embedding = self.embedding_model.encode(ctx_sentence, convert_to_tensor=False)
+                
+                # Cosine similarity
+                similarity = float(np.dot(statement_embedding, ctx_embedding) / 
+                                 (np.linalg.norm(statement_embedding) * np.linalg.norm(ctx_embedding)))
+                
+                max_similarity = max(max_similarity, similarity)
+            
+            return max_similarity
+            
+        except Exception as e:
+            logger.error(f"Error calculating grounding score: {e}")
+            return 0.0
 
 # Global guard agent instance
 guard_agent = GuardAgent()
