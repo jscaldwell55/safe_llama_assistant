@@ -13,13 +13,9 @@ class SemanticChunker:
     """
     
     def __init__(self, model_name="en_core_web_sm"):
-        try:
-            self.nlp = spacy.load(model_name)
-            logger.info(f"Loaded spacy model: {model_name}")
-        except OSError:
-            logger.error(f"Failed to load spacy model: {model_name}")
-            raise
-            
+        self.model_name = model_name
+        self._nlp = None
+        
         # Initialize text splitters
         self.recursive_splitter = RecursiveCharacterTextSplitter(
             chunk_size=600,
@@ -28,11 +24,21 @@ class SemanticChunker:
             separators=["\n\n", "\n", ". ", " ", ""]
         )
         
-        self.spacy_splitter = SpacyTextSplitter(
-            pipeline=model_name,
-            chunk_size=600,
-            chunk_overlap=100
-        )
+        # Note: SpacyTextSplitter will load the model when needed
+        self.spacy_splitter = None
+    
+    @property
+    def nlp(self):
+        """Lazy load spacy model"""
+        if self._nlp is None:
+            try:
+                self._nlp = spacy.load(self.model_name)
+                logger.info(f"Loaded spacy model: {self.model_name}")
+            except OSError:
+                logger.error(f"Failed to load spacy model: {self.model_name}. Please run: python -m spacy download {self.model_name}")
+                # Fallback to basic splitting if spacy fails
+                return None
+        return self._nlp
     
     def extract_sections(self, text: str) -> List[Dict[str, Any]]:
         """
@@ -102,8 +108,14 @@ class SemanticChunker:
         if not text.strip():
             return []
         
-        doc = self.nlp(text)
-        sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+        # Fallback to simple sentence splitting if spacy fails
+        if self.nlp is None:
+            # Simple regex-based sentence splitting
+            sentences = re.split(r'[.!?]+', text)
+            sentences = [s.strip() for s in sentences if s.strip()]
+        else:
+            doc = self.nlp(text)
+            sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
         
         chunks = []
         current_chunk = []
@@ -275,6 +287,11 @@ class SemanticChunker:
         Extract named entities from text using spacy.
         Useful for drug names, organizations, etc.
         """
+        if self.nlp is None:
+            # Return empty dict if spacy is not available
+            logger.warning("Spacy model not available for entity extraction")
+            return {}
+            
         doc = self.nlp(text)
         entities = {}
         

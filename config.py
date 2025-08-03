@@ -4,7 +4,7 @@ import os
 try:
     import streamlit as st
     HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
-except ImportError:
+except (ImportError, FileNotFoundError, AttributeError):
     HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
 HF_ENDPOINT = os.getenv("HF_ENDPOINT", "https://wlg3d5se4nwkpb0x.us-east-1.aws.endpoints.huggingface.cloud/")
 
