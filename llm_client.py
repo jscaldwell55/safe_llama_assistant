@@ -17,6 +17,8 @@ class HuggingFaceClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
+        # Don't perform any network operations during init
+        logger.info(f"HuggingFaceClient initialized with endpoint: {endpoint[:30]}...")
     
     def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
         """

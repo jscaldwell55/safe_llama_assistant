@@ -1,26 +1,138 @@
 import streamlit as st
 import logging
-from config import APP_TITLE
-from rag import retrieve
-from prompt import format_conversational_prompt
-from llm_client import call_base_assistant, hf_client
-from guard import evaluate_response
-from conversation import conversation_manager
-from context_formatter import context_formatter
-from conversational_agent import conversational_agent, ConversationMode
-from difflib import SequenceMatcher
+import time
+import sys
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging FIRST before any imports
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
 logger = logging.getLogger(__name__)
+logger.info("=== Starting Streamlit app initialization ===")
+
+# Log each import separately to identify hanging
+start_time = time.time()
+
+try:
+    logger.info("Importing config...")
+    from config import APP_TITLE
+    logger.info(f"Config imported successfully in {time.time() - start_time:.2f}s")
+except Exception as e:
+    logger.error(f"Failed to import config: {e}")
+    raise
+
+# RAG module will be lazy loaded
+
+try:
+    logger.info("Importing prompt module...")
+    from prompt import format_conversational_prompt
+    logger.info(f"Prompt module imported successfully")
+except Exception as e:
+    logger.error(f"Failed to import prompt: {e}")
+    raise
+
+# LLM client will be lazy loaded
+try:
+    logger.info("Importing llm_client functions...")
+    from llm_client import call_base_assistant
+    logger.info(f"LLM client functions imported successfully")
+except Exception as e:
+    logger.error(f"Failed to import llm_client: {e}")
+    raise
+
+try:
+    logger.info("Importing guard module...")
+    from guard import evaluate_response
+    logger.info(f"Guard module imported successfully")
+except Exception as e:
+    logger.error(f"Failed to import guard: {e}")
+    raise
+
+# Conversation manager will be lazy loaded
+
+try:
+    logger.info("Importing context_formatter module...")
+    from context_formatter import context_formatter
+    logger.info(f"Context formatter imported successfully")
+except Exception as e:
+    logger.error(f"Failed to import context_formatter: {e}")
+    raise
+
+try:
+    logger.info("Importing ConversationMode...")
+    from conversational_agent import ConversationMode
+    logger.info(f"ConversationMode imported successfully")
+except Exception as e:
+    logger.error(f"Failed to import conversational_agent: {e}")
+    raise
+
+try:
+    logger.info("Importing difflib...")
+    from difflib import SequenceMatcher
+    logger.info(f"Difflib imported successfully")
+except Exception as e:
+    logger.error(f"Failed to import difflib: {e}")
+    raise
+
+logger.info(f"=== All imports completed in {time.time() - start_time:.2f}s ===")
 
 # Page configuration
-st.set_page_config(
-    page_title=APP_TITLE, 
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
-st.title(APP_TITLE)
+logger.info("Configuring Streamlit page...")
+try:
+    st.set_page_config(
+        page_title=APP_TITLE, 
+        layout="centered",
+        initial_sidebar_state="collapsed"
+    )
+    st.title(APP_TITLE)
+    logger.info("Streamlit page configured successfully")
+except Exception as e:
+    logger.error(f"Failed to configure Streamlit page: {e}")
+    raise
+
+# Lazy loading functions for heavy resources
+@st.cache_resource(show_spinner=False)
+def get_rag_system():
+    """Lazy load the RAG system"""
+    logger.info("Lazy loading RAG system...")
+    start_time = time.time()
+    from rag import rag_system
+    logger.info(f"RAG system loaded in {time.time() - start_time:.2f}s")
+    return rag_system
+
+@st.cache_resource(show_spinner=False) 
+def get_conversation_manager():
+    """Lazy load the conversation manager"""
+    logger.info("Lazy loading conversation manager...")
+    start_time = time.time()
+    from conversation import conversation_manager as cm
+    logger.info(f"Conversation manager loaded in {time.time() - start_time:.2f}s")
+    return cm
+
+@st.cache_resource(show_spinner=False)
+def get_hf_client():
+    """Lazy load the HF client"""
+    logger.info("Lazy loading HF client...")
+    start_time = time.time()
+    from llm_client import hf_client as hfc
+    logger.info(f"HF client loaded in {time.time() - start_time:.2f}s")
+    return hfc
+
+@st.cache_resource(show_spinner=False)
+def get_conversational_agent():
+    """Lazy load the conversational agent"""
+    logger.info("Lazy loading conversational agent...")
+    start_time = time.time()
+    from conversational_agent import conversational_agent as ca
+    logger.info(f"Conversational agent loaded in {time.time() - start_time:.2f}s")
+    return ca
+
+# Get lazy loaded instances
+conversation_manager = get_conversation_manager()
+hf_client = get_hf_client()
+conversational_agent = get_conversational_agent()
 
 # Enhanced intent handling now handled by conversation_manager
 
@@ -110,7 +222,10 @@ def handle_conversational_query(query: str):
         enhanced_query = conversation_manager.get_enhanced_query(query)
         
         logger.info(f"Processing RAG query: {query[:50]}... (mode: {conv_response.mode.value})")
-        context_chunks = retrieve(enhanced_query)
+        # Use lazy-loaded RAG system
+        rag_system = get_rag_system()
+        context_chunks = rag_system.retrieve(enhanced_query)
+        context_chunks = [result["text"] for result in context_chunks]
         
         # Step 5: Strict RAG-only validation
         if not context_chunks or len(context_chunks) == 0:
@@ -233,7 +348,7 @@ with st.sidebar:
                     st.error("❌ Hugging Face endpoint is not responding")
                 
                 # Check RAG system
-                from rag import rag_system
+                rag_system = get_rag_system()
                 if rag_system.index is not None:
                     st.success(f"✅ RAG index loaded ({len(rag_system.texts)} chunks)")
                 else:
@@ -241,8 +356,8 @@ with st.sidebar:
                     if st.button("Build Index from Sample Data"):
                         with st.spinner("Building index..."):
                             try:
-                                from rag import build_index
-                                build_index(force_rebuild=True)
+                                rag_system = get_rag_system()
+                                rag_system.build_index(force_rebuild=True)
                                 st.success("✅ Index built successfully!")
                                 st.rerun()
                             except Exception as e:
