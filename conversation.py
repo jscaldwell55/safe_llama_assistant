@@ -29,7 +29,7 @@ class ConversationContext:
 class ConversationManager:
     """Manages conversational state and context building"""
     
-    def __init__(self, max_turns: int = 5, session_timeout_minutes: int = 30):
+    def __init__(self, max_turns: int = 6, session_timeout_minutes: int = 30):
         self.max_turns = max_turns
         self.session_timeout = timedelta(minutes=session_timeout_minutes)
         self.conversation: Optional[ConversationContext] = None
@@ -64,11 +64,8 @@ class ConversationManager:
             if entity not in self.conversation.active_entities:
                 self.conversation.active_entities.append(entity)
         
-        # Keep only recent turns
-        if len(self.conversation.turns) > self.max_turns:
-            self.conversation.turns = self.conversation.turns[-self.max_turns:]
-            
-        logger.info(f"Added conversation turn. Total turns: {len(self.conversation.turns)}")
+        # Don't truncate turns here - we want to track all turns for session limit
+        logger.info(f"Added conversation turn. Total turns: {len(self.conversation.turns)}/{self.max_turns}")
     
     def _extract_entities(self, text: str) -> List[str]:
         """Basic entity extraction for drugs and medical terms"""
@@ -87,6 +84,22 @@ class ConversationManager:
                 entities.append(term)
                 
         return entities
+    
+    def is_session_limit_reached(self) -> bool:
+        """Check if the conversation has reached the turn limit"""
+        if not self.conversation:
+            return False
+        return len(self.conversation.turns) >= self.max_turns
+    
+    def get_turns_remaining(self) -> int:
+        """Get number of turns remaining in current session"""
+        if not self.conversation:
+            return self.max_turns
+        return max(0, self.max_turns - len(self.conversation.turns))
+    
+    def should_end_session(self) -> bool:
+        """Check if session should end (reached limit)"""
+        return self.is_session_limit_reached()
     
     def get_conversation_context(self) -> str:
         """Build conversation context for the prompt"""

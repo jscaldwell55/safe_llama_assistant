@@ -5,6 +5,7 @@ import logging
 import fitz  # PyMuPDF
 from typing import List, Tuple, Dict, Any
 from sentence_transformers import SentenceTransformer
+from semantic_chunker import SemanticChunker
 from config import (
     EMBEDDING_MODEL_NAME, 
     INDEX_PATH, 
@@ -22,8 +23,10 @@ class RAGSystem:
     Retrieval-Augmented Generation system for document search and retrieval.
     """
     
-    def __init__(self):
+    def __init__(self, chunking_strategy="hybrid"):
         self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        self.semantic_chunker = SemanticChunker()
+        self.chunking_strategy = chunking_strategy
         self.index = None
         self.texts = []
         self.metadata = []
@@ -47,7 +50,7 @@ class RAGSystem:
     
     def extract_chunks_from_pdf(self, pdf_path: str) -> List[Tuple[str, Dict[str, Any]]]:
         """
-        Extract text chunks from a PDF file with improved error handling.
+        Extract semantic chunks from a PDF file using the semantic chunker.
         
         Args:
             pdf_path (str): Path to the PDF file
@@ -59,37 +62,69 @@ class RAGSystem:
         try:
             doc = fitz.open(pdf_path)
             
+            # Extract all text from PDF first
+            full_text_pages = []
             for page_num in range(len(doc)):
                 try:
                     page = doc[page_num]
                     text = page.get_text()
                     
-                    if not text.strip():
-                        continue
-                    
-                    # Create overlapping chunks
-                    for i in range(0, len(text), CHUNK_SIZE - CHUNK_OVERLAP):
-                        chunk_text = text[i:i + CHUNK_SIZE]
-                        
-                        if len(chunk_text.strip()) < 50:  # Skip very short chunks
-                            continue
-                        
-                        metadata = {
-                            "source": os.path.basename(pdf_path),
-                            "page": page_num + 1,
-                            "chunk_id": len(chunks),
-                            "char_start": i,
-                            "char_end": min(i + CHUNK_SIZE, len(text))
-                        }
-                        
-                        chunks.append((chunk_text.strip(), metadata))
+                    if text.strip():
+                        full_text_pages.append((text, page_num + 1))
                         
                 except Exception as e:
                     logger.warning(f"Error processing page {page_num} in {pdf_path}: {e}")
                     continue
             
             doc.close()
-            logger.info(f"Extracted {len(chunks)} chunks from {pdf_path}")
+            
+            # Process each page with semantic chunking
+            for page_text, page_num in full_text_pages:
+                try:
+                    # Use semantic chunker
+                    semantic_chunks = self.semantic_chunker.semantic_chunk(
+                        page_text, 
+                        strategy=self.chunking_strategy,
+                        max_tokens=CHUNK_SIZE
+                    )
+                    
+                    for chunk_text, chunk_metadata in semantic_chunks:
+                        if len(chunk_text.strip()) < 50:  # Skip very short chunks
+                            continue
+                        
+                        # Enhance metadata with PDF-specific information
+                        enhanced_metadata = {
+                            "source": os.path.basename(pdf_path),
+                            "page": page_num,
+                            "chunk_id": len(chunks),
+                            "content_type": self.semantic_chunker.classify_content_type(chunk_text),
+                            "entities": self.semantic_chunker.extract_entities(chunk_text),
+                            **chunk_metadata  # Include semantic chunking metadata
+                        }
+                        
+                        chunks.append((chunk_text.strip(), enhanced_metadata))
+                        
+                except Exception as e:
+                    logger.warning(f"Error semantic chunking page {page_num} in {pdf_path}: {e}")
+                    # Fallback to simple chunking for this page
+                    for i in range(0, len(page_text), CHUNK_SIZE - CHUNK_OVERLAP):
+                        chunk_text = page_text[i:i + CHUNK_SIZE]
+                        
+                        if len(chunk_text.strip()) < 50:
+                            continue
+                        
+                        fallback_metadata = {
+                            "source": os.path.basename(pdf_path),
+                            "page": page_num,
+                            "chunk_id": len(chunks),
+                            "strategy": "fallback_fixed",
+                            "char_start": i,
+                            "char_end": min(i + CHUNK_SIZE, len(page_text))
+                        }
+                        
+                        chunks.append((chunk_text.strip(), fallback_metadata))
+            
+            logger.info(f"Extracted {len(chunks)} semantic chunks from {pdf_path}")
             
         except Exception as e:
             logger.error(f"Failed to process PDF {pdf_path}: {e}")
@@ -174,16 +209,18 @@ class RAGSystem:
         
         return False
     
-    def retrieve(self, query: str, k: int = TOP_K_RETRIEVAL) -> List[str]:
+    def retrieve(self, query: str, k: int = TOP_K_RETRIEVAL, 
+                content_type_filter: str = None) -> List[Dict[str, Any]]:
         """
-        Retrieve top-k most relevant text chunks for a query.
+        Retrieve top-k most relevant text chunks for a query with optional filtering.
         
         Args:
             query (str): The search query
             k (int): Number of chunks to retrieve
+            content_type_filter (str): Optional content type filter
             
         Returns:
-            List[str]: List of relevant text chunks
+            List[Dict[str, Any]]: List of {"text": chunk, "metadata": metadata} dicts
         """
         if self.index is None:
             logger.error("No index loaded. Please build the index first.")
@@ -191,12 +228,29 @@ class RAGSystem:
         
         try:
             query_vector = self.embedding_model.encode([query])
-            distances, indices = self.index.search(query_vector.astype('float32'), k)
+            
+            # Get more candidates for filtering
+            search_k = k * 3 if content_type_filter else k
+            distances, indices = self.index.search(query_vector.astype('float32'), search_k)
             
             retrieved_chunks = []
-            for idx in indices[0]:
+            for i, idx in enumerate(indices[0]):
                 if 0 <= idx < len(self.texts):
-                    retrieved_chunks.append(self.texts[idx])
+                    metadata = self.metadata[idx]
+                    
+                    # Apply content type filter if specified
+                    if content_type_filter and metadata.get('content_type') != content_type_filter:
+                        continue
+                    
+                    retrieved_chunks.append({
+                        "text": self.texts[idx],
+                        "metadata": metadata,
+                        "score": float(distances[0][i])
+                    })
+                    
+                    # Stop when we have enough results
+                    if len(retrieved_chunks) >= k:
+                        break
             
             logger.info(f"Retrieved {len(retrieved_chunks)} chunks for query: {query[:50]}...")
             return retrieved_chunks
@@ -216,21 +270,23 @@ class RAGSystem:
         
         return {}
 
-# Global RAG system instance
-rag_system = RAGSystem()
+# Global RAG system instance with semantic chunking
+rag_system = RAGSystem(chunking_strategy="hybrid")
 
-def retrieve(query: str, k: int = TOP_K_RETRIEVAL) -> List[str]:
+def retrieve(query: str, k: int = TOP_K_RETRIEVAL, content_type_filter: str = None) -> List[str]:
     """
     Convenience function for retrieving relevant chunks.
     
     Args:
         query (str): The search query
         k (int): Number of chunks to retrieve
+        content_type_filter (str): Optional content type filter
         
     Returns:
-        List[str]: List of relevant text chunks
+        List[str]: List of relevant text chunks (for backward compatibility)
     """
-    return rag_system.retrieve(query, k)
+    results = rag_system.retrieve(query, k, content_type_filter)
+    return [result["text"] for result in results]
 
 def build_index(pdf_directory: str = PDF_DATA_PATH, force_rebuild: bool = False):
     """
