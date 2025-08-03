@@ -11,6 +11,34 @@ class ContextFormatter:
     def __init__(self):
         self.min_chunk_relevance = 0.3
         self.max_context_length = 4000  # Character limit for context
+    
+    def clean_chunk_text(self, chunk: str) -> str:
+        """Clean chunk text by removing FAQ-style formatting and boilerplate"""
+        if not chunk:
+            return chunk
+            
+        # Remove common FAQ/Q&A formatting patterns
+        patterns_to_remove = [
+            r'^User Question:\s*',
+            r'^Question:\s*',
+            r'^Answer:\s*',
+            r'^Response:\s*',
+            r'^A:\s*',
+            r'^Q:\s*',
+            r'^\d+\.\s*Question:\s*',
+            r'^\d+\.\s*Answer:\s*',
+        ]
+        
+        cleaned = chunk
+        for pattern in patterns_to_remove:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.MULTILINE | re.IGNORECASE)
+        
+        # Remove excessive whitespace and normalize
+        cleaned = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned)  # Max 2 consecutive newlines
+        cleaned = re.sub(r'[ \t]+', ' ', cleaned)  # Normalize spaces
+        cleaned = cleaned.strip()
+        
+        return cleaned
         
     def score_chunk_relevance(self, chunk: str, query: str, conversation_entities: List[str] = None) -> float:
         """Score how relevant a chunk is to the query and conversation context"""
@@ -100,12 +128,17 @@ class ContextFormatter:
         if not chunks:
             return ""
         
-        # Score and filter chunks
+        # Clean and score chunks
         scored_chunks = []
         for chunk in chunks:
-            score = self.score_chunk_relevance(chunk, query, conversation_entities)
+            # Clean the chunk first
+            cleaned_chunk = self.clean_chunk_text(chunk)
+            if not cleaned_chunk:  # Skip empty chunks after cleaning
+                continue
+                
+            score = self.score_chunk_relevance(cleaned_chunk, query, conversation_entities)
             if score >= self.min_chunk_relevance:
-                scored_chunks.append((chunk, score))
+                scored_chunks.append((cleaned_chunk, score))
         
         # Sort by relevance score
         scored_chunks.sort(key=lambda x: x[1], reverse=True)
