@@ -6,7 +6,7 @@ try:
     HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
 except ImportError:
     HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
-HF_ENDPOINT = os.getenv("HF_ENDPOINT", "https://czgdlsyx0us2hmdt.us-east-1.aws.endpoints.huggingface.cloud/")
+HF_ENDPOINT = os.getenv("HF_ENDPOINT", "https://wlg3d5se4nwkpb0x.us-east-1.aws.endpoints.huggingface.cloud/")
 
 # Model Configuration
 MODEL_PARAMS = {
