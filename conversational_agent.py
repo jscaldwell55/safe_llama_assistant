@@ -1,13 +1,25 @@
-# conversational_agent.py
-
 import logging
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
+from typing import Dict, Any
+from dataclasses import dataclass, field
 from enum import Enum
 
-from conversation import conversation_manager
-from llm_client import call_answerability_agent, call_base_assistant
-from prompt import format_answerability_prompt, format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
+# Use lazy loading functions to avoid circular imports at startup
+def get_conversation_manager():
+    from conversation import get_conversation_manager
+    return get_conversation_manager()
+
+def get_llm_client_functions():
+    from llm_client import call_answerability_agent
+    return call_answerability_agent
+
+def get_prompt_functions():
+    from prompt import format_answerability_prompt
+    return format_answerability_prompt
+
+def get_rag_retriever():
+    # This function now encapsulates how to get the formatted context string
+    from rag import retrieve_and_format_context
+    return retrieve_and_format_context
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +28,12 @@ class ConversationMode(Enum):
     SESSION_END = "session_end"
 
 @dataclass
-class ConversationResponse:
-    text: str
-    mode: ConversationMode
-    requires_generation: bool
-    debug_info: Optional[Dict[str, Any]] = None
-    # Add context to pass to the final guard
-    context: Optional[str] = None
+class AgentDecision:
+    """The output of the agent's decision process. It's a set of instructions for app.py."""
+    mode: ConversationMode = ConversationMode.GENERAL
+    requires_generation: bool = False
+    context_str: str = ""
+    debug_info: Dict[str, Any] = field(default_factory=dict)
 
 class ConversationalAgent:
     """
@@ -30,42 +41,45 @@ class ConversationalAgent:
     from RAG context before deciding how to generate a response.
     """
     def __init__(self):
-        # Greetings can be handled without RAG or generation
         self.greetings = {"hello", "hi", "hey", "good morning", "good afternoon"}
 
     def _is_greeting(self, query: str) -> bool:
+        """Checks for simple, standalone greetings."""
         return query.lower().strip() in self.greetings
 
-    def process_conversation(self, query: str) -> ConversationResponse:
-        """Processes the query using the new RAG-then-Check workflow."""
+    def process_query(self, query: str) -> AgentDecision:
+        """Processes the query and returns instructions for the main app loop."""
+        conversation_manager = get_conversation_manager()
+
         if conversation_manager.should_end_session():
-            return ConversationResponse(
-                text="Session limit reached. Please start a new conversation.",
+            return AgentDecision(
                 mode=ConversationMode.SESSION_END,
-                requires_generation=False,
-                debug_info={"reason": "Session limit"}
+                debug_info={"reason": "Session limit reached."}
             )
 
         if self._is_greeting(query):
-            return ConversationResponse(
-                text="Hello! How can I help you with our documentation today?",
-                mode=ConversationMode.GENERAL,
+            # For a simple greeting, we don't need to generate a response.
+            # We can return the final text directly.
+            return AgentDecision(
                 requires_generation=False,
                 debug_info={"reason": "Handled as simple greeting."}
             )
 
-        # 1. ALWAYS PERFORM RAG SEARCH
+        # 1. ALWAYS PERFORM RAG SEARCH for non-greetings
         enhanced_query = conversation_manager.get_enhanced_query(query)
-        logger.info(f"Performing RAG search for query: {enhanced_query}")
+        context_str = ""
         try:
-            from rag import retrieve_and_format_context
-            # Assuming a function that retrieves and formats context chunks into a single string
+            retrieve_and_format_context = get_rag_retriever()
             context_str = retrieve_and_format_context(enhanced_query)
+            logger.info(f"Retrieved context of length {len(context_str)} for query.")
         except Exception as e:
-            logger.error(f"RAG retrieval failed: {e}")
-            context_str = ""
+            logger.error(f"RAG retrieval failed: {e}", exc_info=True)
+            # Proceed with an empty context
 
         # 2. PERFORM ANSWERABILITY CHECK (LLM-based gate)
+        format_answerability_prompt = get_prompt_functions()
+        call_answerability_agent = get_llm_client_functions()
+        
         answerability_prompt = format_answerability_prompt(query, context_str)
         classification, rationale = call_answerability_agent(answerability_prompt)
         
@@ -76,30 +90,18 @@ class ConversationalAgent:
             "answerability_rationale": rationale,
         }
 
-        # 3. CONDITIONAL GENERATION
-        if classification in ["FULLY_ANSWERABLE", "PARTIALLY_ANSWERABLE"]:
-            logger.info("Query is answerable. Generating grounded response.")
-            # This is where you would implement the 2-step (skeleton->synthesis) generation.
-            # For simplicity here, we'll use a direct generation prompt.
-            generation_prompt = format_conversational_prompt(
-                query,
-                context_str,
-                conversation_manager.get_formatted_history()
-            )
-            response_text = call_base_assistant(generation_prompt)
-        else: # NOT_ANSWERABLE
-            logger.info("Query is not answerable from context. Generating gap acknowledgement.")
-            # Use a specific prompt to generate a safe "I don't know" response
-            prompt = ACKNOWLEDGE_GAP_PROMPT.format(user_question=query, rationale=rationale)
-            response_text = call_base_assistant(prompt)
-
-        return ConversationResponse(
-            text=response_text,
-            mode=ConversationMode.GENERAL,
+        # 3. Return instructions to app.py
+        # The agent's decision is that generation is required, and here's the context to use.
+        return AgentDecision(
             requires_generation=True,
-            debug_info=debug_info,
-            context=context_str  # Pass context for the final guard
+            context_str=context_str,
+            debug_info=debug_info
         )
 
-# Global instance
-conversational_agent = ConversationalAgent()
+# Use a lazy-loading function for the global instance
+_agent_instance = None
+def get_conversational_agent():
+    global _agent_instance
+    if _agent_instance is None:
+        _agent_instance = ConversationalAgent()
+    return _agent_instance
