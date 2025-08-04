@@ -155,11 +155,18 @@ def handle_conversational_query(query: str):
         intent, topic = conversation_manager.classify_intent(query)
         conversation_context = conversation_manager.get_conversation_context()
         
-        # Step 3: Get RAG content (already retrieved by conversational agent)
+        # Step 3: Get RAG content only if needed (already checked by conversational agent)
         enhanced_query = conv_response.debug_info.get("enhanced_query", query)
-        rag_system = get_rag_system()
-        context_chunks = rag_system.retrieve(enhanced_query)
-        context_chunks = [result["text"] for result in context_chunks]
+        
+        if conv_response.has_rag_content:
+            # Only load RAG system if we actually have content to retrieve
+            rag_system = get_rag_system()
+            context_chunks = rag_system.retrieve(enhanced_query)
+            context_chunks = [result["text"] for result in context_chunks]
+        else:
+            # Skip RAG retrieval entirely
+            context_chunks = []
+            logger.info("Skipping RAG system loading - no content needed")
         
         # Step 4: Format context for the model
         conversation_entities = conversation_manager.conversation.active_entities if conversation_manager.conversation else []

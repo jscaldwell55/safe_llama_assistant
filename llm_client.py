@@ -2,6 +2,8 @@ import requests
 import json
 import logging
 from typing import Dict, Any, Optional
+from functools import lru_cache
+import hashlib
 from config import HF_TOKEN, HF_INFERENCE_ENDPOINT, MODEL_PARAMS
 
 logging.basicConfig(level=logging.INFO)
@@ -17,12 +19,34 @@ class HuggingFaceClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
+        # Initialize session for connection pooling
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+        # Configure connection pooling
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=10,
+            max_retries=0  # We handle retries manually
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
         # Don't perform any network operations during init
         logger.info(f"HuggingFaceClient initialized with endpoint: {endpoint[:30]}...")
     
+    def _cache_key(self, prompt: str, parameters: Dict[str, Any]) -> str:
+        """Generate a cache key from prompt and parameters"""
+        cache_data = json.dumps({"prompt": prompt, "params": parameters}, sort_keys=True)
+        return hashlib.md5(cache_data.encode()).hexdigest()
+    
+    @lru_cache(maxsize=100)
+    def _cached_generate(self, cache_key: str, prompt: str, params_json: str) -> str:
+        """Cached version of generate_response. Uses cache_key for caching."""
+        parameters = json.loads(params_json)
+        return self._generate_response_internal(prompt, parameters)
+    
     def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
         """
-        Generate a response from the Hugging Face model.
+        Generate a response from the Hugging Face model with caching.
         
         Args:
             prompt (str): The input prompt to send to the model
@@ -34,6 +58,15 @@ class HuggingFaceClient:
         if parameters is None:
             parameters = MODEL_PARAMS.copy()
         
+        # Generate cache key and call cached version
+        cache_key = self._cache_key(prompt, parameters)
+        params_json = json.dumps(parameters, sort_keys=True)
+        
+        logger.info(f"Cache lookup for key: {cache_key[:8]}...")
+        return self._cached_generate(cache_key, prompt, params_json)
+    
+    def _generate_response_internal(self, prompt: str, parameters: Dict[str, Any]) -> str:
+        """Internal method that actually makes the API call"""
         payload = {
             "inputs": prompt,
             "parameters": parameters
@@ -46,9 +79,8 @@ class HuggingFaceClient:
         for attempt in range(max_retries):
             try:
                 logger.info(f"Sending request to HF endpoint (attempt {attempt + 1}/{max_retries})")
-                response = requests.post(
+                response = self.session.post(
                     self.endpoint, 
-                    headers=self.headers, 
                     json=payload,
                     timeout=60  # Increased timeout for longer responses
                 )
@@ -114,9 +146,8 @@ class HuggingFaceClient:
                 "inputs": "Hello",
                 "parameters": {"max_new_tokens": 1}
             }
-            response = requests.post(
+            response = self.session.post(
                 self.endpoint,
-                headers=self.headers,
                 json=test_payload,
                 timeout=10
             )
