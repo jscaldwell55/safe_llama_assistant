@@ -45,12 +45,12 @@ class HuggingFaceClient:
         
         for attempt in range(max_retries):
             try:
-                logger.info(f"Sending request to HF endpoint: {self.endpoint} (attempt {attempt + 1}/{max_retries})")
+                logger.info(f"Sending request to HF endpoint (attempt {attempt + 1}/{max_retries})")
                 response = requests.post(
                     self.endpoint, 
                     headers=self.headers, 
                     json=payload,
-                    timeout=30
+                    timeout=60  # Increased timeout for longer responses
                 )
                 response.raise_for_status()
                 
@@ -84,7 +84,7 @@ class HuggingFaceClient:
                     continue
                 else:
                     logger.error(f"HTTP error after {attempt + 1} attempts: {e}")
-                    return f"[Error: Request failed - {str(e)}]"
+                    return f"I apologize, but I'm having trouble connecting to my services right now. Please try again in a moment."
             except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"Request failed, retrying in {retry_delay} seconds: {e}")
@@ -94,13 +94,13 @@ class HuggingFaceClient:
                     continue
                 else:
                     logger.error(f"Request failed after {max_retries} attempts: {e}")
-                    return f"[Error: Request failed - {str(e)}]"
+                    return f"I'm sorry, I'm experiencing connection issues. Please try again later."
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to decode JSON response: {e}")
-                return "[Error: Invalid response format]"
+                return "I received an unexpected response format. Please try again."
             except Exception as e:
                 logger.error(f"Unexpected error during model inference: {e}")
-                return f"[Error: {str(e)}]"
+                return f"I encountered an unexpected error. Please try again or start a new conversation."
     
     def health_check(self) -> bool:
         """
@@ -143,7 +143,7 @@ def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -
 
 def call_base_assistant(prompt: str) -> str:
     """
-    Call the base assistant with optimized parameters.
+    Call the base assistant with parameters optimized for natural conversation.
     
     Args:
         prompt (str): The formatted prompt for the base assistant
@@ -153,8 +153,10 @@ def call_base_assistant(prompt: str) -> str:
     """
     base_params = MODEL_PARAMS.copy()
     base_params.update({
-        "temperature": 0.2,  # Lower temperature for more consistent responses
-        "top_p": 0.8
+        "temperature": 0.7,  # Higher temperature for more natural, varied responses
+        "top_p": 0.9,        # Higher top_p for more diverse vocabulary
+        "repetition_penalty": 1.1,  # Slight penalty to avoid repetitive phrasing
+        "max_new_tokens": 512  # Allow longer responses for natural conversation
     })
     return hf_client.generate_response(prompt, base_params)
 
@@ -171,7 +173,8 @@ def call_guard_agent(prompt: str) -> str:
     guard_params = MODEL_PARAMS.copy()
     guard_params.update({
         "temperature": 0.1,  # Very low temperature for consistent evaluation
-        "max_new_tokens": 50,  # Short responses for guard decisions
-        "top_p": 0.7
+        "max_new_tokens": 150,  # Increased to allow for intent and reasoning
+        "top_p": 0.7,
+        "repetition_penalty": 1.0  # No penalty for guard - we want consistent format
     })
     return hf_client.generate_response(prompt, guard_params)

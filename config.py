@@ -6,28 +6,51 @@ try:
     HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
 except (ImportError, FileNotFoundError, AttributeError):
     HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
+
 HF_ENDPOINT = os.getenv("HF_ENDPOINT", "https://wlg3d5se4nwkpb0x.us-east-1.aws.endpoints.huggingface.cloud/")
 
-# Model Configuration
+# Model Configuration - Optimized for natural conversation
 MODEL_PARAMS = {
-    "max_new_tokens": 300,
-    "temperature": 0.3,
+    "max_new_tokens": 512,      # Increased for fuller responses
+    "temperature": 0.7,         # Higher for more natural variation
     "do_sample": True,
-    "top_p": 0.9
+    "top_p": 0.9,              # Higher for richer vocabulary
+    "repetition_penalty": 1.1,  # Avoid repetitive phrasing
+    "return_full_text": False   # Don't return the prompt in response
 }
 
-# RAG Configuration
+# RAG Configuration - Enhanced for better retrieval
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
-TOP_K_RETRIEVAL = 5
+CHUNK_SIZE = 800              # Larger chunks for more context
+CHUNK_OVERLAP = 150           # More overlap to preserve context
+TOP_K_RETRIEVAL = 8           # More candidates for better coverage
 INDEX_PATH = "faiss_index"
 PDF_DATA_PATH = "data"
 
+# Semantic Chunking Configuration
+CHUNKING_STRATEGY = "hybrid"  # Can be: sections, paragraphs, sentences, recursive, hybrid
+MAX_CHUNK_TOKENS = 800        # Maximum tokens per semantic chunk
+
 # Guard Agent Configuration
-GUARD_THRESHOLD = 0.7
 ENABLE_GUARD = True
+SEMANTIC_SIMILARITY_THRESHOLD = 0.7  # For grounding validation
+
+# Conversation Configuration
+MAX_CONVERSATION_TURNS = 10   # Reasonable conversation length
+SESSION_TIMEOUT_MINUTES = 30   # Auto-end inactive sessions
+MAX_CONTEXT_LENGTH = 4000     # Characters for context window
 
 # UI Configuration
 APP_TITLE = "🛡️ Safe Enterprise Assistant"
-DEFAULT_FALLBACK_MESSAGE = "I'm sorry, I don't have that information in my knowledge base."
+DEFAULT_FALLBACK_MESSAGE = "I don't have that information in our knowledge base. Could you rephrase your question or ask about something else?"
+
+# System Messages - Simple and trust-based
+SYSTEM_MESSAGES = {
+    "no_context": "I don't have information about that in our documentation. Would you like to ask about something else?",
+    "error": "I encountered an error processing your request. Please try again or start a new conversation.",
+    "session_end": "We've reached the conversation limit. Thank you for chatting! Please start a new conversation to continue."
+}
+
+# Logging Configuration
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'

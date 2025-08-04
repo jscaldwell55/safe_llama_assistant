@@ -23,8 +23,6 @@ except Exception as e:
     logger.error(f"Failed to import config: {e}")
     raise
 
-# RAG module will be lazy loaded
-
 try:
     logger.info("Importing prompt module...")
     from prompt import format_conversational_prompt
@@ -33,7 +31,6 @@ except Exception as e:
     logger.error(f"Failed to import prompt: {e}")
     raise
 
-# LLM client will be lazy loaded
 try:
     logger.info("Importing llm_client functions...")
     from llm_client import call_base_assistant
@@ -50,8 +47,6 @@ except Exception as e:
     logger.error(f"Failed to import guard: {e}")
     raise
 
-# Conversation manager will be lazy loaded
-
 try:
     logger.info("Importing context_formatter module...")
     from context_formatter import context_formatter
@@ -66,14 +61,6 @@ try:
     logger.info(f"ConversationMode imported successfully")
 except Exception as e:
     logger.error(f"Failed to import conversational_agent: {e}")
-    raise
-
-try:
-    logger.info("Importing difflib...")
-    from difflib import SequenceMatcher
-    logger.info(f"Difflib imported successfully")
-except Exception as e:
-    logger.error(f"Failed to import difflib: {e}")
     raise
 
 logger.info(f"=== All imports completed in {time.time() - start_time:.2f}s ===")
@@ -134,35 +121,9 @@ conversation_manager = get_conversation_manager()
 hf_client = get_hf_client()
 conversational_agent = get_conversational_agent()
 
-# Enhanced intent handling now handled by conversation_manager
-
-def get_greeting_response():
-    """Return greeting response"""
-    return """👋 **Hello! I'm your enterprise knowledge assistant.**
-
-I'm here to help you find information from our knowledge base. You can:
-
-• Ask questions about our documentation
-• Search for specific information or data
-• Get insights from our enterprise content
-
-What would you like to know today?"""
-
-def get_help_response():
-    """Return help information"""
-    return """🤖 **How I can help you:**
-
-• Ask questions about our enterprise knowledge base
-• Get information from our documentation
-• Find relevant data and insights
-
-**Note:** I can only provide information based on the content in our knowledge base. For specific medical, legal, or financial advice, please consult appropriate professionals.
-
-What would you like to know?"""
-
 def handle_conversational_query(query: str):
     """
-    Process a conversational query through enhanced conversational agent with RAG-only policy.
+    Simplified query processing that trusts the model's conversational abilities.
     
     Args:
         query (str): The user's question
@@ -171,14 +132,12 @@ def handle_conversational_query(query: str):
         dict: Response information including final answer, context, and debug info
     """
     try:
-        # Step 1: Use conversational agent to determine response strategy
+        # Step 1: Check for session management
         conv_response = conversational_agent.process_conversation(query)
         
-        # Step 2: Handle session end specially
+        # Handle session end
         if conv_response.mode == ConversationMode.SESSION_END:
-            # Auto-reset conversation after session end
             conversation_manager.start_new_conversation()
-            
             return {
                 "success": True,
                 "response": conv_response.text,
@@ -187,93 +146,44 @@ def handle_conversational_query(query: str):
                 "intent": conv_response.mode.value,
                 "topic": None,
                 "session_ended": True,
-                "debug_info": {
-                    "conversation_mode": conv_response.mode.value,
-                    "confidence": conv_response.confidence,
-                    "follow_up_suggestions": conv_response.follow_up_suggestions,
-                    "session_auto_reset": True
-                }
+                "debug_info": conv_response.debug_info
             }
         
-        # Step 3: Handle responses that don't need RAG content
-        if not conv_response.has_rag_content:
-            # Update conversation for social interactions
-            if conv_response.mode in [ConversationMode.GREETING, ConversationMode.HELP]:
-                conversation_manager.start_new_conversation()
-            
-            return {
-                "success": True,
-                "response": conv_response.text,
-                "approved": True,  # Pre-approved conversational responses
-                "context": [],
-                "intent": conv_response.mode.value,
-                "topic": None,
-                "debug_info": {
-                    "conversation_mode": conv_response.mode.value,
-                    "confidence": conv_response.confidence,
-                    "follow_up_suggestions": conv_response.follow_up_suggestions,
-                    "rag_content_required": False
-                }
-            }
-        
-        # Step 4: For responses requiring RAG content, proceed with retrieval
+        # Step 2: Get conversation context
         intent, topic = conversation_manager.classify_intent(query)
         conversation_context = conversation_manager.get_conversation_context()
-        enhanced_query = conversation_manager.get_enhanced_query(query)
         
-        logger.info(f"Processing RAG query: {query[:50]}... (mode: {conv_response.mode.value})")
-        # Use lazy-loaded RAG system
+        # Step 3: Get RAG content (already retrieved by conversational agent)
+        enhanced_query = conv_response.debug_info.get("enhanced_query", query)
         rag_system = get_rag_system()
         context_chunks = rag_system.retrieve(enhanced_query)
         context_chunks = [result["text"] for result in context_chunks]
         
-        # Step 5: Strict RAG-only validation
-        if not context_chunks or len(context_chunks) == 0:
-            fallback_response = "I'm sorry, I don't seem to have any information on that. Can I help you with something else?"
-            
-            # Add conversational context for follow-ups
-            if conv_response.mode == ConversationMode.FOLLOW_UP and conversation_context:
-                fallback_response = "I don't have additional information on that topic in our knowledge base. Would you like to explore something else?"
-            
-            return {
-                "success": False,
-                "response": fallback_response,
-                "approved": True,  # Pre-approved fallback
-                "context": [],
-                "intent": conv_response.mode.value,
-                "topic": topic,
-                "debug_info": {
-                    "conversation_mode": conv_response.mode.value,
-                    "error": "No RAG content found",
-                    "enhanced_query": enhanced_query,
-                    "rag_content_required": True
-                }
-            }
-        
-        # Step 6: Format context and generate response
+        # Step 4: Format context for the model
         conversation_entities = conversation_manager.conversation.active_entities if conversation_manager.conversation else []
-        formatted_context = context_formatter.format_enhanced_context(
-            context_chunks, query, conversation_context, conversation_entities
+        
+        if context_chunks:
+            formatted_context = context_formatter.format_enhanced_context(
+                context_chunks, query, conversation_context, conversation_entities
+            )
+        else:
+            formatted_context = ""
+        
+        # Step 5: Let the model generate naturally
+        prompt = format_conversational_prompt(
+            query, formatted_context, conversation_context, intent, topic
         )
         
-        # Step 7: Generate RAG-based response with conversational enhancement
-        base_prompt = format_conversational_prompt(
-            query, formatted_context, conversation_context, conv_response.mode.value, topic
-        )
-        assistant_response = call_base_assistant(base_prompt)
+        # Model generates response
+        model_response = call_base_assistant(prompt)
         
-        # Step 8: Enhance with conversational elements
-        enhanced_response = conversational_agent.enhance_response_with_conversational_elements(
-            assistant_response, conv_response.mode, query
-        )
-        
-        # Step 9: Guard evaluation with enhanced RAG-only checking
-        context_text = "\n\n".join(context_chunks)
+        # Step 6: Guard evaluation
+        context_text = "\n\n".join(context_chunks) if context_chunks else ""
         is_approved, final_response, guard_reasoning = evaluate_response(
-            context_text, query, enhanced_response
+            context_text, query, model_response, conversation_context
         )
         
-        # Step 10: Update conversation history
+        # Step 7: Update conversation history if approved
         if is_approved:
             conversation_manager.add_turn(query, final_response, context_chunks, topic)
         
@@ -282,17 +192,15 @@ def handle_conversational_query(query: str):
             "response": final_response,
             "approved": is_approved,
             "context": context_chunks,
-            "intent": conv_response.mode.value,
+            "intent": intent,
             "topic": topic,
             "debug_info": {
-                "conversation_mode": conv_response.mode.value,
-                "base_prompt": base_prompt,
-                "assistant_response": assistant_response,
-                "enhanced_response": enhanced_response,
+                "prompt": prompt if is_approved else "[Hidden due to rejection]",
+                "model_response": model_response if is_approved else "[Hidden due to rejection]",
                 "guard_reasoning": guard_reasoning,
                 "enhanced_query": enhanced_query,
                 "conversation_context": conversation_context,
-                "confidence": conv_response.confidence
+                "has_rag_content": len(context_chunks) > 0
             }
         }
         
@@ -300,7 +208,8 @@ def handle_conversational_query(query: str):
         logger.error(f"Error processing query: {e}")
         return {
             "success": False,
-            "response": "I'm sorry, there was an error processing your request.",
+            "response": "I'm sorry, there was an error processing your request. Please try again or start a new conversation.",
+            "approved": False,
             "context": [],
             "debug_info": {"error": str(e)}
         }
@@ -313,7 +222,7 @@ with st.sidebar:
     
     # Conversation controls
     st.subheader("💬 Conversation")
-    if st.button("New Conversation"):
+    if st.button("New Conversation", type="primary"):
         conversation_manager.start_new_conversation()
         st.success("Started new conversation")
         st.rerun()
@@ -325,27 +234,31 @@ with st.sidebar:
         
         if turn_count > 0:
             if turns_remaining > 0:
-                st.info(f"📊 Conversation: {turn_count}/{conversation_manager.max_turns} turns")
-                if turns_remaining <= 2:
-                    st.warning(f"⚠️ {turns_remaining} turns remaining before session ends")
+                st.info(f"📊 Turns: {turn_count}/{conversation_manager.max_turns}")
+                if turns_remaining <= 3:
+                    st.warning(f"⚠️ Only {turns_remaining} turns remaining!")
             else:
-                st.error("🔴 Session limit reached - next response will end session")
+                st.error("🔴 Session limit reached")
                 
             if conversation_manager.conversation.current_topic:
-                st.info(f"💬 Topic: {conversation_manager.conversation.current_topic}")
+                st.caption(f"💬 Topic: {conversation_manager.conversation.current_topic}")
+                
+            if conversation_manager.conversation.active_entities:
+                entities_display = ", ".join(conversation_manager.conversation.active_entities[-3:])
+                st.caption(f"🔍 Entities: {entities_display}")
         else:
             st.info("💫 Ready to start conversation")
     
     # Health check
-    with st.expander("System Status"):
-        if st.button("Check System Health"):
+    with st.expander("🏥 System Status"):
+        if st.button("Check Health"):
             with st.spinner("Checking system health..."):
                 # Check HF endpoint
                 hf_healthy = hf_client.health_check()
                 if hf_healthy:
-                    st.success("✅ Hugging Face endpoint is healthy")
+                    st.success("✅ LLM endpoint healthy")
                 else:
-                    st.error("❌ Hugging Face endpoint is not responding")
+                    st.error("❌ LLM endpoint not responding")
                 
                 # Check RAG system
                 rag_system = get_rag_system()
@@ -353,72 +266,88 @@ with st.sidebar:
                     st.success(f"✅ RAG index loaded ({len(rag_system.texts)} chunks)")
                 else:
                     st.warning("⚠️ No RAG index found")
-                    if st.button("Build Index from Sample Data"):
+                    if st.button("Build Index"):
                         with st.spinner("Building index..."):
                             try:
-                                rag_system = get_rag_system()
                                 rag_system.build_index(force_rebuild=True)
-                                st.success("✅ Index built successfully!")
+                                st.success("✅ Index built!")
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"❌ Failed to build index: {e}")
+                                st.error(f"❌ Failed: {e}")
 
 # Main interface
-st.markdown("### Ask me anything about our knowledge base")
+st.markdown("### 💬 Ask me anything about our knowledge base")
 
 # Input section
 query = st.text_input(
-    "Enter your question:",
+    "Your question:",
     placeholder="What would you like to know?",
-    help="Ask questions about the content in our knowledge base"
+    help="I can help you find information from our enterprise knowledge base",
+    key="query_input"
 )
 
-col1, col2 = st.columns([1, 4])
+col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
-    submit = st.button("Submit", type="primary")
+    submit = st.button("🚀 Submit", type="primary", use_container_width=True)
 with col2:
-    if st.button("Clear"):
-        st.rerun()
+    clear = st.button("🧹 Clear", use_container_width=True)
+with col3:
+    # Show remaining turns
+    if conversation_manager.conversation:
+        remaining = conversation_manager.get_turns_remaining()
+        if remaining <= 3 and remaining > 0:
+            st.caption(f"⏳ {remaining} left")
 
 # Main processing logic
 if submit and query:
     # Process all queries through the conversational agent
-    with st.spinner("🤖 Processing your question..."):
+    with st.spinner("🤖 Thinking..."):
         result = handle_conversational_query(query)
     
     # Display results
     if result["success"]:
-        # Main response
-        if result["approved"]:
-            # Use different styling based on conversation mode
-            if result.get("intent") == "session_end":
-                st.warning(f"**Assistant:** {result['response']}")
-                if result.get("session_ended"):
-                    st.info("🔄 Session has been automatically reset. You can start a new conversation now!")
-            elif result.get("intent") in ["greeting", "help", "chitchat"]:
-                st.info(f"**Assistant:** {result['response']}")
+        # Main response container
+        response_container = st.container()
+        
+        with response_container:
+            # Display based on response type and approval
+            if result["approved"]:
+                # Use different styling based on conversation mode
+                if result.get("intent") == "session_end":
+                    st.warning(f"**Assistant:** {result['response']}")
+                    if result.get("session_ended"):
+                        st.info("🔄 Session has been automatically reset. You can start a new conversation now!")
+                elif result.get("intent") in ["greeting", "help"]:
+                    st.info(f"**Assistant:** {result['response']}")
+                elif result.get("intent") == "chitchat":
+                    st.success(f"**Assistant:** {result['response']}")
+                else:
+                    # Information responses
+                    if result.get("context"):
+                        st.success(f"**Assistant:** {result['response']}")
+                    else:
+                        # No context found
+                        st.warning(f"**Assistant:** {result['response']}")
             else:
-                st.success(f"**Assistant:** {result['response']}")
-        else:
-            st.error("⚠️ **Safety Filter Active**")
-            st.warning(result['response'])
-            
-            if debug_mode:
-                with st.expander("🛡️ Guard Details"):
-                    st.write(f"**Reason:** {result['debug_info'].get('guard_reasoning', 'Unknown')}")
-                    if 'assistant_response' in result['debug_info']:
-                        st.write(f"**Original Response:** {result['debug_info']['assistant_response']}")
+                # Response was rejected by guard
+                st.error("⚠️ **Safety Filter Active**")
+                st.warning(f"**Assistant:** {result['response']}")
+                
+                if debug_mode and "guard_reasoning" in result.get("debug_info", {}):
+                    with st.expander("🛡️ Guard Details"):
+                        st.write(f"**Reason:** {result['debug_info']['guard_reasoning']}")
         
         # Context display (only show if there's actual RAG content)
-        if show_context and result["context"] and len(result["context"]) > 0:
+        if show_context and result.get("context") and len(result["context"]) > 0:
             with st.expander(f"📚 Retrieved Context ({len(result['context'])} chunks)"):
                 for i, chunk in enumerate(result["context"]):
                     st.markdown(f"**Chunk {i+1}:**")
-                    st.text(chunk[:300] + "..." if len(chunk) > 300 else chunk)
-                    st.divider()
+                    st.text(chunk[:500] + "..." if len(chunk) > 500 else chunk)
+                    if i < len(result["context"]) - 1:
+                        st.divider()
         
         # Show follow-up suggestions if available
-        if "follow_up_suggestions" in result.get("debug_info", {}) and result["debug_info"]["follow_up_suggestions"]:
+        if result.get("debug_info", {}).get("follow_up_suggestions"):
             with st.expander("💡 Suggestions"):
                 for suggestion in result["debug_info"]["follow_up_suggestions"]:
                     st.write(f"• {suggestion}")
@@ -426,28 +355,35 @@ if submit and query:
         # Debug information
         if debug_mode:
             with st.expander("🔧 Debug Information"):
-                debug_info = result["debug_info"].copy()
-                # Add conversation info
-                debug_info["intent"] = result.get("intent", "unknown")
-                debug_info["topic"] = result.get("topic", "none")
-                debug_info["has_rag_content"] = len(result.get("context", [])) > 0
-                st.json(debug_info)
+                # Create safe debug info
+                safe_debug = result.get("debug_info", {}).copy()
+                
+                # Add additional debug context
+                safe_debug["intent"] = result.get("intent", "unknown")
+                safe_debug["topic"] = result.get("topic", "none")
+                safe_debug["has_rag_content"] = len(result.get("context", [])) > 0
+                safe_debug["response_approved"] = result.get("approved", False)
+                
+                # Display as formatted JSON
+                st.json(safe_debug)
     else:
-        # Handle errors with conversational tone
-        if "I don't seem to have any information" in result['response']:
-            st.warning(f"**Assistant:** {result['response']}")
-        else:
-            st.error(f"❌ **Error:** {result['response']}")
+        # Error handling
+        st.error(f"❌ {result['response']}")
         
         if debug_mode and "debug_info" in result:
-            st.code(result["debug_info"])
+            with st.expander("🔧 Error Details"):
+                st.json(result["debug_info"])
+
+elif clear:
+    st.rerun()
 
 # Footer
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: #666; font-size: 0.8em;'>"
-    "🛡️ This assistant engages naturally in conversation while strictly using only information from our knowledge base. "
-    "When information isn't available, I'll let you know honestly."
+    "<div style='text-align: center; color: #666; font-size: 0.85em; padding: 10px;'>"
+    "🛡️ <b>Enterprise Safe Assistant</b><br>"
+    "I provide information exclusively from our knowledge base. "
+    "When information isn't available, I'll let you know honestly and suggest alternatives."
     "</div>", 
     unsafe_allow_html=True
 )

@@ -1,20 +1,38 @@
-import spacy
+import nltk
 from typing import List, Dict, Any, Tuple
-from langchain_text_splitters import RecursiveCharacterTextSplitter, SpacyTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import re
 import logging
+
+# Download required NLTK data if not present
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt_tab')
+try:
+    nltk.data.find('chunkers/maxent_ne_chunker_tab')
+except LookupError:
+    nltk.download('maxent_ne_chunker_tab')
+try:
+    nltk.data.find('corpora/words')
+except LookupError:
+    nltk.download('words')
+try:
+    nltk.data.find('taggers/averaged_perceptron_tagger_eng')
+except LookupError:
+    nltk.download('averaged_perceptron_tagger_eng')
 
 logger = logging.getLogger(__name__)
 
 class SemanticChunker:
     """
-    Semantic chunking for medical documents using spacy and langchain.
+    Semantic chunking for medical documents using NLTK and langchain.
     Preserves document structure and semantic boundaries.
     """
     
-    def __init__(self, model_name="en_core_web_sm"):
-        self.model_name = model_name
-        self._nlp = None
+    def __init__(self):
+        # Initialize NLTK sentence tokenizer
+        self.sent_tokenizer = nltk.tokenize.PunktSentenceTokenizer()
         
         # Initialize text splitters
         self.recursive_splitter = RecursiveCharacterTextSplitter(
@@ -23,22 +41,7 @@ class SemanticChunker:
             length_function=len,
             separators=["\n\n", "\n", ". ", " ", ""]
         )
-        
-        # Note: SpacyTextSplitter will load the model when needed
-        self.spacy_splitter = None
     
-    @property
-    def nlp(self):
-        """Lazy load spacy model"""
-        if self._nlp is None:
-            try:
-                self._nlp = spacy.load(self.model_name)
-                logger.info(f"Loaded spacy model: {self.model_name}")
-            except OSError:
-                logger.error(f"Failed to load spacy model: {self.model_name}. Please run: python -m spacy download {self.model_name}")
-                # Fallback to basic splitting if spacy fails
-                return None
-        return self._nlp
     
     def extract_sections(self, text: str) -> List[Dict[str, Any]]:
         """
@@ -102,20 +105,21 @@ class SemanticChunker:
     
     def chunk_by_sentences(self, text: str, max_tokens: int = 600) -> List[str]:
         """
-        Chunk text by sentence boundaries using spacy.
+        Chunk text by sentence boundaries using NLTK.
         Preserves sentence integrity.
         """
         if not text.strip():
             return []
         
-        # Fallback to simple sentence splitting if spacy fails
-        if self.nlp is None:
-            # Simple regex-based sentence splitting
+        # Use NLTK's sentence tokenizer
+        try:
+            sentences = self.sent_tokenizer.tokenize(text)
+            sentences = [s.strip() for s in sentences if s.strip()]
+        except Exception as e:
+            logger.warning(f"NLTK sentence tokenization failed: {e}. Falling back to regex.")
+            # Fallback to simple regex-based sentence splitting
             sentences = re.split(r'[.!?]+', text)
             sentences = [s.strip() for s in sentences if s.strip()]
-        else:
-            doc = self.nlp(text)
-            sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
         
         chunks = []
         current_chunk = []
@@ -284,24 +288,38 @@ class SemanticChunker:
     
     def extract_entities(self, text: str) -> Dict[str, List[str]]:
         """
-        Extract named entities from text using spacy.
+        Extract named entities from text using NLTK.
         Useful for drug names, organizations, etc.
         """
-        if self.nlp is None:
-            # Return empty dict if spacy is not available
-            logger.warning("Spacy model not available for entity extraction")
-            return {}
+        try:
+            # Tokenize text into sentences and words
+            sentences = self.sent_tokenizer.tokenize(text)
+            entities = {}
             
-        doc = self.nlp(text)
-        entities = {}
-        
-        for ent in doc.ents:
-            if ent.label_ not in entities:
-                entities[ent.label_] = []
-            if ent.text not in entities[ent.label_]:
-                entities[ent.label_].append(ent.text)
-        
-        return entities
+            for sentence in sentences:
+                # Tokenize words
+                tokens = nltk.word_tokenize(sentence)
+                # Part-of-speech tagging
+                pos_tags = nltk.pos_tag(tokens)
+                # Named entity recognition
+                ne_tree = nltk.ne_chunk(pos_tags, binary=False)
+                
+                # Extract entities from the tree
+                for subtree in ne_tree:
+                    if hasattr(subtree, 'label'):
+                        entity_type = subtree.label()
+                        entity_text = ' '.join(word for word, tag in subtree)
+                        
+                        if entity_type not in entities:
+                            entities[entity_type] = []
+                        if entity_text not in entities[entity_type]:
+                            entities[entity_type].append(entity_text)
+            
+            return entities
+            
+        except Exception as e:
+            logger.warning(f"NLTK entity extraction failed: {e}")
+            return {}
     
     def classify_content_type(self, text: str) -> str:
         """
