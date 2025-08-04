@@ -508,21 +508,21 @@ class EnhancedGuardAgent:
         
         try:
             # Encode statement
-            statement_embedding = self.embedding_model.encode(statement, convert_to_tensor=False)
+            statement_embedding = self.embedding_model.encode(statement, convert_to_tensor=False, show_progress_bar=False)
             
             # Split context into sentences
             context_sentences = re.split(r'[.!?]+', context)
             context_sentences = [s.strip() for s in context_sentences if len(s.strip()) > 20]
             
             if not context_sentences:
-                context_embedding = self.embedding_model.encode(context, convert_to_tensor=False)
+                context_embedding = self.embedding_model.encode(context, convert_to_tensor=False, show_progress_bar=False)
                 return float(np.dot(statement_embedding, context_embedding) / 
                            (np.linalg.norm(statement_embedding) * np.linalg.norm(context_embedding)))
             
             # Find best matching sentence
             max_similarity = 0.0
             for ctx_sentence in context_sentences:
-                ctx_embedding = self.embedding_model.encode(ctx_sentence, convert_to_tensor=False)
+                ctx_embedding = self.embedding_model.encode(ctx_sentence, convert_to_tensor=False, show_progress_bar=False)
                 
                 similarity = float(np.dot(statement_embedding, ctx_embedding) / 
                                  (np.linalg.norm(statement_embedding) * np.linalg.norm(ctx_embedding)))
