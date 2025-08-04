@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any, Optional, Tuple
 from functools import lru_cache
 import hashlib
+import time
 from config import HF_TOKEN, HF_INFERENCE_ENDPOINT, MODEL_PARAMS
 
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +52,7 @@ class HuggingFaceClient:
                 result = response.json()
                 if isinstance(result, list) and len(result) > 0 and "generated_text" in result[0]:
                     generated_text = result[0]["generated_text"]
+                    # The response often includes the prompt, so we strip it.
                     if generated_text.startswith(prompt):
                         return generated_text[len(prompt):].strip()
                     return generated_text
@@ -60,44 +62,54 @@ class HuggingFaceClient:
             except requests.exceptions.RequestException as e:
                 logger.error(f"Request failed: {e}", exc_info=True)
                 if attempt < max_retries - 1:
-                    import time
                     time.sleep(2 ** attempt)
                     continue
                 return "Error: Could not connect to the model service."
         return "Error: Exceeded max retries for model service."
 
-# --- Convenience Functions ---
+# --- Convenience Functions that use the lazy-loaded client ---
 
 def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
-    return get_hf_client().generate_response(prompt, parameters)
+    """Convenience function to call the model via the lazy-loaded client."""
+    client = get_hf_client()
+    return client.generate_response(prompt, parameters)
 
 def call_base_assistant(prompt: str) -> str:
+    """Calls the model with parameters optimized for conversational responses."""
     base_params = MODEL_PARAMS.copy()
     base_params.update({
         "temperature": 0.7, "top_p": 0.9, "repetition_penalty": 1.1,
-        "max_new_tokens": 250, "stop_sequences": ["User:", "Human:", "\n\n"]
+        "max_new_tokens": 300, "stop_sequences": ["User:", "Human:", "\n\n"]
     })
     return call_huggingface(prompt, base_params)
 
 def call_answerability_agent(prompt: str) -> Tuple[str, str]:
+    """Calls the model with parameters optimized for structured JSON classification."""
     params = {
-        "temperature": 0.01, "max_new_tokens": 50, "top_p": 0.1, "stop_sequences": ["}"]
+        "temperature": 0.01, "max_new_tokens": 60, "top_p": 0.1, "stop_sequences": ["}"]
     }
     raw_response = call_huggingface(prompt, params)
-    if not raw_response.endswith('}'):
-        raw_response += '}'
+    
+    # Clean up response to ensure it's valid JSON
+    if "```json" in raw_response:
+        cleaned_response = raw_response.split("```json")[1].split("```")[0].strip()
+    else:
+        cleaned_response = raw_response
+    
+    if not cleaned_response.endswith('}'):
+        cleaned_response += '}'
+        
     try:
-        cleaned_response = raw_response.strip().replace("```json", "").replace("```", "").strip()
         data = json.loads(cleaned_response)
         classification = data.get("classification", "NOT_ANSWERABLE")
         reason = data.get("reason", "Could not determine answerability from response.")
         return classification, reason
     except json.JSONDecodeError:
-        logger.error(f"Failed to decode JSON from answerability agent. Response: {raw_response}")
+        logger.error(f"Failed to decode JSON from answerability agent. Response: '{cleaned_response}'")
         return "NOT_ANSWERABLE", "Invalid format from classification model."
 
 # --- LAZY-LOADING FUNCTION ---
-# This is the function that was missing.
+# This is the function that was missing from your file.
 _hf_client_instance = None
 def get_hf_client():
     """Lazy-loads and returns a single instance of the HuggingFaceClient."""
