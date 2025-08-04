@@ -188,7 +188,11 @@ def call_base_assistant(prompt: str) -> str:
         "top_p": 0.9,
         "repetition_penalty": 1.1,
         "max_new_tokens": 150,  # Reduced to prevent over-generation
-        "stop_sequences": ["User:", "Human:", "Assistant:", "\n\n\n"]  # Stop if it tries to generate dialogue
+        "stop_sequences": [
+            "User:", "Human:", "Assistant:", "\n\n\n",
+            "```", "def ", "import ", "from ",  # Stop code generation
+            "(Note:", "Note:", "Please go ahead"  # Stop inappropriate notes
+        ]
     })
     
     response = hf_client.generate_response(prompt, base_params)
@@ -196,6 +200,31 @@ def call_base_assistant(prompt: str) -> str:
     # Clean up response - remove any accidental dialogue generation
     if "User:" in response or "Human:" in response:
         response = response.split("User:")[0].split("Human:")[0].strip()
+    
+    # Remove code blocks and programming content
+    if "```" in response:
+        # Remove everything from first ``` onwards
+        response = response.split("```")[0].strip()
+    
+    # Remove any lines that look like code
+    lines = response.split('\n')
+    filtered_lines = []
+    for line in lines:
+        # Skip lines that look like code
+        if (line.strip().startswith('def ') or 
+            line.strip().startswith('import ') or 
+            line.strip().startswith('from ') or
+            line.strip().startswith('print(') or
+            'def greet' in line or
+            '= f"Hello' in line):
+            continue
+        filtered_lines.append(line)
+    
+    response = '\n'.join(filtered_lines).strip()
+    
+    # Remove inappropriate notes
+    if "(Note:" in response:
+        response = response.split("(Note:")[0].strip()
     
     return response
 
