@@ -26,22 +26,35 @@ class RAGSystem:
     """
     
     def __init__(self):
-        # Initialize embedding model with proper error handling
-        try:
-            # SentenceTransformer will download from public HuggingFace Hub by default
-            # No need to specify custom endpoints for public models
-            self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-            logger.info(f"Loaded embedding model: {EMBEDDING_MODEL_NAME}")
-        except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}")
-            logger.warning("RAG system will work with limited functionality")
-            self.embedding_model = None
-        
+        # Initialize embedding model with proper environment handling
+        self._init_embedding_model()
         self.semantic_chunker = SemanticChunker()
         self.index = None
         self.texts = []
         self.metadata = []
         self._load_index()
+    
+    def _init_embedding_model(self):
+        """Initialize embedding model, handling HF endpoint conflicts."""
+        try:
+            import os
+            # Temporarily clear HF_ENDPOINT to avoid conflicts
+            original_endpoint = os.environ.pop('HF_ENDPOINT', None)
+            
+            try:
+                # This will download from public HuggingFace hub
+                self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+                logger.info(f"Successfully loaded embedding model: {EMBEDDING_MODEL_NAME}")
+            finally:
+                # Restore original endpoint if it existed
+                if original_endpoint:
+                    os.environ['HF_ENDPOINT'] = original_endpoint
+                    
+        except Exception as e:
+            logger.error(f"Failed to load embedding model: {e}")
+            logger.warning("RAG system will work with limited functionality")
+            logger.info("You may need to download the model manually or check your internet connection")
+            self.embedding_model = None
     
     def _load_index(self):
         """Load the FAISS index and metadata if they exist."""
