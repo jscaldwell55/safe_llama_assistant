@@ -28,6 +28,7 @@ CHUNK_OVERLAP = 150           # More overlap to preserve context
 TOP_K_RETRIEVAL = 8           # More candidates for better coverage
 INDEX_PATH = "faiss_index"
 PDF_DATA_PATH = "data"
+EMBEDDING_BATCH_SIZE = 32     # Process embeddings in batches for better memory management
 
 # Semantic Chunking Configuration
 CHUNKING_STRATEGY = "hybrid"  # Can be: sections, paragraphs, sentences, recursive, hybrid

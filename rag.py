@@ -14,8 +14,10 @@ from config import (
     CHUNK_OVERLAP,
     TOP_K_RETRIEVAL,
     CHUNKING_STRATEGY,
-    MAX_CHUNK_TOKENS
+    MAX_CHUNK_TOKENS,
+    EMBEDDING_BATCH_SIZE
 )
+import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -183,8 +185,19 @@ class RAGSystem:
             logger.error("No text chunks extracted from PDFs")
             return
         
-        logger.info(f"Generating embeddings for {len(all_chunks)} chunks...")
-        embeddings = self.embedding_model.encode(all_chunks, show_progress_bar=True)
+        logger.info(f"Generating embeddings for {len(all_chunks)} chunks using batch size {EMBEDDING_BATCH_SIZE}...")
+        
+        # Process embeddings in batches
+        all_embeddings = []
+        for i in range(0, len(all_chunks), EMBEDDING_BATCH_SIZE):
+            batch_end = min(i + EMBEDDING_BATCH_SIZE, len(all_chunks))
+            batch_chunks = all_chunks[i:batch_end]
+            logger.info(f"Processing batch {i//EMBEDDING_BATCH_SIZE + 1}/{(len(all_chunks) + EMBEDDING_BATCH_SIZE - 1)//EMBEDDING_BATCH_SIZE} (chunks {i+1}-{batch_end}/{len(all_chunks)})")
+            batch_embeddings = self.embedding_model.encode(batch_chunks, show_progress_bar=False)
+            all_embeddings.append(batch_embeddings)
+        
+        # Concatenate all embeddings
+        embeddings = np.vstack(all_embeddings)
         
         # Create FAISS index
         dimension = embeddings.shape[1]
