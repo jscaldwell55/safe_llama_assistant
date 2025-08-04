@@ -26,7 +26,17 @@ class RAGSystem:
     """
     
     def __init__(self):
-        self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        # Initialize embedding model with proper error handling
+        try:
+            # SentenceTransformer will download from public HuggingFace Hub by default
+            # No need to specify custom endpoints for public models
+            self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+            logger.info(f"Loaded embedding model: {EMBEDDING_MODEL_NAME}")
+        except Exception as e:
+            logger.error(f"Failed to load embedding model: {e}")
+            logger.warning("RAG system will work with limited functionality")
+            self.embedding_model = None
+        
         self.semantic_chunker = SemanticChunker()
         self.index = None
         self.texts = []

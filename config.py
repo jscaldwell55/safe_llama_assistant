@@ -7,7 +7,9 @@ try:
 except (ImportError, FileNotFoundError, AttributeError):
     HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
 
-HF_ENDPOINT = os.getenv("HF_ENDPOINT", "https://wlg3d5se4nwkpb0x.us-east-1.aws.endpoints.huggingface.cloud/")
+# Separate endpoints for different purposes
+HF_INFERENCE_ENDPOINT = os.getenv("HF_ENDPOINT", "https://wlg3d5se4nwkpb0x.us-east-1.aws.endpoints.huggingface.cloud/")
+HF_MODEL_HUB_URL = "https://huggingface.co"  # Public hub for downloading models
 
 # Model Configuration - Optimized for natural conversation
 MODEL_PARAMS = {

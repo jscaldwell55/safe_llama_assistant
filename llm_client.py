@@ -2,7 +2,7 @@ import requests
 import json
 import logging
 from typing import Dict, Any, Optional
-from config import HF_TOKEN, HF_ENDPOINT, MODEL_PARAMS
+from config import HF_TOKEN, HF_INFERENCE_ENDPOINT, MODEL_PARAMS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 class HuggingFaceClient:
     """Client for interacting with Hugging Face Inference Endpoints"""
     
-    def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_ENDPOINT):
+    def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
         self.token = token
         self.endpoint = endpoint
         self.headers = {
