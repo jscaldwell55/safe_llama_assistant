@@ -1,5 +1,3 @@
-# llm_client.py
-
 import requests
 import json
 import logging
@@ -40,7 +38,6 @@ class HuggingFaceClient:
             parameters = MODEL_PARAMS.copy()
         cache_key = self._cache_key(prompt, parameters)
         params_json = json.dumps(parameters, sort_keys=True)
-        logger.info(f"Cache lookup for key: {cache_key[:8]}...")
         return self._cached_generate(cache_key, prompt, params_json)
 
     def _generate_response_internal(self, prompt: str, parameters: Dict[str, Any]) -> str:
@@ -61,7 +58,7 @@ class HuggingFaceClient:
                     logger.warning(f"Unexpected response format: {result}")
                     return str(result)
             except requests.exceptions.RequestException as e:
-                logger.error(f"Request failed: {e}")
+                logger.error(f"Request failed: {e}", exc_info=True)
                 if attempt < max_retries - 1:
                     import time
                     time.sleep(2 ** attempt)
@@ -69,11 +66,10 @@ class HuggingFaceClient:
                 return "Error: Could not connect to the model service."
         return "Error: Exceeded max retries for model service."
 
-# Global client instance
-hf_client = HuggingFaceClient()
+# --- Convenience Functions ---
 
 def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
-    return hf_client.generate_response(prompt, parameters)
+    return get_hf_client().generate_response(prompt, parameters)
 
 def call_base_assistant(prompt: str) -> str:
     base_params = MODEL_PARAMS.copy()
@@ -81,42 +77,31 @@ def call_base_assistant(prompt: str) -> str:
         "temperature": 0.7, "top_p": 0.9, "repetition_penalty": 1.1,
         "max_new_tokens": 250, "stop_sequences": ["User:", "Human:", "\n\n"]
     })
-    response = hf_client.generate_response(prompt, base_params)
-    return response.split("User:")[0].split("Human:")[0].strip()
-
-def call_guard_agent(prompt: str) -> str:
-    guard_params = MODEL_PARAMS.copy()
-    guard_params.update({
-        "temperature": 0.01, "max_new_tokens": 100, "top_p": 0.5,
-        "repetition_penalty": 1.0
-    })
-    return hf_client.generate_response(prompt, guard_params)
+    return call_huggingface(prompt, base_params)
 
 def call_answerability_agent(prompt: str) -> Tuple[str, str]:
-    """
-    Calls the LLM with parameters optimized for structured JSON classification.
-    Returns: A tuple of (classification, rationale).
-    """
     params = {
-        "temperature": 0.01,
-        "max_new_tokens": 50,
-        "top_p": 0.1,
-        "stop_sequences": ["}"]
+        "temperature": 0.01, "max_new_tokens": 50, "top_p": 0.1, "stop_sequences": ["}"]
     }
-    raw_response = hf_client.generate_response(prompt, params)
-    
-    # Ensure the response is a complete JSON object
+    raw_response = call_huggingface(prompt, params)
     if not raw_response.endswith('}'):
         raw_response += '}'
-
     try:
-        # Clean up potential markdown formatting
         cleaned_response = raw_response.strip().replace("```json", "").replace("```", "").strip()
         data = json.loads(cleaned_response)
         classification = data.get("classification", "NOT_ANSWERABLE")
         reason = data.get("reason", "Could not determine answerability from response.")
-        logger.info(f"Answerability check result: {classification} - {reason}")
         return classification, reason
     except json.JSONDecodeError:
         logger.error(f"Failed to decode JSON from answerability agent. Response: {raw_response}")
-        return "NOT_ANSWERABLE", "Received an invalid format from the classification model."
+        return "NOT_ANSWERABLE", "Invalid format from classification model."
+
+# --- LAZY-LOADING FUNCTION ---
+# This is the function that was missing.
+_hf_client_instance = None
+def get_hf_client():
+    """Lazy-loads and returns a single instance of the HuggingFaceClient."""
+    global _hf_client_instance
+    if _hf_client_instance is None:
+        _hf_client_instance = HuggingFaceClient()
+    return _hf_client_instance

@@ -14,88 +14,95 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info("=== Starting Streamlit app initialization ===")
 
-# --- MODULE IMPORTS ---
-# We will import everything needed for the new workflow.
-start_time = time.time()
-try:
+# --- LAZY-LOADING IMPORTS ---
+# This pattern avoids errors if a module is slow or fails to load.
+def get_dependencies():
     from config import APP_TITLE
-    from prompt import format_conversational_prompt
+    from prompt import format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
     from llm_client import call_base_assistant, get_hf_client
     from guard import evaluate_response
     from conversation import get_conversation_manager
     from conversational_agent import get_conversational_agent, ConversationMode
-    logger.info(f"=== All imports completed in {time.time() - start_time:.2f}s ===")
+    return {
+        "APP_TITLE": APP_TITLE,
+        "format_conversational_prompt": format_conversational_prompt,
+        "ACKNOWLEDGE_GAP_PROMPT": ACKNOWLEDGE_GAP_PROMPT,
+        "call_base_assistant": call_base_assistant,
+        "get_hf_client": get_hf_client,
+        "evaluate_response": evaluate_response,
+        "get_conversation_manager": get_conversation_manager,
+        "get_conversational_agent": get_conversational_agent,
+        "ConversationMode": ConversationMode
+    }
+
+try:
+    deps = get_dependencies()
+    logger.info("All dependencies loaded successfully.")
 except Exception as e:
     logger.error(f"A critical module failed to import: {e}", exc_info=True)
     st.error(f"Fatal Error: A required module could not be loaded. Please check the logs. Error: {e}")
     st.stop()
 
-
 # --- PAGE AND RESOURCE CONFIGURATION ---
-logger.info("Configuring Streamlit page...")
 st.set_page_config(
-    page_title=APP_TITLE, 
+    page_title=deps["APP_TITLE"], 
     layout="centered",
     initial_sidebar_state="collapsed"
 )
-st.title(APP_TITLE)
-logger.info("Streamlit page configured successfully")
+st.title(deps["APP_TITLE"])
 
-# Get lazy loaded instances using the functions from the modules themselves
-conversation_manager = get_conversation_manager()
-hf_client = get_hf_client()
-conversational_agent = get_conversational_agent()
+# Get lazy loaded instances
+conversation_manager = deps["get_conversation_manager"]()
+hf_client = deps["get_hf_client"]()
+conversational_agent = deps["get_conversational_agent"]()
 
 # --- CORE APPLICATION LOGIC ---
-
-def handle_conversational_query(query: str) -> dict:
+def handle_query(query: str) -> dict:
     """
     Handles the user query using the robust "RAG-then-Check" workflow.
-    This function is now the central orchestrator.
     """
     try:
         # Step 1: Let the new conversational agent process the query.
-        # This single call now handles RAG retrieval and the Answerability Check.
-        agent_response = conversational_agent.process_conversation(query)
-        
-        final_response_text = ""
-        is_approved = False
-        guard_reasoning = "N/A"
+        agent_decision = conversational_agent.process_query(query)
         
         # Handle session end immediately
-        if agent_response.mode == ConversationMode.SESSION_END:
+        if agent_decision.mode == deps["ConversationMode"].SESSION_END:
             conversation_manager.start_new_conversation()
             return {
-                "success": True, "response": agent_response.text, "approved": True,
-                "context_str": "", "session_ended": True, "debug_info": agent_response.debug_info
+                "success": True, "response": "Your session has ended. A new one has begun.", 
+                "approved": True, "context_str": "", "debug_info": agent_decision.debug_info
             }
 
         # Step 2: Check if the agent determined that LLM generation is needed.
-        if agent_response.requires_generation:
+        if agent_decision.requires_generation:
             logger.info("Agent requires LLM generation. Proceeding...")
             
-            # Step 3: Format the prompt with the CORRECT 3 arguments.
-            prompt_for_llm = format_conversational_prompt(
-                query=query,
-                formatted_context=agent_response.context,
-                conversation_context=conversation_manager.get_formatted_history()
-            )
+            classification = agent_decision.debug_info.get("answerability_classification")
             
+            # Step 3: Choose the correct prompt based on the answerability check.
+            if classification in ["FULLY_ANSWERABLE", "PARTIALLY_ANSWERABLE"]:
+                prompt_for_llm = deps["format_conversational_prompt"](
+                    query=query,
+                    formatted_context=agent_decision.context_str,
+                    conversation_context=conversation_manager.get_formatted_history()
+                )
+            else: # NOT_ANSWERABLE or other cases
+                rationale = agent_decision.debug_info.get("answerability_rationale", "information was not found.")
+                prompt_for_llm = deps["ACKNOWLEDGE_GAP_PROMPT"].format(user_question=query, rationale=rationale)
+
             # Step 4: Call the LLM to generate the draft response.
-            draft_response = call_base_assistant(prompt_for_llm)
+            draft_response = deps["call_base_assistant"](prompt_for_llm)
             
             # Step 5: Run the draft response through the simplified guard.
-            # The new guard only needs the context and the draft response.
-            is_approved, final_response_text, guard_reasoning = evaluate_response(
-                context=agent_response.context,
+            is_approved, final_response_text, guard_reasoning = deps["evaluate_response"](
+                context=agent_decision.context_str,
                 assistant_response=draft_response
             )
         else:
             # The agent handled the query directly (e.g., it was a greeting).
-            # No generation or guard check is needed.
             logger.info("Agent handled query directly. Skipping generation and guard.")
-            final_response_text = agent_response.text
-            is_approved = True # Direct responses from the agent are pre-approved.
+            final_response_text = "Hello! How can I help you with our documentation today?"
+            is_approved = True 
             guard_reasoning = "Not required for direct agent response."
 
         # Step 6: Update conversation history if the response was approved.
@@ -107,21 +114,16 @@ def handle_conversational_query(query: str) -> dict:
             "success": True,
             "response": final_response_text,
             "approved": is_approved,
-            "context_str": agent_response.context,
-            "debug_info": {
-                **agent_response.debug_info,
-                "guard_reasoning": guard_reasoning,
-            }
+            "context_str": agent_decision.context_str,
+            "debug_info": {**agent_decision.debug_info, "guard_reasoning": guard_reasoning}
         }
         
     except Exception as e:
-        logger.error(f"Error in handle_conversational_query: {e}", exc_info=True)
+        logger.error(f"Error in handle_query: {e}", exc_info=True)
         return {
             "success": False,
-            "response": "I'm sorry, there was a critical error processing your request. Please check the logs.",
-            "approved": False,
-            "context_str": "",
-            "debug_info": {"error": str(e)}
+            "response": "I'm sorry, there was a critical error processing your request.",
+            "approved": False, "context_str": "", "debug_info": {"error": str(e)}
         }
 
 # --- SIDEBAR UI ---
@@ -150,7 +152,7 @@ if query := st.chat_input("What would you like to know?"):
     
     with st.chat_message("assistant"):
         with st.spinner("🤖 Thinking..."):
-            result = handle_conversational_query(query)
+            result = handle_query(query)
         
         if result["success"]:
             if not result["approved"]:
@@ -163,7 +165,6 @@ if query := st.chat_input("What would you like to know?"):
         else:
             st.error(result["response"])
 
-        # Optional context and debug display
         if show_context and result.get("context_str"):
             with st.expander("📚 Retrieved Context"):
                 st.text(result["context_str"])
@@ -171,10 +172,3 @@ if query := st.chat_input("What would you like to know?"):
         if debug_mode:
             with st.expander("🔧 Debug Information"):
                 st.json(result.get("debug_info", {}))
-
-# Footer
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: #666;'>🛡️ <b>Enterprise Safe Assistant</b></div>", 
-    unsafe_allow_html=True
-)
