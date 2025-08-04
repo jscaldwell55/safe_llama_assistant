@@ -1,122 +1,105 @@
+# conversational_agent.py
+
 import logging
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
+
 from conversation import conversation_manager
-import re
+from llm_client import call_answerability_agent, call_base_assistant
+from prompt import format_answerability_prompt, format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
 
 logger = logging.getLogger(__name__)
 
 class ConversationMode(Enum):
-    """Different modes of conversation engagement"""
-    GENERAL = "general"  # Let the model handle most conversations naturally
+    GENERAL = "general"
     SESSION_END = "session_end"
 
 @dataclass
 class ConversationResponse:
-    """Structure for conversation responses"""
     text: str
     mode: ConversationMode
-    has_rag_content: bool
-    requires_generation: bool  # Whether we need the LLM to generate
-    confidence: float
-    follow_up_suggestions: Optional[List[str]] = None
+    requires_generation: bool
     debug_info: Optional[Dict[str, Any]] = None
+    # Add context to pass to the final guard
+    context: Optional[str] = None
 
 class ConversationalAgent:
     """
-    Simplified conversational agent that trusts the model's natural abilities.
-    
-    Key principles:
-    1. Let the model engage naturally in conversation
-    2. Only intervene for session management
-    3. Trust the guard to ensure safety
-    4. Maintain conversation context
+    Orchestrates the conversation by first checking if a query is answerable
+    from RAG context before deciding how to generate a response.
     """
-    
     def __init__(self):
-        # We only need to handle session end - everything else goes to the model
-        pass
-    
-    def _query_needs_rag(self, query: str) -> bool:
-        """
-        Determine if a query likely needs RAG content.
-        Simple heuristic to avoid loading RAG for greetings, simple questions, etc.
-        """
-        query_lower = query.lower().strip()
-        
-        # Skip RAG for common greetings and simple interactions
-        skip_patterns = [
-            r'^(hi|hello|hey|good morning|good afternoon|good evening)',
-            r'^(thanks|thank you|bye|goodbye|see you)',
-            r'^(yes|no|ok|okay|sure|got it)',
-            r'^(how are you|what\'s up|wassup)',
-            r'^(who are you|what are you)',
-            r'^(can you help|help me)',
-        ]
-        
-        for pattern in skip_patterns:
-            if re.match(pattern, query_lower):
-                logger.info(f"Skipping RAG for conversational query: {query[:50]}")
-                return False
-        
-        # Skip for very short queries (likely conversational)
-        if len(query_lower.split()) <= 2:
-            logger.info(f"Skipping RAG for short query: {query}")
-            return False
-        
-        # Default to using RAG for substantive queries
-        return True
-    
+        # Greetings can be handled without RAG or generation
+        self.greetings = {"hello", "hi", "hey", "good morning", "good afternoon"}
+
+    def _is_greeting(self, query: str) -> bool:
+        return query.lower().strip() in self.greetings
+
     def process_conversation(self, query: str) -> ConversationResponse:
-        """Simplified conversation processing that trusts the model"""
-        
-        # Only special handling for session limits
+        """Processes the query using the new RAG-then-Check workflow."""
         if conversation_manager.should_end_session():
             return ConversationResponse(
-                text="We've reached the conversation limit for this session. Thank you for chatting! Please feel free to start a new conversation to continue exploring our knowledge base.",
+                text="Session limit reached. Please start a new conversation.",
                 mode=ConversationMode.SESSION_END,
-                has_rag_content=False,
                 requires_generation=False,
-                confidence=1.0,
-                follow_up_suggestions=["Click 'New Conversation' to start fresh"]
+                debug_info={"reason": "Session limit"}
             )
+
+        if self._is_greeting(query):
+            return ConversationResponse(
+                text="Hello! How can I help you with our documentation today?",
+                mode=ConversationMode.GENERAL,
+                requires_generation=False,
+                debug_info={"reason": "Handled as simple greeting."}
+            )
+
+        # 1. ALWAYS PERFORM RAG SEARCH
+        enhanced_query = conversation_manager.get_enhanced_query(query)
+        logger.info(f"Performing RAG search for query: {enhanced_query}")
+        try:
+            from rag import retrieve_and_format_context
+            # Assuming a function that retrieves and formats context chunks into a single string
+            context_str = retrieve_and_format_context(enhanced_query)
+        except Exception as e:
+            logger.error(f"RAG retrieval failed: {e}")
+            context_str = ""
+
+        # 2. PERFORM ANSWERABILITY CHECK (LLM-based gate)
+        answerability_prompt = format_answerability_prompt(query, context_str)
+        classification, rationale = call_answerability_agent(answerability_prompt)
         
-        # For everything else, let the model handle it naturally
-        # Check if query needs RAG content
-        if self._query_needs_rag(query):
-            # Only load RAG when actually needed
-            enhanced_query = conversation_manager.get_enhanced_query(query)
-            logger.info(f"Enhanced query for RAG: {enhanced_query}")
-            
-            try:
-                # Lazy import RAG retrieve function
-                from rag import retrieve
-                rag_content = retrieve(enhanced_query)
-                has_content = rag_content and len(rag_content) > 0
-            except Exception as e:
-                logger.error(f"RAG retrieval failed: {e}")
-                rag_content = []
-                has_content = False
-        else:
-            # Skip RAG entirely for simple queries
-            enhanced_query = query
-            rag_content = []
-            has_content = False
-            logger.info("Skipping RAG retrieval for this query")
-        
-        # Return response indicating we need generation
+        debug_info = {
+            "enhanced_query": enhanced_query,
+            "context_retrieved_length": len(context_str),
+            "answerability_classification": classification,
+            "answerability_rationale": rationale,
+        }
+
+        # 3. CONDITIONAL GENERATION
+        if classification in ["FULLY_ANSWERABLE", "PARTIALLY_ANSWERABLE"]:
+            logger.info("Query is answerable. Generating grounded response.")
+            # This is where you would implement the 2-step (skeleton->synthesis) generation.
+            # For simplicity here, we'll use a direct generation prompt.
+            generation_prompt = format_conversational_prompt(
+                query,
+                context_str,
+                conversation_manager.get_formatted_history()
+            )
+            response_text = call_base_assistant(generation_prompt)
+        else: # NOT_ANSWERABLE
+            logger.info("Query is not answerable from context. Generating gap acknowledgement.")
+            # Use a specific prompt to generate a safe "I don't know" response
+            prompt = ACKNOWLEDGE_GAP_PROMPT.format(user_question=query, rationale=rationale)
+            response_text = call_base_assistant(prompt)
+
         return ConversationResponse(
-            text="",  # Will be filled by LLM
+            text=response_text,
             mode=ConversationMode.GENERAL,
-            has_rag_content=has_content,
             requires_generation=True,
-            confidence=0.9 if has_content else 0.5,
-            debug_info={
-                "enhanced_query": enhanced_query,
-                "rag_chunks_found": len(rag_content) if rag_content else 0
-            }
+            debug_info=debug_info,
+            context=context_str  # Pass context for the final guard
         )
 
-# Global conversational agent instance
+# Global instance
 conversational_agent = ConversationalAgent()

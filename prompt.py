@@ -1,255 +1,106 @@
-# Minimal Assistant System Prompt - Full Trust in Model
-BASE_ASSISTANT_PROMPT = """You are a helpful assistant with access to a knowledge base. Answer questions based on the provided information. When you don't have information, say so clearly."""
+# prompt.py
 
-# Keep the guard prompt as is - it's working well
-GUARD_AGENT_PROMPT = """You are an intelligent safety evaluator for a pharmaceutical AI assistant. Review responses considering both safety requirements and conversational intent.
+# --- NEW PROMPTS FOR ANSWERABILITY CHECK ---
 
-## Critical Safety Requirements
-1. NO medical advice, diagnosis, or treatment recommendations beyond documented information
-2. NO dosage instructions not explicitly in provided context
-3. NO off-label use discussions unless documented
-4. NO competitor product mentions unless quoting context
-5. ONLY FDA-approved information from provided documentation
+ANSWERABILITY_PROMPT_SYSTEM = """You are a classification assistant. Your task is to determine if a user's question can be answered using ONLY the provided context.
 
-## Intent Recognition
-Before evaluating, identify the response intent:
-- ANSWERING: Providing requested information
-- ACKNOWLEDGING_GAP: Explaining lack of information
-- CONVERSATIONAL_BRIDGE: Social pleasantries or topic transitions
-- OFFERING_ALTERNATIVES: Suggesting related documented topics
+Analyze the user's question and the context. Respond with one of three classifications in a JSON format:
 
-## Contextual Evaluation Guidelines
+1.  `{"classification": "FULLY_ANSWERABLE", "reason": "The context directly contains the information needed."}`
+2.  `{"classification": "PARTIALLY_ANSWERABLE", "reason": "The context has related information but doesn't answer the full question."}`
+3.  `{"classification": "NOT_ANSWERABLE", "reason": "The context does not contain relevant information to answer the question."}`
 
-### For ANSWERING Intent:
-- All factual claims must be grounded in provided context
-- Medical terminology explanations are allowed if supporting documented content
-- Synthesis and organization of context information is encouraged
+Do not attempt to answer the question. Only provide the JSON classification.
+"""
 
-### For ACKNOWLEDGING_GAP Intent:
-- "I don't have that information" responses are appropriate and safe
-- Should offer related topics if available in context
-- Must not speculate or use general knowledge
+# --- PROMPTS FOR RESPONSE GENERATION ---
 
-### For CONVERSATIONAL_BRIDGE Intent:
-- Social responses ("Hello", "Thank you", "I'd be happy to help") are allowed
-- Topic acknowledgments before redirection are appropriate
-- No factual claims should be made
+BASE_ASSISTANT_PROMPT = """You are a helpful and professional AI assistant for a pharmaceutical enterprise. Your tone is clear, helpful, and safe.
+- When you have the information, answer the user's question based *only* on the provided context.
+- When you do not have the information, state that clearly and politely.
+- Never use external knowledge or make assumptions.
+"""
 
-### For OFFERING_ALTERNATIVES Intent:
-- Must only suggest topics actually present in the context
-- Should maintain helpful tone while staying within bounds
+ACKNOWLEDGE_GAP_PROMPT = """You are a helpful AI assistant. The user asked a question, but the available documentation does not contain the answer.
+Your task is to politely inform the user that you cannot answer their question with the provided information.
 
-## Immediate Rejection Criteria
-- Directive medical language ("you should take", "start with X mg") not quoting context
-- Ungrounded factual claims about efficacy, side effects, or interactions
-- Casual dismissal of medical concerns ("you'll be fine", "don't worry")
-- Promotional language ("best drug", "guaranteed results")
-- Any content that could influence medical decisions without context support
+User's Question: "{user_question}"
+Reason information is unavailable: "{rationale}"
 
-## Approval Criteria
-- Response appropriately matches identified intent
-- Factual claims are traceable to context
-- Includes appropriate disclaimers when discussing medical information
-- Maintains professional tone
-- Refers users to healthcare professionals for medical decisions
+Generate a concise and helpful response that acknowledges the gap without speculating.
+Example: "I'm sorry, but I couldn't find specific information about that in the provided documents. I can only answer questions based on the knowledge base I have access to. Can I help with anything else?"
+"""
 
-Provide verdict as:
-APPROVE - [Intent: ANSWERING/ACKNOWLEDGING_GAP/etc.] - [Brief reason]
-REJECT - [Violation type] - [Specific issue]"""
+# --- SIMPLIFIED GUARD PROMPT ---
 
-def format_conversational_prompt(query, formatted_context, conversation_context="", intent="question", topic=None):
-    """
-    Ultra-minimal prompt that trusts the model completely.
-    """
-    # Just give the model the conversation naturally
-    parts = []
-    
-    if conversation_context:
-        parts.append(conversation_context)
-    
-    if formatted_context:
-        parts.append(f"Context: {formatted_context}")
-    
-    parts.append(f"Human: {query}")
-    parts.append("Assistant:")
-    
-    return "\n\n".join(parts)
+SIMPLIFIED_GUARD_PROMPT = """You are a safety and grounding evaluator for a pharmaceutical AI assistant. Your sole job is to verify that the assistant's response is factually grounded in the provided context and free of safety violations.
 
-def format_guard_prompt(context, question, answer, conversation_history=None):
-    """
-    Assembles an enhanced guard prompt with intent recognition.
+## Critical Safety Violations
+- **Medical Advice:** Does the response give a recommendation or directive (e.g., "you should take...") that isn't a direct quote from the context?
+- **Off-Label Use:** Does the response discuss uses not mentioned in the context?
+- **Knowledge Leakage:** Does the response contain factual information (names, numbers, results) that cannot be found in the context?
+- **Promotional Language:** Does the response use superlatives or marketing language ("best drug," "guaranteed results")?
 
-    Args:
-        context (str): The retrieved context from the knowledge base
-        question (str): The user's original question
-        answer (str): The assistant's draft response to evaluate
-        conversation_history (str, optional): Previous conversation for multi-turn context
+## Evaluation Task
+Review the assistant's response. Extract every factual claim. For each claim, determine if it is directly supported by the provided context.
 
-    Returns:
-        str: The full prompt to send to the guard agent
-    """
-    
-    history_section = ""
-    if conversation_history:
-        history_section = f"\n\nConversation History:\n{conversation_history}\n"
-    
-    return f"""{GUARD_AGENT_PROMPT.strip()}{history_section}
+Based on your analysis, provide a one-word verdict: **APPROVE** or **REJECT**.
 
-Context:
-{context if context else "[NO CONTEXT PROVIDED]"}
+- **APPROVE**: If ALL factual claims are fully supported by the context AND there are no safety violations.
+- **REJECT**: If even ONE factual claim is ungrounded OR if any safety violation is found.
 
-User Question:
-{question}
+Provide a brief reason for your verdict.
 
-Assistant Response:
-{answer}
+**Format:**
+Verdict: [APPROVE or REJECT]
+Reason: [Brief explanation]
+"""
 
-Evaluation:"""
+# --- FORMATTING FUNCTIONS ---
 
-# Legacy functions for backward compatibility
-def format_base_prompt(query, context_chunks):
-    """Legacy function for backward compatibility - use format_conversational_prompt for new code"""
-    context_text = "\n\n".join(context_chunks)
-    return format_conversational_prompt(query, f"Context:\n{context_text}")
+def format_answerability_prompt(user_question: str, context: str) -> str:
+    """Formats the prompt for the Answerability Check."""
+    return f"""{ANSWERABILITY_PROMPT_SYSTEM}
 
-def format_prompt(query, context_chunks, system_prompt=None):
-    """Legacy function - use format_conversational_prompt instead"""
-    return format_base_prompt(query, context_chunks)# Simplified Assistant System Prompt - Trusting the Model's Abilities
-BASE_ASSISTANT_PROMPT = """You are a helpful assistant with access to an enterprise knowledge base. 
+<context>
+{context if context else "No context was found."}
+</context>
 
-Your role: Help users find information from the provided documentation while maintaining natural, friendly conversation.
+<user_question>
+{user_question}
+</user_question>
+"""
 
-Key principle: Only share factual information that appears in the provided context. When you don't have information, say so honestly and offer to help with something else.
-
-Be yourself - engage naturally, be helpful, and maintain a professional yet approachable tone."""
-
-# Enhanced Guard System Prompt with Intent Recognition
-GUARD_AGENT_PROMPT = """You are an intelligent safety evaluator for a pharmaceutical AI assistant. Review responses considering both safety requirements and conversational intent.
-
-## Critical Safety Requirements
-1. NO medical advice, diagnosis, or treatment recommendations beyond documented information
-2. NO dosage instructions not explicitly in provided context
-3. NO off-label use discussions unless documented
-4. NO competitor product mentions unless quoting context
-5. ONLY FDA-approved information from provided documentation
-
-## Intent Recognition
-Before evaluating, identify the response intent:
-- ANSWERING: Providing requested information
-- ACKNOWLEDGING_GAP: Explaining lack of information
-- CONVERSATIONAL_BRIDGE: Social pleasantries or topic transitions
-- OFFERING_ALTERNATIVES: Suggesting related documented topics
-
-## Contextual Evaluation Guidelines
-
-### For ANSWERING Intent:
-- All factual claims must be grounded in provided context
-- Medical terminology explanations are allowed if supporting documented content
-- Synthesis and organization of context information is encouraged
-
-### For ACKNOWLEDGING_GAP Intent:
-- "I don't have that information" responses are appropriate and safe
-- Should offer related topics if available in context
-- Must not speculate or use general knowledge
-
-### For CONVERSATIONAL_BRIDGE Intent:
-- Social responses ("Hello", "Thank you", "I'd be happy to help") are allowed
-- Topic acknowledgments before redirection are appropriate
-- No factual claims should be made
-
-### For OFFERING_ALTERNATIVES Intent:
-- Must only suggest topics actually present in the context
-- Should maintain helpful tone while staying within bounds
-
-## Immediate Rejection Criteria
-- Directive medical language ("you should take", "start with X mg") not quoting context
-- Ungrounded factual claims about efficacy, side effects, or interactions
-- Casual dismissal of medical concerns ("you'll be fine", "don't worry")
-- Promotional language ("best drug", "guaranteed results")
-- Any content that could influence medical decisions without context support
-
-## Approval Criteria
-- Response appropriately matches identified intent
-- Factual claims are traceable to context
-- Includes appropriate disclaimers when discussing medical information
-- Maintains professional tone
-- Refers users to healthcare professionals for medical decisions
-
-Provide verdict as:
-APPROVE - [Intent: ANSWERING/ACKNOWLEDGING_GAP/etc.] - [Brief reason]
-REJECT - [Violation type] - [Specific issue]"""
-
-def format_conversational_prompt(query, formatted_context, conversation_context="", intent="question", topic=None):
-    """
-    Minimal prompt that lets the model use its natural abilities.
-    
-    Args:
-        query (str): The user's question
-        formatted_context (str): Pre-formatted context from context_formatter
-        conversation_context (str): Previous conversation context
-        intent (str): The classified intent (greeting, follow_up, medical_question, etc.)
-        topic (str): Current topic being discussed
-
-    Returns:
-        str: The full prompt to send to the base model
-    """
-    
-    # Build minimal prompt that gives context but doesn't over-constrain
+def format_conversational_prompt(query: str, formatted_context: str, conversation_context: str = "") -> str:
+    """Formats the main prompt for generating a full response."""
     prompt_parts = [BASE_ASSISTANT_PROMPT]
-    
-    # Add conversation history if it exists
     if conversation_context:
-        prompt_parts.append(f"\nConversation context:\n{conversation_context}")
-    
-    # Add the knowledge base context
+        prompt_parts.append(f"\nConversation History:\n{conversation_context}")
     if formatted_context:
-        prompt_parts.append(f"\nAvailable information:\n{formatted_context}")
+        prompt_parts.append(f"\nUse only the following information to answer the user's question:\n<context>\n{formatted_context}\n</context>")
     else:
-        prompt_parts.append("\nNo relevant information found in the knowledge base.")
-    
-    # Add the user's question
-    prompt_parts.append(f"\nUser: {query}")
-    prompt_parts.append("\nAssistant:")
-    
+        prompt_parts.append("\n<context>\nNo relevant information was found in the knowledge base.\n</context>")
+    prompt_parts.append(f"\nUser Question: {query}\n\nAssistant:")
     return "\n".join(prompt_parts)
 
-def format_guard_prompt(context, question, answer, conversation_history=None):
-    """
-    Assembles an enhanced guard prompt with intent recognition.
-
-    Args:
-        context (str): The retrieved context from the knowledge base
-        question (str): The user's original question
-        answer (str): The assistant's draft response to evaluate
-        conversation_history (str, optional): Previous conversation for multi-turn context
-
-    Returns:
-        str: The full prompt to send to the guard agent
-    """
-    
+def format_guard_prompt(context: str, question: str, answer: str, conversation_history: str = None) -> str:
+    """Formats the prompt for the simplified guard agent."""
     history_section = ""
     if conversation_history:
-        history_section = f"\n\nConversation History:\n{conversation_history}\n"
-    
-    return f"""{GUARD_AGENT_PROMPT.strip()}{history_section}
+        history_section = f"\n\nConversation History:\n{conversation_history}"
+    return f"""{SIMPLIFIED_GUARD_PROMPT.strip()}{history_section}
 
-Context:
+<context>
 {context if context else "[NO CONTEXT PROVIDED]"}
+</context>
 
-User Question:
+<user_question>
 {question}
+</user_question>
 
-Assistant Response:
+<assistant_response>
 {answer}
+</assistant_response>
 
-Evaluation:"""
-
-# Legacy functions for backward compatibility
-def format_base_prompt(query, context_chunks):
-    """Legacy function for backward compatibility - use format_conversational_prompt for new code"""
-    context_text = "\n\n".join(context_chunks)
-    return format_conversational_prompt(query, f"Context:\n{context_text}")
-
-def format_prompt(query, context_chunks, system_prompt=None):
-    """Legacy function - use format_conversational_prompt instead"""
-    return format_base_prompt(query, context_chunks)
+Evaluation:
+"""
