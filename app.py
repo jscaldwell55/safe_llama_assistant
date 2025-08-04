@@ -1,3 +1,5 @@
+import os
+os.environ.pop('HF_ENDPOINT', None) 
 import streamlit as st
 import logging
 import time

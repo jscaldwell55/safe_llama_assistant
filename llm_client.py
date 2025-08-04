@@ -153,12 +153,20 @@ def call_base_assistant(prompt: str) -> str:
     """
     base_params = MODEL_PARAMS.copy()
     base_params.update({
-        "temperature": 0.7,  # Higher temperature for more natural, varied responses
-        "top_p": 0.9,        # Higher top_p for more diverse vocabulary
-        "repetition_penalty": 1.1,  # Slight penalty to avoid repetitive phrasing
-        "max_new_tokens": 512  # Allow longer responses for natural conversation
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "repetition_penalty": 1.1,
+        "max_new_tokens": 150,  # Reduced to prevent over-generation
+        "stop_sequences": ["User:", "Human:", "Assistant:", "\n\n\n"]  # Stop if it tries to generate dialogue
     })
-    return hf_client.generate_response(prompt, base_params)
+    
+    response = hf_client.generate_response(prompt, base_params)
+    
+    # Clean up response - remove any accidental dialogue generation
+    if "User:" in response or "Human:" in response:
+        response = response.split("User:")[0].split("Human:")[0].strip()
+    
+    return response
 
 def call_guard_agent(prompt: str) -> str:
     """
