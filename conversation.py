@@ -126,16 +126,16 @@ class ConversationManager:
         if not self.conversation or not self.conversation.turns:
             return ""
         
-        # Simple approach: just provide recent exchanges
-        recent_turns = self.conversation.turns[-3:]  # Last 3 turns
+        # Even simpler - just the recent exchanges
+        recent_turns = self.conversation.turns[-2:]  # Last 2 turns only
         if len(recent_turns) <= 1:
             return ""
         
-        # Format as simple Q&A pairs
+        # Natural format
         history = []
         for turn in recent_turns[:-1]:  # Exclude current turn
-            history.append(f"User: {turn.query}")
-            history.append(f"Assistant: {turn.response[:200]}...")  # Truncate long responses
+            history.append(f"Human: {turn.query}")
+            history.append(f"Assistant: {turn.response[:200]}")  # Truncate long responses
         
         return "\n".join(history)
     
