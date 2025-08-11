@@ -8,13 +8,6 @@ def get_conversation_manager():
     from conversation import get_conversation_manager
     return get_conversation_manager()
 
-def get_llm_client_functions():
-    from llm_client import call_answerability_agent
-    return call_answerability_agent
-
-def get_prompt_functions():
-    from prompt import format_answerability_prompt
-    return format_answerability_prompt
 
 def get_rag_retriever():
     # This function now encapsulates how to get the formatted context string
@@ -76,21 +69,12 @@ class ConversationalAgent:
             logger.error(f"RAG retrieval failed: {e}", exc_info=True)
             # Proceed with an empty context
 
-        # 2. PERFORM ANSWERABILITY CHECK (LLM-based gate)
-        format_answerability_prompt = get_prompt_functions()
-        call_answerability_agent = get_llm_client_functions()
-        
-        answerability_prompt = format_answerability_prompt(query, context_str)
-        classification, rationale = call_answerability_agent(answerability_prompt)
-        
         debug_info = {
             "enhanced_query": enhanced_query,
             "context_retrieved_length": len(context_str),
-            "answerability_classification": classification,
-            "answerability_rationale": rationale,
         }
 
-        # 3. Return instructions to app.py
+        # 2. Return instructions to app.py
         # The agent's decision is that generation is required, and here's the context to use.
         return AgentDecision(
             requires_generation=True,

@@ -1,8 +1,13 @@
-import requests
+import aiohttp
+import asyncio
 import json
 import logging
 from typing import Dict, Any, Optional, Tuple
 from functools import lru_cache
+try:
+    from functools import cache
+except ImportError:
+    cache = lru_cache(maxsize=None)
 import hashlib
 import time
 from config import HF_TOKEN, HF_INFERENCE_ENDPOINT, MODEL_PARAMS
@@ -16,97 +21,111 @@ class HuggingFaceClient:
     def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
         self.token = token
         self.endpoint = endpoint
-        self.session = requests.Session()
-        self.session.headers.update({
+        self.headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
-        })
-        adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0)
-        self.session.mount('https://', adapter)
+        }
+        self._session = None
         logger.info(f"HuggingFaceClient initialized with endpoint: {endpoint[:30]}...")
+    
+    async def _get_session(self):
+        if self._session is None:
+            connector = aiohttp.TCPConnector(limit=10, limit_per_host=10)
+            self._session = aiohttp.ClientSession(connector=connector, headers=self.headers)
+        return self._session
+    
+    async def close(self):
+        if self._session:
+            await self._session.close()
+            self._session = None
     
     def _cache_key(self, prompt: str, parameters: Dict[str, Any]) -> str:
         cache_data = json.dumps({"prompt": prompt, "params": parameters}, sort_keys=True)
         return hashlib.md5(cache_data.encode()).hexdigest()
 
-    @lru_cache(maxsize=100)
-    def _cached_generate(self, cache_key: str, prompt: str, params_json: str) -> str:
+    async def _cached_generate(self, cache_key: str, prompt: str, params_json: str) -> str:
+        # Simple in-memory cache for async methods
+        if not hasattr(self, '_cache'):
+            self._cache = {}
+        
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        
         parameters = json.loads(params_json)
-        return self._generate_response_internal(prompt, parameters)
+        result = await self._generate_response_internal(prompt, parameters)
+        
+        # Limit cache size
+        if len(self._cache) > 100:
+            # Remove oldest entries
+            oldest_keys = list(self._cache.keys())[:20]
+            for key in oldest_keys:
+                del self._cache[key]
+        
+        self._cache[cache_key] = result
+        return result
 
-    def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
+    async def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
         if parameters is None:
             parameters = MODEL_PARAMS.copy()
         cache_key = self._cache_key(prompt, parameters)
         params_json = json.dumps(parameters, sort_keys=True)
-        return self._cached_generate(cache_key, prompt, params_json)
+        return await self._cached_generate(cache_key, prompt, params_json)
 
-    def _generate_response_internal(self, prompt: str, parameters: Dict[str, Any]) -> str:
+    async def _generate_response_internal(self, prompt: str, parameters: Dict[str, Any]) -> str:
         payload = {"inputs": prompt, "parameters": parameters}
         max_retries = 3
+        session = await self._get_session()
         for attempt in range(max_retries):
             try:
                 logger.info(f"Sending request to HF endpoint (attempt {attempt + 1}/{max_retries})")
-                response = self.session.post(self.endpoint, json=payload, timeout=60)
-                response.raise_for_status()
-                result = response.json()
-                if isinstance(result, list) and len(result) > 0 and "generated_text" in result[0]:
-                    generated_text = result[0]["generated_text"]
-                    # The response often includes the prompt, so we strip it.
-                    if generated_text.startswith(prompt):
-                        return generated_text[len(prompt):].strip()
-                    return generated_text
-                else:
-                    logger.warning(f"Unexpected response format: {result}")
-                    return str(result)
-            except requests.exceptions.RequestException as e:
+                async with session.post(self.endpoint, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    if isinstance(result, list) and len(result) > 0 and "generated_text" in result[0]:
+                        generated_text = result[0]["generated_text"]
+                        # The response often includes the prompt, so we strip it.
+                        if generated_text.startswith(prompt):
+                            return generated_text[len(prompt):].strip()
+                        return generated_text
+                    else:
+                        logger.warning(f"Unexpected response format: {result}")
+                        return str(result)
+            except aiohttp.ClientError as e:
                 logger.error(f"Request failed: {e}", exc_info=True)
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    await asyncio.sleep(2 ** attempt)
                     continue
                 return "Error: Could not connect to the model service."
         return "Error: Exceeded max retries for model service."
 
 # --- Convenience Functions that use the lazy-loaded client ---
 
-def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
+async def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
     """Convenience function to call the model via the lazy-loaded client."""
     client = get_hf_client()
-    return client.generate_response(prompt, parameters)
+    return await client.generate_response(prompt, parameters)
 
-def call_base_assistant(prompt: str) -> str:
+async def call_base_assistant(prompt: str) -> str:
     """Calls the model with parameters optimized for conversational responses."""
     base_params = MODEL_PARAMS.copy()
     base_params.update({
         "temperature": 0.7, "top_p": 0.9, "repetition_penalty": 1.1,
         "max_new_tokens": 300, "stop_sequences": ["User:", "Human:", "\n\n"]
     })
-    return call_huggingface(prompt, base_params)
+    return await call_huggingface(prompt, base_params)
 
-def call_answerability_agent(prompt: str) -> Tuple[str, str]:
-    """Calls the model with parameters optimized for structured JSON classification."""
-    params = {
-        "temperature": 0.01, "max_new_tokens": 60, "top_p": 0.1, "stop_sequences": ["}"]
-    }
-    raw_response = call_huggingface(prompt, params)
-    
-    # Clean up response to ensure it's valid JSON
-    if "```json" in raw_response:
-        cleaned_response = raw_response.split("```json")[1].split("```")[0].strip()
-    else:
-        cleaned_response = raw_response
-    
-    if not cleaned_response.endswith('}'):
-        cleaned_response += '}'
-        
-    try:
-        data = json.loads(cleaned_response)
-        classification = data.get("classification", "NOT_ANSWERABLE")
-        reason = data.get("reason", "Could not determine answerability from response.")
-        return classification, reason
-    except json.JSONDecodeError:
-        logger.error(f"Failed to decode JSON from answerability agent. Response: '{cleaned_response}'")
-        return "NOT_ANSWERABLE", "Invalid format from classification model."
+async def call_guard_agent(prompt: str) -> str:
+    """Calls the model with parameters optimized for guard/safety evaluation."""
+    guard_params = MODEL_PARAMS.copy()
+    guard_params.update({
+        "temperature": 0.3,  # Lower temperature for more deterministic evaluation
+        "top_p": 0.9,
+        "repetition_penalty": 1.0,
+        "max_new_tokens": 200,
+        "stop_sequences": ["\n\n", "User:", "Assistant:"]
+    })
+    return await call_huggingface(prompt, guard_params)
+
 
 # --- LAZY-LOADING FUNCTION ---
 # This is the function that was missing from your file.
@@ -117,3 +136,11 @@ def get_hf_client():
     if _hf_client_instance is None:
         _hf_client_instance = HuggingFaceClient()
     return _hf_client_instance
+
+# Cleanup function for proper shutdown
+async def cleanup_hf_client():
+    """Cleanup the HuggingFace client session."""
+    global _hf_client_instance
+    if _hf_client_instance:
+        await _hf_client_instance.close()
+        _hf_client_instance = None

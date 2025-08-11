@@ -4,6 +4,7 @@ import streamlit as st
 import logging
 import time
 import sys
+import asyncio
 
 # Configure logging FIRST before any imports
 logging.basicConfig(
@@ -56,8 +57,29 @@ conversation_manager = deps["get_conversation_manager"]()
 hf_client = deps["get_hf_client"]()
 conversational_agent = deps["get_conversational_agent"]()
 
+# --- ASYNC HELPER ---
+def run_async(coro):
+    """Helper to run async functions in Streamlit's sync context."""
+    loop = None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    
+    if loop and loop.is_running():
+        # If there's already a running loop, create a new task
+        import concurrent.futures
+        import threading
+        
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+    else:
+        # No loop running, we can use asyncio.run directly
+        return asyncio.run(coro)
+
 # --- CORE APPLICATION LOGIC ---
-def handle_query(query: str) -> dict:
+async def handle_query_async(query: str) -> dict:
     """
     Handles the user query using the robust "RAG-then-Check" workflow.
     """
@@ -77,26 +99,22 @@ def handle_query(query: str) -> dict:
         if agent_decision.requires_generation:
             logger.info("Agent requires LLM generation. Proceeding...")
             
-            classification = agent_decision.debug_info.get("answerability_classification")
-            
-            # Step 3: Choose the correct prompt based on the answerability check.
-            if classification in ["FULLY_ANSWERABLE", "PARTIALLY_ANSWERABLE"]:
-                prompt_for_llm = deps["format_conversational_prompt"](
-                    query=query,
-                    formatted_context=agent_decision.context_str,
-                    conversation_context=conversation_manager.get_formatted_history()
-                )
-            else: # NOT_ANSWERABLE or other cases
-                rationale = agent_decision.debug_info.get("answerability_rationale", "information was not found.")
-                prompt_for_llm = deps["ACKNOWLEDGE_GAP_PROMPT"].format(user_question=query, rationale=rationale)
+            # Step 3: Generate response using available context
+            prompt_for_llm = deps["format_conversational_prompt"](
+                query=query,
+                formatted_context=agent_decision.context_str,
+                conversation_context=conversation_manager.get_formatted_history()
+            )
 
             # Step 4: Call the LLM to generate the draft response.
-            draft_response = deps["call_base_assistant"](prompt_for_llm)
+            draft_response = await deps["call_base_assistant"](prompt_for_llm)
             
             # Step 5: Run the draft response through the simplified guard.
             is_approved, final_response_text, guard_reasoning = deps["evaluate_response"](
                 context=agent_decision.context_str,
-                assistant_response=draft_response
+                user_question=query,
+                assistant_response=draft_response,
+                conversation_history=conversation_manager.get_formatted_history()
             )
         else:
             # The agent handled the query directly (e.g., it was a greeting).
@@ -119,7 +137,7 @@ def handle_query(query: str) -> dict:
         }
         
     except Exception as e:
-        logger.error(f"Error in handle_query: {e}", exc_info=True)
+        logger.error(f"Error in handle_query_async: {e}", exc_info=True)
         return {
             "success": False,
             "response": "I'm sorry, there was a critical error processing your request.",
@@ -152,7 +170,8 @@ if query := st.chat_input("What would you like to know?"):
     
     with st.chat_message("assistant"):
         with st.spinner("🤖 Thinking..."):
-            result = handle_query(query)
+            # Run async function in sync context
+            result = run_async(handle_query_async(query))
         
         if result["success"]:
             if not result["approved"]:
