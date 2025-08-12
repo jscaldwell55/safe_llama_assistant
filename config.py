@@ -12,7 +12,7 @@ except (ImportError, FileNotFoundError, AttributeError):
     HF_INFERENCE_ENDPOINT = os.getenv("HF_ENDPOINT")
 
 # Validate and provide fallback if endpoint is not set or invalid
-if not HF_INFERENCE_ENDPOINT or HF_INFERENCE_ENDPOINT == "https://g6mb7nnjz6tp0pb7.us-east-1.aws.endpoints.huggingface.cloud/":
+if not HF_INFERENCE_ENDPOINT or HF_INFERENCE_ENDPOINT == "https://o498828b514fmt2u.us-east-1.aws.endpoints.huggingface.cloud":
     # This appears to be a placeholder or truncated URL
     # You need to provide the actual endpoint URL for your Llama model
     print("WARNING: HF_ENDPOINT is not properly configured. Please set it in Streamlit secrets or environment variables.")
