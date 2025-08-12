@@ -1,4 +1,3 @@
-# config.py
 import os
 
 # Hugging Face Configuration
@@ -11,14 +10,12 @@ except (ImportError, FileNotFoundError, AttributeError):
     HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
     HF_INFERENCE_ENDPOINT = os.getenv("HF_ENDPOINT")
 
-# Validate and provide fallback if endpoint is not set or invalid
-if not HF_INFERENCE_ENDPOINT or HF_INFERENCE_ENDPOINT == "https://o498828b514fmt2u.us-east-1.aws.endpoints.huggingface.cloud":
-    # This appears to be a placeholder or truncated URL
-    # You need to provide the actual endpoint URL for your Llama model
-    print("WARNING: HF_ENDPOINT is not properly configured. Please set it in Streamlit secrets or environment variables.")
+# Just validate that endpoint exists, don't reject specific URLs
+if not HF_INFERENCE_ENDPOINT:
+    print("WARNING: HF_ENDPOINT is not configured. Please set it in Streamlit secrets or environment variables.")
     print("Example format: https://[your-endpoint-id].endpoints.huggingface.cloud")
-    # Provide a more descriptive error message
-    HF_INFERENCE_ENDPOINT = None
+else:
+    print(f"INFO: Using HF_ENDPOINT: {HF_INFERENCE_ENDPOINT[:50]}...")
 
 # Model Configuration - Optimized for natural conversation
 MODEL_PARAMS = {
