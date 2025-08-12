@@ -1,4 +1,3 @@
-# rag.py
 import faiss
 import pickle
 import os
@@ -40,8 +39,22 @@ class RAGSystem:
     def _init_embedding_model(self):
         """Initializes the SentenceTransformer model."""
         try:
+            # Ensure we're using the public HuggingFace hub for model downloads
+            # Save the current HF_ENDPOINT if it exists
+            original_endpoint = os.environ.get("HF_ENDPOINT")
+            
+            # Temporarily set to public hub for model download
+            os.environ["HF_ENDPOINT"] = "https://huggingface.co"
+            os.environ["HUGGINGFACE_HUB_URL"] = "https://huggingface.co"
+            
+            # Now download the model from the public hub
             self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
             logger.info(f"Successfully loaded embedding model: {EMBEDDING_MODEL_NAME}")
+            
+            # Restore the original endpoint if it existed
+            if original_endpoint:
+                os.environ["HF_ENDPOINT"] = original_endpoint
+            
         except Exception as e:
             logger.error(f"Failed to load embedding model: {e}", exc_info=True)
             self.embedding_model = None

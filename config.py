@@ -1,14 +1,23 @@
 import os
 
+# IMPORTANT: Set the HuggingFace Hub URL for model downloads
+# This ensures models are downloaded from the public hub, not your inference endpoint
+os.environ["HF_ENDPOINT"] = "https://huggingface.co"
+os.environ["HUGGINGFACE_HUB_URL"] = "https://huggingface.co"
+
 # Hugging Face Configuration
 try:
     import streamlit as st
     HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
-    # Try to get the endpoint from secrets first, then environment
-    HF_INFERENCE_ENDPOINT = st.secrets.get("HF_ENDPOINT", os.getenv("HF_ENDPOINT"))
+    # Try to get the inference endpoint from secrets first, then environment
+    # Use a different variable name to avoid conflicts
+    HF_INFERENCE_ENDPOINT = st.secrets.get("HF_INFERENCE_ENDPOINT", os.getenv("HF_INFERENCE_ENDPOINT"))
+    if not HF_INFERENCE_ENDPOINT:
+        # Fallback to HF_ENDPOINT if the new name isn't set
+        HF_INFERENCE_ENDPOINT = st.secrets.get("HF_ENDPOINT", os.getenv("HF_CUSTOM_ENDPOINT"))
 except (ImportError, FileNotFoundError, AttributeError):
     HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
-    HF_INFERENCE_ENDPOINT = os.getenv("HF_ENDPOINT")
+    HF_INFERENCE_ENDPOINT = os.getenv("HF_INFERENCE_ENDPOINT", os.getenv("HF_CUSTOM_ENDPOINT"))
 
 # Just validate that endpoint exists, don't reject specific URLs
 if not HF_INFERENCE_ENDPOINT:
