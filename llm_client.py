@@ -22,6 +22,18 @@ class HuggingFaceClient:
     def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
         self.token = token
         self.endpoint = endpoint
+        
+        # Validate configuration
+        if not self.token:
+            raise ValueError("HF_TOKEN is not configured. Please set it in Streamlit secrets or environment variables.")
+        
+        if not self.endpoint:
+            raise ValueError("HF_ENDPOINT is not configured. Please set it in Streamlit secrets or environment variables.")
+        
+        # Ensure the endpoint doesn't have a trailing slash for the API call
+        if self.endpoint.endswith('/'):
+            self.endpoint = self.endpoint.rstrip('/')
+        
         self.headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
@@ -73,15 +85,22 @@ class HuggingFaceClient:
         return await self._cached_generate(cache_key, prompt, params_json)
 
     async def _generate_response_internal(self, prompt: str, parameters: Dict[str, Any]) -> str:
+        if not self.endpoint:
+            return "Error: HuggingFace endpoint is not configured. Please check your settings."
+        
         payload = {"inputs": prompt, "parameters": parameters}
         max_retries = 3
         session = await self._get_session()
+        
         for attempt in range(max_retries):
             try:
                 logger.info(f"Sending request to HF endpoint (attempt {attempt + 1}/{max_retries})")
+                logger.debug(f"Endpoint: {self.endpoint}")
+                
                 async with session.post(self.endpoint, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as response:
                     response.raise_for_status()
                     result = await response.json()
+                    
                     if isinstance(result, list) and len(result) > 0 and "generated_text" in result[0]:
                         generated_text = result[0]["generated_text"]
                         # The response often includes the prompt, so we strip it.
@@ -91,20 +110,39 @@ class HuggingFaceClient:
                     else:
                         logger.warning(f"Unexpected response format: {result}")
                         return str(result)
+                        
+            except aiohttp.ClientResponseError as e:
+                if e.status == 404:
+                    logger.error(f"404 Not Found: The endpoint URL '{self.endpoint}' is incorrect or the model is not deployed.")
+                    return "Error: The HuggingFace model endpoint is not accessible. Please check your endpoint configuration."
+                else:
+                    logger.error(f"Request failed with status {e.status}: {e}", exc_info=True)
+                    
             except aiohttp.ClientError as e:
                 logger.error(f"Request failed: {e}", exc_info=True)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                return "Error: Could not connect to the model service."
-        return "Error: Exceeded max retries for model service."
+                
+            except Exception as e:
+                logger.error(f"Unexpected error: {e}", exc_info=True)
+            
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+                
+        return "Error: Could not connect to the model service after multiple attempts. Please check your configuration."
 
 # --- Convenience Functions that use the lazy-loaded client ---
 
 async def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
     """Convenience function to call the model via the lazy-loaded client."""
-    client = get_hf_client()
-    return await client.generate_response(prompt, parameters)
+    try:
+        client = get_hf_client()
+        return await client.generate_response(prompt, parameters)
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        return f"Configuration error: {str(e)}"
+    except Exception as e:
+        logger.error(f"Unexpected error in call_huggingface: {e}", exc_info=True)
+        return "Error: An unexpected error occurred while calling the model."
 
 async def call_base_assistant(prompt: str) -> str:
     """Calls the model with parameters optimized for conversational responses."""
@@ -129,13 +167,16 @@ async def call_guard_agent(prompt: str) -> str:
 
 
 # --- LAZY-LOADING FUNCTION ---
-# This is the function that was missing from your file.
 _hf_client_instance = None
 def get_hf_client():
     """Lazy-loads and returns a single instance of the HuggingFaceClient."""
     global _hf_client_instance
     if _hf_client_instance is None:
-        _hf_client_instance = HuggingFaceClient()
+        try:
+            _hf_client_instance = HuggingFaceClient()
+        except ValueError as e:
+            logger.error(f"Failed to initialize HuggingFace client: {e}")
+            raise
     return _hf_client_instance
 
 # Cleanup function for proper shutdown

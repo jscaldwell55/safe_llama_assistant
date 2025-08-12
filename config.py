@@ -1,16 +1,24 @@
-#config.py
+# config.py
 import os
 
 # Hugging Face Configuration
 try:
     import streamlit as st
     HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
+    # Try to get the endpoint from secrets first, then environment
+    HF_INFERENCE_ENDPOINT = st.secrets.get("HF_ENDPOINT", os.getenv("HF_ENDPOINT"))
 except (ImportError, FileNotFoundError, AttributeError):
     HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
+    HF_INFERENCE_ENDPOINT = os.getenv("HF_ENDPOINT")
 
-# Separate endpoints for different purposes
-HF_INFERENCE_ENDPOINT = os.getenv("HF_ENDPOINT", "https://o498828b514fmt2u.us-east-1.aws.endpoints.huggingface.cloud")
-HF_MODEL_HUB_URL = "https://huggingface.co"  # Public hub for downloading models
+# Validate and provide fallback if endpoint is not set or invalid
+if not HF_INFERENCE_ENDPOINT or HF_INFERENCE_ENDPOINT == "https://g6mb7nnjz6tp0pb7.us-east-1.aws.endpoints.huggingface.cloud/":
+    # This appears to be a placeholder or truncated URL
+    # You need to provide the actual endpoint URL for your Llama model
+    print("WARNING: HF_ENDPOINT is not properly configured. Please set it in Streamlit secrets or environment variables.")
+    print("Example format: https://[your-endpoint-id].endpoints.huggingface.cloud")
+    # Provide a more descriptive error message
+    HF_INFERENCE_ENDPOINT = None
 
 # Model Configuration - Optimized for natural conversation
 MODEL_PARAMS = {
