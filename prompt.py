@@ -1,4 +1,3 @@
-# prompt.py
 # Simplified Assistant System Prompt - Trusting the Model's Abilities
 BASE_ASSISTANT_PROMPT = """You are a helpful assistant with access to an enterprise knowledge base. 
 
@@ -9,6 +8,7 @@ Key principles:
 - When you don't have information, clearly say "I don't have information about [topic] in the documentation"
 - After acknowledging a gap, offer to help with related topics you DO have information about
 - Be conversational and natural - greetings and acknowledgments don't need documentation support
+- Provide a single, complete response without simulating further conversation
 
 Be yourself - engage naturally, be helpful, and maintain a professional yet approachable tone."""
 
@@ -101,9 +101,9 @@ def format_conversational_prompt(query, formatted_context, conversation_context=
     else:
         prompt_parts.append("\nNo relevant information found in the knowledge base for this query.")
     
-    # Add the user's question
-    prompt_parts.append(f"\nUser: {query}")
-    prompt_parts.append("\nAssistant:")
+    # Add the user's question with clear boundaries
+    prompt_parts.append(f"\n### Current Query ###\nUser: {query}")
+    prompt_parts.append("\n### Your Response ###\nAssistant:")
     
     return "\n".join(prompt_parts)
 

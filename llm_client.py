@@ -1,4 +1,3 @@
-# llm_client.py
 import aiohttp
 import asyncio
 import json
@@ -29,6 +28,9 @@ class HuggingFaceClient:
         
         if not self.endpoint:
             raise ValueError("HF_ENDPOINT is not configured. Please set it in Streamlit secrets or environment variables.")
+        
+        # Log the endpoint being used (without exposing sensitive parts)
+        logger.info(f"Using endpoint: {self.endpoint[:50]}...")
         
         # Ensure the endpoint doesn't have a trailing slash for the API call
         if self.endpoint.endswith('/'):
@@ -149,7 +151,9 @@ async def call_base_assistant(prompt: str) -> str:
     base_params = MODEL_PARAMS.copy()
     base_params.update({
         "temperature": 0.7, "top_p": 0.9, "repetition_penalty": 1.1,
-        "max_new_tokens": 300, "stop_sequences": ["User:", "Human:", "\n\n"]
+        "max_new_tokens": 300, 
+        # More specific stop sequences to prevent hallucination
+        "stop_sequences": ["\nUser:", "\nHuman:", "\nAssistant:", "###", "<|endoftext|>"]
     })
     return await call_huggingface(prompt, base_params)
 
