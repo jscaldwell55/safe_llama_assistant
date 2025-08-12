@@ -1,3 +1,4 @@
+# prompt.py
 # Simplified Assistant System Prompt - Trusting the Model's Abilities
 BASE_ASSISTANT_PROMPT = """You are a helpful assistant with access to an enterprise knowledge base. 
 

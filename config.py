@@ -1,3 +1,4 @@
+#config.py
 import os
 
 # Hugging Face Configuration
@@ -8,7 +9,7 @@ except (ImportError, FileNotFoundError, AttributeError):
     HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
 
 # Separate endpoints for different purposes
-HF_INFERENCE_ENDPOINT = os.getenv("HF_ENDPOINT", "https://g6mb7nnjz6tp0pb7.us-east-1.aws.endpoints.huggingface.cloud/")
+HF_INFERENCE_ENDPOINT = os.getenv("HF_ENDPOINT", "https://o498828b514fmt2u.us-east-1.aws.endpoints.huggingface.cloud")
 HF_MODEL_HUB_URL = "https://huggingface.co"  # Public hub for downloading models
 
 # Model Configuration - Optimized for natural conversation
