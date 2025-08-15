@@ -50,10 +50,8 @@ class ConversationManager:
             else:
                 # Restore existing conversation
                 self.conversation = st.session_state["conversation_context"]
-                # Check for timeout only if timeout is enabled
-                if self.session_timeout and self._check_timeout():
-                    logger.warning("Session timed out due to inactivity")
-                    self._init_new_conversation()
+                # Don't check timeout on init - it causes false positives
+                # Timeout should only be checked after actual user interaction
         else:
             # Non-Streamlit context
             self._init_new_conversation()

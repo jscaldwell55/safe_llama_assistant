@@ -73,12 +73,10 @@ class ConversationalAgent:
     def process_query(self, query: str) -> AgentDecision:
         cm = _get_conversation_manager()
 
-        if cm.should_end_session():
-            return AgentDecision(
-                mode=ConversationMode.SESSION_END,
-                debug_info={"reason": "Session limit reached."}
-            )
-
+        # Don't check should_end_session here - it's causing false positives
+        # The conversation manager will handle timeouts when appropriate
+        # Only check turn limits if they're actually enforced
+        
         # Simple greetings are handled directly by the UI
         if self._is_greeting(query or ""):
             return AgentDecision(
