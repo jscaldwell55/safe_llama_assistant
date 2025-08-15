@@ -84,8 +84,42 @@ class HybridGuardAgent:
         """
         Determine if this is conversational exchange without pharmaceutical facts.
         Be PERMISSIVE - only return False if there's clear medical/drug content.
+        Allow empathetic responses even if they mention conditions.
         """
         r_lower = response.lower()
+        q_lower = question.lower()
+        
+        # Check if this is an empathetic/supportive response
+        empathetic_indicators = [
+            "i hear you", "i'm sorry", "that must be", "that sounds",
+            "it's understandable", "many people", "you're not alone",
+            "thank you for sharing", "i understand", "that's difficult",
+            "can be challenging", "can be hard", "going through"
+        ]
+        
+        # If response is primarily empathetic, allow it even with medical mentions
+        if any(phrase in r_lower for phrase in empathetic_indicators):
+            # Only flag if it contains specific dosages or instructions
+            dangerous_patterns = [
+                r'\b\d+\s*(?:mg|ml|mcg)\b',  # Specific dosages
+                r'\btake\s+\d+\b',  # Take X tablets
+                r'\b(?:increase|decrease|stop|start)\s+(?:your|the)\s+(?:dose|medication)\b',
+            ]
+            for pattern in dangerous_patterns:
+                if re.search(pattern, r_lower):
+                    return False
+            # Otherwise, allow empathetic responses
+            return True
+        
+        # Check if user is sharing personal experience (not asking for facts)
+        personal_sharing = [
+            "i am", "i'm", "i feel", "i have", "my doctor", "my therapist",
+            "diagnosed", "struggling", "dealing with", "going through"
+        ]
+        if any(phrase in q_lower for phrase in personal_sharing):
+            # User is sharing personally - response can be supportive without grounding
+            if not re.search(r'\b\d+\s*(?:mg|ml|mcg)\b', r_lower):  # Unless giving dosages
+                return True
         
         # Strong indicators this IS pharmaceutical/medical content (needs grounding)
         pharmaceutical_indicators = [
@@ -104,17 +138,15 @@ class HybridGuardAgent:
         # If response contains pharmaceutical content, it needs grounding
         for pattern in pharmaceutical_indicators:
             if re.search(pattern, r_lower):
+                # Exception: Allow if it's just acknowledging + redirecting
+                if "consult" in r_lower or "talk to your" in r_lower or "speak with" in r_lower:
+                    redirect_phrases = ["healthcare provider", "doctor", "professional", "therapist"]
+                    if any(phrase in r_lower for phrase in redirect_phrases):
+                        # It's redirecting to professional help, allow it
+                        continue
                 return False
         
         # Otherwise, treat it as conversational
-        # This allows the LLM to:
-        # - Answer "how are you?" naturally
-        # - Explain what it can help with
-        # - Handle clarifications
-        # - Provide encouragement
-        # - Make appropriate referrals
-        # - Be empathetic
-        # - And much more...
         return True
 
     # ---------- Public API ----------

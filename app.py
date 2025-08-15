@@ -100,8 +100,10 @@ def _is_likely_conversational(query: str) -> bool:
     return any(ind in q_lower for ind in conversational_indicators) and len(query) < 50
 
 def _format_conversational_only_prompt(query: str) -> str:
-    """Simpler prompt for conversational queries"""
-    return f"""You are a helpful pharmaceutical assistant. Respond naturally and conversationally.
+    """Simpler prompt for conversational queries that encourages empathy"""
+    return f"""You are a helpful and empathetic pharmaceutical assistant. When users share personal struggles or feelings, respond with compassion first, then offer appropriate guidance.
+
+Be warm and supportive while maintaining professional boundaries. If someone shares they're struggling, acknowledge their feelings before providing any information.
 
 User: {query}
 Assistant:"""
