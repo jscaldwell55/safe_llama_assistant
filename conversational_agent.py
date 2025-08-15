@@ -1,4 +1,3 @@
-# conversational_agent.py
 import logging
 import re
 from typing import Dict, Any, Optional, Callable
@@ -95,7 +94,6 @@ class ConversationalAgent:
 
         # Enhance the query with recent entities to improve retrieval
         enhanced_query = cm.get_enhanced_query(q_norm)
-        # Log the enhanced query for observability (matches your sidebar logs)
         logger.info(f"Enhanced query for RAG: {enhanced_query}")
 
         # Retrieve + format context (RAG)

@@ -1,4 +1,3 @@
-# llm_client.py
 import aiohttp
 import asyncio
 import json
@@ -32,21 +31,14 @@ def _trim_to_complete_sentence(text: str) -> str:
     if not text:
         return text
     text = text.strip()
-
-    # Ends with punctuation already?
     if re.search(r'[.!?)]\s*$', text):
         return text
-
-    # Cut back to the last terminator if any
     m = list(re.finditer(r'[.!?)]', text))
     if m:
         return text[:m[-1].end()].rstrip()
-
-    # Else, drop a very short dangling last line if present
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if len(lines) >= 2 and len(lines[-1].split()) <= 5:
         return "\n".join(lines[:-1]).strip()
-
     return text
 
 def _drop_trailing_meta_line(text: str) -> str:
@@ -141,9 +133,9 @@ def clean_model_output(text: str) -> str:
 class HuggingFaceClient:
     """
     Minimal, robust client for Hugging Face Inference Endpoints.
-    - Fresh aiohttp session per attempt (avoids cross-loop issues in Streamlit).
+    - Single aiohttp session per call (reused across parameter variants).
     - Parameter fallbacks for 'stop' vs 'stop_sequences' vs none.
-    - Ensures sessions/connectors are closed to prevent warnings.
+    - No manual connector management (prevents unclosed session/connector warnings).
     """
     def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
         if not token:
@@ -155,7 +147,8 @@ class HuggingFaceClient:
         self.endpoint = endpoint
         self.headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Accept": "application/json",
         }
         logger.info(f"HuggingFaceClient initialized with endpoint: {endpoint[:60]}...")
 
@@ -170,75 +163,64 @@ class HuggingFaceClient:
                     p[k] = list(p[k])[:4]
             return p
 
+        # Build 3 parameter variants to survive endpoint differences
         variants: List[Dict[str, Any]] = []
-
-        # Variant 1: prefer 'stop' key if present (≤ 4)
         v1 = clamp_stops(parameters)
         variants.append(v1)
-
-        # Variant 2: map stop -> stop_sequences, remove stop
         v2 = clamp_stops(parameters)
         if "stop" in v2:
             v2["stop_sequences"] = v2.pop("stop")
         variants.append(v2)
-
-        # Variant 3: no stops at all
         v3 = dict(parameters)
         for k in ("stop", "stop_sequences"):
             v3.pop(k, None)
         variants.append(v3)
 
         last_error_text = None
-        timeout = aiohttp.ClientTimeout(total=60)
+        timeout = aiohttp.ClientTimeout(total=60, connect=10, sock_read=50)
 
-        for i, params in enumerate(variants, start=1):
-            logger.info(f"Sending request to HF endpoint (variant {i}/3)")
-            payload = {"inputs": prompt, "parameters": params}
+        # One session reused across variants (connection pooling, lower latency)
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            for i, params in enumerate(variants, start=1):
+                logger.info(f"Sending request to HF endpoint (variant {i}/3)")
+                payload = {"inputs": prompt, "parameters": params}
 
-            connector = aiohttp.TCPConnector(limit=10, limit_per_host=10, ssl=False)
-            session = aiohttp.ClientSession(connector=connector, headers=self.headers)
-            try:
-                async with session.post(self.endpoint, json=payload, timeout=timeout) as response:
-                    status = response.status
-                    text = await response.text()
-
-                    if status != 200:
-                        # Log the server's body to aid debugging (422, etc.)
-                        logger.error(f"HF endpoint returned {status}. Body: {text}")
-                        last_error_text = text
-                        # try next variant
-                        continue
-
-                    # Expect either [{ "generated_text": "..."}] or raw text
-                    try:
-                        result = json.loads(text)
-                    except json.JSONDecodeError:
-                        return clean_model_output(text)
-
-                    if isinstance(result, list) and result and isinstance(result[0], dict) and "generated_text" in result[0]:
-                        generated_text = result[0].get("generated_text") or ""
-                        # Some endpoints echo the prompt; strip if needed
-                        if generated_text.startswith(prompt):
-                            generated_text = generated_text[len(prompt):].lstrip()
-                        return clean_model_output(generated_text)
-
-                    # Fallback: stringify
-                    return clean_model_output(str(result))
-
-            except aiohttp.ClientError as e:
-                logger.error(f"Request failed: {e}", exc_info=True)
-                last_error_text = str(e)
-                continue
-            except Exception as e:
-                logger.error(f"Unexpected error: {e}", exc_info=True)
-                last_error_text = str(e)
-                continue
-            finally:
-                # Explicitly close to avoid "Unclosed client session/connector" on hot reload
                 try:
-                    await session.close()
-                finally:
-                    connector.close()
+                    async with session.post(self.endpoint, json=payload, timeout=timeout) as response:
+                        status = response.status
+                        text = await response.text()
+
+                        if status != 200:
+                            logger.error(f"HF endpoint returned {status}. Body: {text}")
+                            last_error_text = text
+                            continue
+
+                        # Expect either [{ "generated_text": "..."}] or raw text
+                        try:
+                            result = json.loads(text)
+                        except json.JSONDecodeError:
+                            return clean_model_output(text)
+
+                        if isinstance(result, list) and result and isinstance(result[0], dict) and "generated_text" in result[0]:
+                            generated_text = (result[0].get("generated_text") or "")
+                            if generated_text.startswith(prompt):
+                                generated_text = generated_text[len(prompt):].lstrip()
+                            return clean_model_output(generated_text)
+
+                        if isinstance(result, dict) and "generated_text" in result:
+                            return clean_model_output(result.get("generated_text") or "")
+
+                        # Fallback: stringify whatever we got
+                        return clean_model_output(str(result))
+
+                except aiohttp.ClientError as e:
+                    logger.error(f"Request failed: {e}", exc_info=True)
+                    last_error_text = str(e)
+                    continue
+                except Exception as e:
+                    logger.error(f"Unexpected error: {e}", exc_info=True)
+                    last_error_text = str(e)
+                    continue
 
         # If all variants failed:
         return f"Error: Could not connect to the model service. Last error: {last_error_text or 'unknown'}"
@@ -249,7 +231,7 @@ class HuggingFaceClient:
 # -------------------------------
 
 def _client() -> HuggingFaceClient:
-    # Stateless factory—fresh client object per call is fine (no persistent session).
+    # Stateless factory—fresh client object per call is fine (session is per-call).
     return HuggingFaceClient()
 
 async def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:

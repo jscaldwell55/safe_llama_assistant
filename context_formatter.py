@@ -1,4 +1,3 @@
-# context_formatter.py
 import logging
 import re
 from typing import Any, Iterable, List, Tuple, Union
@@ -100,4 +99,15 @@ def format_retrieved_context(chunks: Iterable[_Textish], max_chars: int = MAX_CO
 def context_formatter(chunks: Iterable[_Textish], max_chars: int = MAX_CONTEXT_LENGTH) -> str:
     return format_retrieved_context(chunks, max_chars=max_chars)
 
-__all__ = ["format_retrieved_context", "context_formatter"]
+def format_enhanced_context(
+    chunks: Iterable[_Textish],
+    query: str | None = None,
+    max_chars: int = MAX_CONTEXT_LENGTH
+) -> str:
+    """
+    Kept for callers that pass (chunks, query). We currently ignore `query` during formatting,
+    since retrieval already handles relevance, but the signature remains stable.
+    """
+    return format_retrieved_context(chunks, max_chars=max_chars)
+
+__all__ = ["format_retrieved_context", "format_enhanced_context", "context_formatter"]
