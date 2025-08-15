@@ -50,11 +50,12 @@ class HybridGuardAgent:
     Hybrid guard using both heuristics and LLM reasoning:
       1) Quick heuristic pre-checks for obvious violations
       2) Semantic grounding checks
-      3) LLM-based comprehensive safety evaluation
+      3) LLM-based comprehensive safety evaluation (optional)
     """
 
     def __init__(self):
         self.enabled = ENABLE_GUARD
+        self.use_llm_guard = None  # Will be loaded from config
         self.embedding_model = _load_embedding_model()
         try:
             self.sim_threshold = float(SEMANTIC_SIMILARITY_THRESHOLD)
@@ -90,6 +91,11 @@ class HybridGuardAgent:
         if not self.enabled:
             return True, assistant_response, "Guard disabled"
         
+        # Load LLM guard setting if not already loaded
+        if self.use_llm_guard is None:
+            from config import USE_LLM_GUARD
+            self.use_llm_guard = USE_LLM_GUARD
+        
         try:
             # Phase 1: Quick heuristic pre-checks for obvious violations
             obvious_violation = self._obvious_violation_check(user_question, assistant_response)
@@ -104,11 +110,27 @@ class HybridGuardAgent:
             
             grounding_score = self._calculate_grounding_score(assistant_response, context)
             
-            # Phase 3: LLM-based comprehensive evaluation (async to sync bridge)
-            llm_verdict = self._run_llm_evaluation(
-                context, user_question, assistant_response, 
-                conversation_history, grounding_score
-            )
+            # Phase 3: LLM-based comprehensive evaluation (skip if disabled or for simple responses)
+            if not self.use_llm_guard:
+                # Just use heuristics and grounding
+                llm_verdict = {
+                    "verdict": "APPROVE" if grounding_score > self.sim_threshold else "UNCERTAIN",
+                    "intent": "ANSWERING",
+                    "reason": "LLM guard disabled, using heuristics only",
+                    "confidence": 0.7
+                }
+            elif self._should_skip_llm_evaluation(assistant_response, grounding_score, claims):
+                llm_verdict = {
+                    "verdict": "APPROVE",
+                    "intent": "ANSWERING",
+                    "reason": "Simple response with good grounding, skipped LLM check",
+                    "confidence": 0.85
+                }
+            else:
+                llm_verdict = self._run_llm_evaluation(
+                    context, user_question, assistant_response, 
+                    conversation_history, grounding_score
+                )
             
             # Phase 4: Combine signals for final decision
             return self._final_verdict(
@@ -134,6 +156,26 @@ class HybridGuardAgent:
             return {"type": "medical_advice", "description": "Directive medical language detected"}
         
         return None
+
+    def _should_skip_llm_evaluation(self, response: str, grounding_score: float, claims: List[str]) -> bool:
+        """Determine if we can skip LLM evaluation for performance"""
+        # Skip LLM for responses with excellent grounding and no risky patterns
+        if grounding_score > 0.8 and not claims:
+            # Conversational response with high grounding
+            return True
+        
+        if grounding_score > 0.85 and claims:
+            # Check if response is just listing facts from context
+            response_lower = response.lower()
+            risky_phrases = ["should", "must", "recommend", "advise", "suggest", "do not", "never", "always"]
+            if not any(phrase in response_lower for phrase in risky_phrases):
+                return True
+        
+        # Skip for standard "no information" responses
+        if "don't have information" in response.lower() or "not in the documentation" in response.lower():
+            return True
+        
+        return False
 
     # ---------- Phase 2: Grounding score calculation ----------
     def _calculate_grounding_score(self, response: str, context: str) -> float:
