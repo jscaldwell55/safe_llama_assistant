@@ -1,3 +1,5 @@
+# config.py
+
 import os
 
 # Ensure downloads come from the public hub (not your inference endpoint)
@@ -33,6 +35,16 @@ MODEL_PARAMS = {
 # Conservative per-call cap for base assistant (latency)
 BASE_MAX_NEW_TOKENS = 220
 
+# Guard LLM specific parameters (lower temperature for more consistent evaluation)
+GUARD_MODEL_PARAMS = {
+    "max_new_tokens": 200,
+    "temperature": 0.3,
+    "do_sample": True,
+    "top_p": 0.9,
+    "repetition_penalty": 1.0,
+    "return_full_text": False
+}
+
 # ---------------- RAG ----------------
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 CHUNK_SIZE = 700
@@ -47,6 +59,10 @@ MAX_CHUNK_TOKENS = 800
 # ---------------- Guard ----------------
 ENABLE_GUARD = True
 SEMANTIC_SIMILARITY_THRESHOLD = 0.62
+# New: Control whether to use LLM evaluation in addition to heuristics
+USE_LLM_GUARD = True
+# Confidence threshold for LLM verdicts
+LLM_CONFIDENCE_THRESHOLD = 0.7
 
 # ---------------- Conversation ----------------
 MAX_CONVERSATION_TURNS = 0      # 0 => unlimited
@@ -70,3 +86,7 @@ SYSTEM_MESSAGES = {
 # ---------------- Logging ----------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+# ---------------- Debug Mode ----------------
+# Show detailed guard reasoning in UI when enabled
+SHOW_GUARD_REASONING = os.getenv("SHOW_GUARD_REASONING", "false").lower() == "true"

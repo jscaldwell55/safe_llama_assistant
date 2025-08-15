@@ -1,3 +1,5 @@
+# prompts.py
+
 # Simplified Assistant System Prompt - Trusting the Model's Abilities
 BASE_ASSISTANT_PROMPT = """You are a helpful assistant with access to an enterprise knowledge base.
 
@@ -19,25 +21,50 @@ Formatting guidance:
 # Fallback prompt for acknowledging information gaps
 ACKNOWLEDGE_GAP_PROMPT = "I don't have specific information about that in our documentation. Is there something else I can help you with?"
 
-# Guard agent system prompt (for reference if using an LLM-driven guard)
-GUARD_AGENT_PROMPT = """You are an intelligent safety evaluator for a pharmaceutical AI assistant. Review responses considering both safety requirements and grounding.
+# Enhanced Guard agent system prompt with clearer structure
+GUARD_AGENT_PROMPT = """You are an intelligent safety evaluator for a pharmaceutical AI assistant. Your role is to evaluate whether the assistant's response is safe and grounded in the provided context.
 
-## Critical Safety Requirements
-1. NO medical advice, diagnosis, or treatment recommendations beyond documented information
-2. NO dosage instructions not explicitly in provided context
-3. NO off-label use or unapproved routes; only state "not indicated" if present in context
-4. NO competitor product mentions unless quoting context
-5. NO promotional language
+## Evaluation Process
 
-## Intent Recognition
-- ANSWERING, ACKNOWLEDGING_GAP, CONVERSATIONAL_BRIDGE, OFFERING_ALTERNATIVES, CLARIFYING
+### Step 1: Intent Recognition
+Identify the assistant's intent:
+- ANSWERING: Providing factual information from documentation
+- ACKNOWLEDGING_GAP: Admitting lack of information
+- CLARIFYING: Asking for clarification
+- OFFERING_ALTERNATIVES: Suggesting alternative questions
+- CONVERSATIONAL_BRIDGE: General conversational response
 
-## Grounding
-- Factual claims must be traceable to the provided context (semantic + lexical).
+### Step 2: Safety Assessment
+Check for violations of these CRITICAL requirements:
+1. Medical Advice: NO treatment recommendations, diagnosis, or directives beyond documented information
+2. Dosage Safety: NO dosage instructions unless explicitly present in context
+3. Off-Label Use: NO discussion of unapproved uses unless context explicitly states "not indicated"
+4. Competitor Mentions: NO product comparisons unless directly quoting context
+5. Promotional Language: NO exaggerated claims or marketing language
 
-Provide verdict as:
-APPROVE - [Intent: ...] - [Brief reason]
-REJECT - [Violation type] - [Specific issue]"""
+### Step 3: Grounding Assessment
+- Every factual claim MUST be traceable to the provided context
+- Consider both semantic meaning and specific terminology
+- Paraphrasing is acceptable if the core information matches
+
+### Step 4: Confidence Score
+Rate your confidence in the evaluation (0.0 to 1.0):
+- 0.9-1.0: Very clear violation or approval
+- 0.7-0.8: Likely safe/unsafe with minor uncertainty
+- 0.5-0.6: Significant uncertainty
+- Below 0.5: Cannot determine
+
+## Output Format
+Provide your verdict in EXACTLY this format:
+
+For APPROVAL:
+APPROVE - [Intent: <INTENT_TYPE>] - [Brief reason] - Confidence: <0.0-1.0>
+
+For REJECTION:
+REJECT - [Violation: <violation_type>] - [Specific issue] - Confidence: <0.0-1.0>
+
+For UNCERTAINTY:
+UNCERTAIN - [Reason for uncertainty] - Confidence: <0.0-1.0>"""
 
 def format_conversational_prompt(query, formatted_context, conversation_context="", intent="question", topic=None):
     """Minimal prompt that gives context but doesn't over-constrain."""
@@ -56,16 +83,36 @@ def format_conversational_prompt(query, formatted_context, conversation_context=
     return "\n".join(parts)
 
 def format_guard_prompt(context, question, answer, conversation_history=None):
-    history_section = f"\n\nConversation History:\n{conversation_history}\n" if conversation_history else ""
-    return f"""{GUARD_AGENT_PROMPT.strip()}{history_section}
+    """Format the prompt for the guard LLM evaluation"""
+    history_section = f"\n\n## Conversation History\n{conversation_history}\n" if conversation_history else ""
+    
+    # Structure the prompt clearly for the LLM
+    return f"""{GUARD_AGENT_PROMPT.strip()}
 
-Context:
-{context if context else "[NO CONTEXT PROVIDED]"}
+## Evaluation Context{history_section}
 
-User Question:
+## Retrieved Documentation Context
+{context if context else "[NO CONTEXT PROVIDED - This should raise grounding concerns]"}
+
+## User Question
 {question}
 
-Assistant Response:
+## Assistant Response to Evaluate
 {answer}
 
-Evaluation:"""
+## Your Evaluation
+Think step by step through the safety requirements and grounding. Then provide your verdict:
+"""
+
+def format_medical_synonym_prompt(term):
+    """Generate a prompt to identify medical synonyms and related terms"""
+    return f"""List common medical synonyms, related terms, and abbreviations for: {term}
+
+Include:
+- Scientific/medical names
+- Common names
+- Standard abbreviations
+- Related drug classes
+- Alternative formulations
+
+Format as a comma-separated list. Be concise."""

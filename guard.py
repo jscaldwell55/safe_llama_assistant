@@ -1,7 +1,10 @@
+# guard.py
+
 import logging
 from typing import Dict, Any, Tuple, List, Optional
 import re
 import numpy as np
+import asyncio
 from config import (
     DEFAULT_FALLBACK_MESSAGE,
     ENABLE_GUARD,
@@ -24,7 +27,7 @@ def _load_embedding_model():
             logger.error(f"Guard could not init embedding model: {e}")
             return None
 
-# --- Patterns for critical checks ---
+# --- Patterns for critical checks (kept for pre-filtering obvious violations) ---
 MISUSE_PATTERNS = [
     r"\bcrush(?:ing)?\b", r"\bsnort(?:ing|ed)?\b", r"\binject(?:ing|ed|ion)?\b",
     r"\bsmok(?:e|ing|ed)\b", r"\bplug(?:ging)?\b", r"\bboof(?:ing)?\b", r"\bparachut(?:e|ing)\b",
@@ -35,47 +38,48 @@ OFFLABEL_CUES = [
     r"\boff[- ]label\b", r"\bnot approved\b", r"\bunapproved\b", r"\bnot indicated\b",
     r"\bfor (?:adhd|weight|sleep|pain|anxiety in children|performance)\b",
 ]
-PROMO_PATTERNS = [
-    r"\bbest\b.*\b(drug|medication|treatment)\b", r"\bmost effective\b", r"\bguaranteed\b",
-    r"\bamazing results\b", r"\bbreakthrough\b", r"\bmiraculous\b", r"\brevolutionary\b",
-]
 DOSING_DIRECTIVES = [
     r'\byou (should|must|need to) take\b', r'\bstart (taking|with)\b.*\bmg\b',
     r'\bstop taking\b', r'\bincrease your dose\b', r'\bdecrease your dose\b',
     r'\btake \d+\s*mg\b', r'\bdo not take\b.*\bif you\b'
 ]
-COMPETITOR_CUES = [
-    r"\bversus\b", r"\bvs\.\b", r"\bcompared to\b", r"\bunlike\b"
-]
 
-class EnhancedGuardAgent:
+class HybridGuardAgent:
     """
-    Binary guard:
-      1) Grounding to RAG context (semantic + lexical).
-      2) Enforce 5 Critical Safety Requirements with immediate reject on violation.
-    Heuristic-first. No LLM verdicts (prevents hallucinated rejections).
+    Hybrid guard using both heuristics and LLM reasoning:
+      1) Quick heuristic pre-checks for obvious violations
+      2) Semantic grounding checks
+      3) LLM-based comprehensive safety evaluation
     """
 
     def __init__(self):
         self.enabled = ENABLE_GUARD
         self.embedding_model = _load_embedding_model()
+        self.llm_client = None  # Will be lazy-loaded
         try:
             self.sim_threshold = float(SEMANTIC_SIMILARITY_THRESHOLD)
         except Exception:
-            self.sim_threshold = 0.65  # sensible default
+            self.sim_threshold = 0.65
 
         # User-facing fallbacks
         self.fallback_messages = {
             "default": "I can't help with that. Can we talk about something else?",
             "no_context": "I don't have sufficient information in our knowledge base to answer that. Could you rephrase your question or ask about something else?",
             "unsafe_medical": "I cannot provide medical advice. Please consult with a healthcare professional for medical guidance.",
-            "off_label_refusal": "I can’t provide information about unapproved or off-label uses. I can share what’s documented in the approved labeling.",
+            "off_label_refusal": "I can't provide information about unapproved or off-label uses. I can share what's documented in the approved labeling.",
             "misuse_refusal": (
-                "I can’t help with questions about misusing or altering medications. "
-                "If you’re in immediate danger, call local emergency services. "
+                "I can't help with questions about misusing or altering medications. "
+                "If you're in immediate danger, call local emergency services. "
                 "For confidential support with substance use, in the U.S. you can call SAMHSA at 1-800-662-HELP (4357)."
             ),
         }
+
+    def _get_llm_client(self):
+        """Lazy load the LLM client to avoid circular imports"""
+        if self.llm_client is None:
+            from llm_client import call_guard_agent
+            self.llm_client = call_guard_agent
+        return self.llm_client
 
     # ---------- Public API ----------
     def evaluate_response(
@@ -87,101 +91,199 @@ class EnhancedGuardAgent:
     ) -> Tuple[bool, str, str]:
         if not self.enabled:
             return True, assistant_response, "Guard disabled"
+        
         try:
-            # 0) Critical pre-checks driven by the USER QUESTION
-            if self._is_misuse_intent(user_question):
-                return False, self.fallback_messages["misuse_refusal"], "Reject: misuse/abusive route intent in user question."
+            # Phase 1: Quick heuristic pre-checks for obvious violations
+            obvious_violation = self._obvious_violation_check(user_question, assistant_response)
+            if obvious_violation:
+                fallback = self._fallback_for_violation_type(obvious_violation["type"])
+                return False, fallback, f"Reject (heuristic): {obvious_violation['description']}"
 
-            if self._is_offlabel_probe(user_question) and not self._has_safe_offlabel_context(context):
-                return False, self.fallback_messages["off_label_refusal"], "Reject: off-label request without explicit 'not indicated' context."
-
-            # 1) Intent (for logging only)
-            intent = self._analyze_response_intent(assistant_response)
-            logger.info(f"Identified response intent: {intent}")
-
-            # 2) Extract factual claims
+            # Phase 2: Semantic grounding check
             claims = self._extract_factual_claims(assistant_response)
-
-            # 3) Grounding gate: factual content but no context → reject
             if claims and not (context and context.strip()):
                 return False, self.fallback_messages["no_context"], "Reject: factual content with no retrieved context."
-
-            # 4) Safety checks (5 Critical Requirements)
-            safety_violations = self._safety_violations(user_question, assistant_response, context)
-            if safety_violations:
-                fallback = self._fallback_for_violations(safety_violations)
-                return False, fallback, f"Reject: {safety_violations[0]['description']}"
-
-            # 5) Per-claim grounding (semantic + lexical)
-            grounding_violations = []
-            for claim in claims:
-                score = self._semantic_similarity(claim, context)
-                if score < self.sim_threshold and not self._lexically_grounded(claim, context):
-                    grounding_violations.append({
-                        "type": "ungrounded_claim",
-                        "severity": "high",
-                        "claim": claim,
-                        "score": score,
-                        "description": f"Claim not supported by context (score={score:.2f})"
-                    })
-            if grounding_violations:
-                return False, self.fallback_messages["no_context"], "Reject: ungrounded factual claim(s)."
-
-            # APPROVE
-            return True, assistant_response, f"Approve: grounded and safety-compliant (intent={intent})."
+            
+            grounding_score = self._calculate_grounding_score(assistant_response, context)
+            
+            # Phase 3: LLM-based comprehensive evaluation (async to sync bridge)
+            llm_verdict = self._run_llm_evaluation(
+                context, user_question, assistant_response, 
+                conversation_history, grounding_score
+            )
+            
+            # Phase 4: Combine signals for final decision
+            return self._final_verdict(
+                assistant_response, grounding_score, llm_verdict, claims, context
+            )
 
         except Exception as e:
             logger.error(f"Guard evaluation failed: {e}", exc_info=True)
             return False, self.fallback_messages["default"], f"Guard evaluation error: {str(e)}"
 
-    # ---------- Critical requirement checks ----------
-    def _safety_violations(self, question: str, response: str, context: str) -> List[Dict[str, Any]]:
-        v: List[Dict[str, Any]] = []
+    # ---------- Phase 1: Obvious violation checks ----------
+    def _obvious_violation_check(self, question: str, response: str) -> Optional[Dict[str, Any]]:
+        """Quick pattern-based check for obvious violations"""
+        ql = question.lower()
         rl = response.lower()
-
-        # 1) Medical advice / treatment recommendations (beyond documented)
+        
+        # Check for misuse intent
+        if self._contains_pattern(ql, MISUSE_PATTERNS) or self._contains_pattern(rl, MISUSE_PATTERNS):
+            return {"type": "misuse", "description": "Misuse or unapproved route detected"}
+        
+        # Check for obvious directive medical language
         if self._contains_pattern(rl, DOSING_DIRECTIVES):
-            v.append({"type": "medical_advice", "severity": "critical", "description": "Directive medical language."})
+            return {"type": "medical_advice", "description": "Directive medical language detected"}
+        
+        return None
 
-        # 2) Dosage instructions not explicitly in context
-        if re.search(r'\b\d+\s*mg\b', rl) and not self._lexically_grounded(response, context):
-            v.append({"type": "dosage_not_in_context", "severity": "critical", "description": "Dosage mentioned without explicit support in context."})
+    # ---------- Phase 2: Grounding score calculation ----------
+    def _calculate_grounding_score(self, response: str, context: str) -> float:
+        """Calculate overall grounding score for the response"""
+        if not context:
+            return 0.0
+        
+        # Get semantic similarity for the full response
+        full_score = self._semantic_similarity(response, context)
+        
+        # Also check individual claims
+        claims = self._extract_factual_claims(response)
+        if not claims:
+            return full_score
+        
+        claim_scores = [self._semantic_similarity(claim, context) for claim in claims]
+        avg_claim_score = sum(claim_scores) / len(claim_scores) if claim_scores else 0
+        
+        # Weight both full response and individual claims
+        return 0.4 * full_score + 0.6 * avg_claim_score
 
-        # 3) Misuse / unapproved route
-        if self._is_misuse_intent(question) or self._contains_pattern(rl, MISUSE_PATTERNS):
-            v.append({"type": "misuse", "severity": "critical", "description": "Misuse or unapproved route of administration."})
-        if self._is_offlabel_probe(question) and not self._has_safe_offlabel_context(context):
-            v.append({"type": "off_label", "severity": "high", "description": "Off-label topic without explicit 'not indicated' support."})
+    # ---------- Phase 3: LLM evaluation ----------
+    def _run_llm_evaluation(
+        self, context: str, question: str, response: str, 
+        conversation_history: Optional[str], grounding_score: float
+    ) -> Dict[str, Any]:
+        """Run LLM-based evaluation (with async-to-sync bridge)"""
+        try:
+            # Format the prompt for the guard LLM
+            from prompts import format_guard_prompt
+            prompt = format_guard_prompt(
+                context=context,
+                question=question,
+                answer=response,
+                conversation_history=conversation_history
+            )
+            
+            # Add grounding score to help LLM
+            prompt += f"\n\nGrounding Score: {grounding_score:.2f}"
+            
+            # Call the LLM (handle async)
+            llm_response = asyncio.run(self._get_llm_client()(prompt))
+            
+            # Parse LLM verdict
+            return self._parse_llm_verdict(llm_response)
+            
+        except Exception as e:
+            logger.error(f"LLM evaluation failed: {e}", exc_info=True)
+            # Fallback to heuristics if LLM fails
+            return {"verdict": "UNCERTAIN", "reason": f"LLM evaluation failed: {str(e)}"}
 
-        # 4) Competitor mentions not in context (rough heuristic)
-        if self._contains_pattern(rl, COMPETITOR_CUES):
-            brandish = set(re.findall(r'\b[A-Z][a-zA-Z0-9]{2,}\b', response))
-            brandish = {b for b in brandish if b.lower() not in {"i", "we", "assistant", "user"}}
-            for b in brandish:
-                if b.lower() not in context.lower():
-                    v.append({"type": "competitor_mention", "severity": "medium", "description": f"Competitor/product mention not present in context: {b}"})
-                    break
+    def _parse_llm_verdict(self, llm_response: str) -> Dict[str, Any]:
+        """Parse the LLM's verdict from its response"""
+        response_lower = llm_response.lower()
+        
+        # Look for clear verdict signals
+        if "approve" in response_lower and "reject" not in response_lower:
+            # Extract intent and reason
+            intent_match = re.search(r'\[Intent:\s*([^\]]+)\]', llm_response, re.IGNORECASE)
+            reason_match = re.search(r'\[(?:Brief\s+)?reason:\s*([^\]]+)\]', llm_response, re.IGNORECASE)
+            
+            return {
+                "verdict": "APPROVE",
+                "intent": intent_match.group(1) if intent_match else "UNKNOWN",
+                "reason": reason_match.group(1) if reason_match else llm_response,
+                "confidence": self._extract_confidence(llm_response)
+            }
+        
+        elif "reject" in response_lower:
+            # Extract violation type and issue
+            violation_match = re.search(r'\[([^\]]+)\]', llm_response)
+            issue_match = re.search(r'\[Specific issue:\s*([^\]]+)\]', llm_response, re.IGNORECASE)
+            
+            return {
+                "verdict": "REJECT",
+                "violation_type": violation_match.group(1) if violation_match else "UNKNOWN",
+                "issue": issue_match.group(1) if issue_match else llm_response,
+                "confidence": self._extract_confidence(llm_response)
+            }
+        
+        else:
+            return {
+                "verdict": "UNCERTAIN",
+                "reason": llm_response,
+                "confidence": 0.5
+            }
 
-        # 5) Promotional language
-        if self._contains_pattern(rl, PROMO_PATTERNS):
-            v.append({"type": "promotional_language", "severity": "medium", "description": "Promotional or exaggerated wording."})
+    def _extract_confidence(self, llm_response: str) -> float:
+        """Extract confidence score if mentioned by LLM"""
+        confidence_match = re.search(r'confidence[:\s]+(\d+(?:\.\d+)?)', llm_response, re.IGNORECASE)
+        if confidence_match:
+            try:
+                return float(confidence_match.group(1))
+            except:
+                pass
+        # Default confidence based on verdict clarity
+        if "strongly" in llm_response.lower() or "clearly" in llm_response.lower():
+            return 0.9
+        elif "uncertain" in llm_response.lower() or "unclear" in llm_response.lower():
+            return 0.5
+        return 0.75
 
-        return v
+    # ---------- Phase 4: Final verdict combination ----------
+    def _final_verdict(
+        self, 
+        response: str,
+        grounding_score: float,
+        llm_verdict: Dict[str, Any],
+        claims: List[str],
+        context: str
+    ) -> Tuple[bool, str, str]:
+        """Combine all signals for final decision"""
+        
+        # Strong rejection from LLM with high confidence
+        if llm_verdict["verdict"] == "REJECT" and llm_verdict.get("confidence", 0) > 0.7:
+            violation_type = llm_verdict.get("violation_type", "safety_violation")
+            fallback = self._fallback_for_violation_type(violation_type)
+            return False, fallback, f"Reject (LLM): {llm_verdict.get('issue', 'Safety violation detected')}"
+        
+        # Poor grounding score (even if LLM approves)
+        if grounding_score < self.sim_threshold and claims:
+            # Double-check with lexical grounding as fallback
+            if not self._lexically_grounded(response, context):
+                return False, self.fallback_messages["no_context"], f"Reject: Poor grounding (score={grounding_score:.2f})"
+        
+        # LLM uncertain but grounding is good
+        if llm_verdict["verdict"] == "UNCERTAIN" and grounding_score > self.sim_threshold:
+            # Trust grounding and approve with caution
+            return True, response, f"Approve with caution: Good grounding ({grounding_score:.2f}), LLM uncertain"
+        
+        # LLM approves with good grounding
+        if llm_verdict["verdict"] == "APPROVE" and grounding_score > self.sim_threshold:
+            intent = llm_verdict.get("intent", "ANSWERING")
+            return True, response, f"Approve: LLM approved (intent={intent}), grounding={grounding_score:.2f}"
+        
+        # Default to safety when uncertain
+        if llm_verdict["verdict"] == "UNCERTAIN":
+            return False, self.fallback_messages["default"], "Reject: Uncertain safety evaluation"
+        
+        # Approve if LLM approves (even with lower grounding for conversational responses)
+        if llm_verdict["verdict"] == "APPROVE":
+            intent = llm_verdict.get("intent", "ANSWERING")
+            return True, response, f"Approve: LLM approved (intent={intent})"
+        
+        # Default reject
+        return False, self.fallback_messages["default"], "Reject: Failed comprehensive evaluation"
 
-    # ---------- Intent detection (logging only) ----------
-    def _analyze_response_intent(self, response: str) -> str:
-        if self._has_factual_content(response):
-            return "ANSWERING"
-        rl = response.lower()
-        if any(p in rl for p in ["could you clarify", "could you specify", "which aspect", "do you mean", "are you asking about"]):
-            return "CLARIFYING"
-        if any(p in rl for p in ["i don't have information", "not in the documentation", "unable to find"]):
-            return "ACKNOWLEDGING_GAP"
-        if any(p in rl for p in ["i can help with", "would you like to know about", "alternatively"]):
-            return "OFFERING_ALTERNATIVES"
-        return "CONVERSATIONAL_BRIDGE"
-
-    # ---------- Factual claim extraction ----------
+    # ---------- Helper methods (kept from original) ----------
     def _extract_factual_claims(self, response: str) -> List[str]:
         if not response:
             return []
@@ -211,29 +313,6 @@ class EnhancedGuardAgent:
             if any(re.search(p, sl) for p in factual_indicators):
                 claims.append(s)
         return claims
-
-    # ---------- Helpers: misuse/off-label ----------
-    def _is_misuse_intent(self, text: str) -> bool:
-        return self._contains_pattern(text.lower(), MISUSE_PATTERNS)
-
-    def _is_offlabel_probe(self, text: str) -> bool:
-        tl = text.lower()
-        return any(re.search(p, tl) for p in OFFLABEL_CUES)
-
-    def _has_safe_offlabel_context(self, context: str) -> bool:
-        if not context:
-            return False
-        return bool(re.search(r"\b(not indicated|not approved)\b", context.lower()))
-
-    # ---------- Helpers: grounding ----------
-    def _has_factual_content(self, text: str) -> bool:
-        indicators = [
-            r'\b(?:is|are|was|were)\s+\w+', r'\b(?:contains?|includes?|has|have)\s+\w+',
-            r'\b(?:causes?|results?\s+in|leads?\s+to)\s+\w+', r'\b(?:works?\s+by|functions?\s+through)\s+\w+',
-            r'\b\d+\s*(?:percent|%|mg|ml|mcg|iu|units?)\b', r'\b(?:approved|indicated|prescribed)\s+(?:for|to)\b',
-            r'\b(?:effective|ineffective|safe|unsafe)\s+(?:for|in|against)\b',
-        ]
-        return any(re.search(p, text.lower()) for p in indicators)
 
     def _semantic_similarity(self, statement: str, context: str) -> float:
         if not context:
@@ -272,20 +351,21 @@ class EnhancedGuardAgent:
     def _contains_pattern(self, text_lower: str, patterns: List[str]) -> bool:
         return any(re.search(p, text_lower) for p in patterns)
 
-    def _fallback_for_violations(self, violations: List[Dict[str, Any]]) -> str:
-        types = [v.get("type") for v in violations]
-        if "misuse" in types:
+    def _fallback_for_violation_type(self, violation_type: str) -> str:
+        violation_lower = violation_type.lower()
+        if "misuse" in violation_lower:
             return self.fallback_messages["misuse_refusal"]
-        if "off_label" in types:
+        elif "off" in violation_lower and "label" in violation_lower:
             return self.fallback_messages["off_label_refusal"]
-        if "medical_advice" in types or "dosage_not_in_context" in types:
+        elif "medical" in violation_lower or "dosage" in violation_lower:
             return self.fallback_messages["unsafe_medical"]
-        if "ungrounded_claim" in types:
+        elif "ground" in violation_lower:
             return self.fallback_messages["no_context"]
-        return self.fallback_messages["default"]
+        else:
+            return self.fallback_messages["default"]
 
 # Global instance + wrapper
-guard_agent = EnhancedGuardAgent()
+guard_agent = HybridGuardAgent()
 
 def evaluate_response(
     context: str,
