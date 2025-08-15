@@ -62,6 +62,8 @@ MAX_CONTEXT_LENGTH = 4000           # characters
 
 # UI
 APP_TITLE = "🛡️ Safe Enterprise Assistant"
+WELCOME_MESSAGE = "Hello! I can answer questions about our documentation. Ask me anything to get started."
+
 DEFAULT_FALLBACK_MESSAGE = "I don't have that information in our knowledge base. Could you rephrase your question or ask about something else?"
 
 SYSTEM_MESSAGES = {

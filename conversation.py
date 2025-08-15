@@ -4,7 +4,7 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import re
-from config import MAX_CONVERSATION_TURNS, SESSION_TIMEOUT_MINUTES
+from config import MAX_CONVERSATION_TURNS, SESSION_TIMEOUT_MINUTES, WELCOME_MESSAGE
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,9 @@ class ConversationManager:
     def start_new_conversation(self):
         self.conversation = ConversationContext()
         logger.info("Started new conversation")
+        # Seed a welcome message that shows on app load and on "New Conversation"
+        if WELCOME_MESSAGE:
+            self.conversation.turns.append(ConversationTurn(role="assistant", content=WELCOME_MESSAGE))
 
     def add_turn(self, role: str, content: str):
         if not self.conversation:

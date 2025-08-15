@@ -1,5 +1,6 @@
 # conversational_agent.py
 import logging
+import re
 from typing import Dict, Any
 from dataclasses import dataclass, field
 from enum import Enum
@@ -27,11 +28,33 @@ class AgentDecision:
 
 class ConversationalAgent:
     def __init__(self):
-        self.greetings = {"hello", "hi", "hey", "good morning", "good afternoon"}
+        # Word-level greetings and phrase-level greetings
+        self.greeting_words = {"hi", "hello", "hey"}
+        self.greeting_phrases = {"good morning", "good afternoon", "good evening"}
 
     def _is_greeting(self, query: str) -> bool:
+        """
+        Consider it a greeting ONLY if it is a short, standalone greeting,
+        with no question mark and no additional content.
+        Examples considered greeting: "hi", "hello", "hey", "good morning"
+        Examples NOT considered greeting: "hello, can you...", "hi there could you...", "hello?"
+        """
         q = query.lower().strip()
-        return any(q.startswith(g) for g in self.greetings)
+
+        # If it contains a question mark, treat as a real query
+        if "?" in q:
+            return False
+
+        # Exact phrase greetings
+        if q in self.greeting_phrases:
+            return True
+
+        # Word-only greetings with <= 3 tokens, all in greeting_words
+        words = re.findall(r"[a-z]+", q)
+        if 1 <= len(words) <= 3 and all(w in self.greeting_words for w in words):
+            return True
+
+        return False
 
     def process_query(self, query: str) -> AgentDecision:
         conversation_manager = get_conversation_manager()
