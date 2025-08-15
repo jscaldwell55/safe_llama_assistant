@@ -16,22 +16,18 @@ logger.info("=== Starting Streamlit app initialization ===")
 
 # --- LAZY-LOADING IMPORTS ---
 def get_dependencies():
-    from config import APP_TITLE, WELCOME_MESSAGE, HF_INFERENCE_ENDPOINT
-    # prompts module (renamed from prompt.py)
+    from config import APP_TITLE, WELCOME_MESSAGE
     from prompts import format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
-    # llm client exposes call_* helpers
-    from llm_client import call_base_assistant, reset_hf_client
+    from llm_client import call_base_assistant              # ⬅️ only this; no reset/get_hf_client
     from guard import evaluate_response
     from conversation import get_conversation_manager
     from conversational_agent import get_conversational_agent, ConversationMode
     return {
         "APP_TITLE": APP_TITLE,
         "WELCOME_MESSAGE": WELCOME_MESSAGE,
-        "HF_INFERENCE_ENDPOINT": HF_INFERENCE_ENDPOINT,
         "format_conversational_prompt": format_conversational_prompt,
         "ACKNOWLEDGE_GAP_PROMPT": ACKNOWLEDGE_GAP_PROMPT,
         "call_base_assistant": call_base_assistant,
-        "reset_hf_client": reset_hf_client,
         "evaluate_response": evaluate_response,
         "get_conversation_manager": get_conversation_manager,
         "get_conversational_agent": get_conversational_agent,
@@ -58,23 +54,6 @@ st.title(deps["APP_TITLE"])
 conversation_manager = deps["get_conversation_manager"]()
 conversational_agent = deps["get_conversational_agent"]()
 
-# --- UTILS ---
-def _mask_endpoint(ep: str) -> str:
-    if not ep:
-        return "(not set)"
-    ep = ep.strip()
-    if len(ep) <= 22:
-        return ep
-    # keep scheme + host prefix and last 8 chars
-    # e.g., https://xyz...cloud → https://xyz…cloud/…c0ffee42
-    try:
-        scheme, rest = ep.split("://", 1)
-        host = rest.split("/", 1)[0]
-        tail = ep[-8:]
-        return f"{scheme}://{host}…/{tail}"
-    except Exception:
-        return ep[:22] + "…"
-
 # --- ASYNC HELPER ---
 def run_async(coro):
     """Run an async coroutine safely from Streamlit's sync context."""
@@ -84,7 +63,6 @@ def run_async(coro):
         loop = None
 
     if loop and loop.is_running():
-        # In case Streamlit already has a loop running, execute in a thread
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(asyncio.run, coro)
@@ -129,7 +107,7 @@ async def handle_query_async(query: str) -> dict:
             draft_response = await deps["call_base_assistant"](prompt_for_llm)
 
             # If model returns an error sentinel, short-circuit gracefully
-            if isinstance(draft_response, str) and draft_response.startswith("Error:"):
+            if draft_response.startswith("Error:"):
                 return {
                     "success": False,
                     "response": "I'm sorry — there was a temporary issue contacting the model. Please try again.",
@@ -181,21 +159,10 @@ with st.sidebar:
         st.success("Started new conversation")
         st.rerun()
 
-    # Optional: endpoint rotation tool (kept off by default; uncomment if you want)
-    # if debug_mode:
-    #     st.subheader("🧠 Model")
-    #     st.caption(f"Endpoint: {_mask_endpoint(deps['HF_INFERENCE_ENDPOINT'])}")
-    #     if st.button("Reload Model Client"):
-    #         try:
-    #             deps["reset_hf_client"]()
-    #             st.success("Model client reloaded.")
-    #         except Exception as e:
-    #             st.error(f"Failed to reload client: {e}")
-
 # --- MAIN UI ---
 st.markdown("### 💬 Ask me anything about Lexapro")
 
-# Display chat history (conversation manager seeds WELCOME_MESSAGE on new session)
+# Display chat history (conversation manager should seed WELCOME_MESSAGE on new session)
 for turn in conversation_manager.get_turns():
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
@@ -213,9 +180,7 @@ if query := st.chat_input("Type your question…"):
                 st.error("⚠️ **Safety Filter Active**")
                 st.warning(result["response"])
                 if debug_mode:
-                    st.expander("🛡️ Guard Details").write(
-                        result.get("debug_info", {}).get("guard_reasoning", "No reason provided.")
-                    )
+                    st.expander("🛡️ Guard Details").write(result.get("debug_info", {}).get("guard_reasoning", "No reason provided."))
             else:
                 st.write(result["response"])
         else:
