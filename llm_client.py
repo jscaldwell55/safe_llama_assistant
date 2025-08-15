@@ -28,6 +28,17 @@ _META_LINE_PATTERNS = [
     r"^\s*debug\s*:",
 ]
 
+# Add pattern to remove meta-commentary in parentheses
+_META_PARENTHETICAL_PATTERNS = [
+    r'\s*\(Note:.*?formatted according.*?\)',
+    r'\s*\(This response.*?guidelines.*?\)',
+    r'\s*\(I have.*?instructions.*?\)',
+    r'\s*\(Following.*?requirements.*?\)',
+    r'\s*\(As per.*?guidelines.*?\)',
+    r'\s*\(According to.*?rules.*?\)',
+    r'\s*\(The above.*?\)',
+]
+
 def _trim_to_complete_sentence(text: str) -> str:
     """Ensure we end on a sentence boundary; drop trailing fragments."""
     if not text:
@@ -74,6 +85,10 @@ def clean_model_output(text: str) -> str:
     for prefix in ["Assistant:", "assistant:", "ASSISTANT:"]:
         if text.startswith(prefix):
             text = text[len(prefix):].lstrip()
+
+    # Remove meta-commentary in parentheses about following guidelines
+    for pattern in _META_PARENTHETICAL_PATTERNS:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
 
     # Cut at common OOB markers
     for m in [
@@ -387,10 +402,10 @@ async def stream_base_assistant(prompt: str) -> AsyncGenerator[str, None]:
 async def call_guard_agent(prompt: str) -> str:
     guard_params = MODEL_PARAMS.copy()
     guard_params.update({
-        "temperature": 0.2,
+        "temperature": 0.3,
         "top_p": 0.9,
         "repetition_penalty": 1.0,
-        "max_new_tokens": 50,
+        "max_new_tokens": 200,
         "stop": ["\n\n", "User:", "Assistant:", "###"]
     })
     raw = await call_huggingface(prompt, guard_params)
