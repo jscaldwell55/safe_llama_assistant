@@ -1,141 +1,150 @@
-Safe Enterprise Assistant
+Pharma Enterprise Assistant
 
-A trust-based pharmaceutical RAG (Retrieval-Augmented Generation) assistant that uses a Hugging Face Inference Endpoint for generation, with strict post-generation safety and context grounding. Built with Streamlit.
+A trust-based pharmaceutical RAG assistant that talks naturally while enforcing strict post-generation safety and context grounding.
+Frontend and orchestration run in Streamlit; generation uses a Hugging Face Inference Endpoint.
 
-What’s new (since the last README)
+What’s new
 
-Welcome message on load: Users see a configurable WELCOME_MESSAGE immediately and can start typing (no “hello” back-and-forth).
+Welcome on load: Each new session shows a configurable greeting (WELCOME_MESSAGE) so users can start typing immediately.
 
-Greeting ≠ question: Only standalone “hi/hello/hey” are treated as greetings. “hello, can you…” is handled as a real question with RAG.
+Greeting ≠ question: Only standalone “hi/hello/hey/good morning/afternoon/evening” are treated as greetings. “hello, can you…” triggers full RAG.
 
-Hardened Hugging Face client:
+Endpoint resilience:
 
-Accepts ≤ 4 stop tokens (avoids 422 errors) and tries stop → stop_sequences → none.
+Supports ≤ 4 stop tokens; auto-fallback from stop → stop_sequences → none to avoid 422s.
 
-Fresh HTTP session per call; no “session closed” errors on retries.
+Fresh HTTP session per call (no “session closed” on retry).
 
-Logs non-200 response bodies for easier debugging.
+Error body logging for easier debugging.
 
-Safer guard:
+Reload Model Client button to hot-swap endpoints.
 
-If the reply contains facts, it’s treated as ANSWERING (validated + grounded), even if it starts with a greeting.
+Guard hardened to philosophy:
 
-“Ungrounded” requires both low embedding similarity and low lexical overlap (reduces false rejects).
+If a reply contains facts, it’s treated as ANSWERING and must be grounded.
 
-Graceful degradation if the embedding model isn’t available.
+Dual grounding: semantic similarity (configurable threshold) and lexical overlap.
 
-Clear, category-appropriate fallback messages.
+Immediate refusal for misuse/abusive routes (e.g., crush/snort/inject) and off-label probes without explicit “not indicated” context.
 
-Model error hygiene: If the model call fails, the app does not run the guard or write the error into chat history; users see a friendly error.
+Graceful degrade if embeddings unavailable; category-appropriate fallback messages.
 
-Endpoint rotation made easy: Update HF_INFERENCE_ENDPOINT only (secrets/env). Optional “Reload Model Client” button in the UI.
+Model error hygiene: If generation fails, the app shows a friendly error and does not guard or save that turn.
 
-Renamed prompt module: prompt.py → prompts.py (prevents hot-reload KeyError).
+Session resets on refresh: Conversation state is tied to Streamlit session; page refresh starts a new session with the default greeting.
+
+Prompts module rename: prompt.py → prompts.py to avoid hot-reload import issues.
 
 Philosophy
 
-Shift from constraint-heavy prompts to trust-based generation with strict post-checks:
-
-Trust the model for natural conversation.
+We trust the model to converse naturally and constrain with post-checks:
 
 Minimal prompts, structured context.
 
-Post-generation safety that understands intent and grounding.
+No outside knowledge: respond only with content retrieved from the knowledge base; if nothing relevant is retrieved, redirect.
 
-Binary decisions (approve/reject) for compliance clarity.
+Binary safety: approve or reject—no partial credit.
 
-System Architecture
+Compliance by construction: enforce safety via guard rules, not sprawling prompts.
+
+Critical Safety Requirements (enforced by guard)
+
+No medical advice/diagnosis/treatment beyond documented information.
+
+No dosage unless verbatim present in context (and accurately attributed).
+
+No off-label or unapproved routes; if context says “not indicated,” it may be stated—then stop.
+
+No competitor mentions unless present in context.
+
+No promotional language (“best,” “guaranteed,” “breakthrough,” “most effective,” etc.).
+
+Additionally: explicit misuse/abuse intent (crush/snort/inject, etc.) receives an immediate refusal with safety resources.
+
+Architecture
 User → app.py (UI)
            ↓
    conversational_agent.py (routing)
-           ├─ conversation.py (state, welcome, entities)
+           ├─ conversation.py (session state, welcome, entities)
            ├─ rag.py (retrieve) ── semantic_chunker.py (chunk)
            ├─ context_formatter.py (format retrieved context)
            ├─ llm_client.py (HF endpoint; robust params/retries)
-           └─ guard.py (intent + grounding + safety → approve/reject)
+           └─ guard.py (intent + dual grounding + safety → approve/reject)
 
-Core Components
+Core components
 Streamlit App (app.py)
-
-Welcome on load via conversation.py.
 
 RAG-then-Check pipeline.
 
-Model-error short-circuit: don’t guard or save when generation fails; show a friendly message.
+Short-circuit on model error (no guard, no history write).
 
-Sidebar tools: Debug Mode, Show Context, New Conversation, Build/Refresh Index, Reload Model Client.
+Sidebar: Debug Mode, Show Context, New Conversation, Build/Refresh Index, Reload Model Client.
+
+Header text: “💬 Ask me anything about Lexapro”.
 
 Conversational Agent (conversational_agent.py)
 
-Standalone greeting detection (only short “hi/hello/hey” or “good morning/afternoon/evening” with no “?”).
+Detects standalone greetings; everything else runs RAG.
 
-Enhances queries with recent entities for better retrieval.
-
-Always runs RAG retrieval for non-greetings.
+Enhances follow-ups with recent entities for better retrieval.
 
 Conversation Manager (conversation.py)
 
-Seeds each session with WELCOME_MESSAGE.
+Seeds each session with WELCOME_MESSAGE (“Hello! How can I help you today?”).
 
-Tracks last turns + lightweight entity extraction.
+Streamlit session-scoped → page refresh creates a fresh conversation.
 
-Session limits & timeout.
+Tracks recent turns and lightweight entity hints.
 
 RAG Pipeline (rag.py)
 
-SentenceTransformers embeddings (all-MiniLM-L6-v2).
+Embeddings: SentenceTransformers (all-MiniLM-L6-v2).
 
-FAISS flat index; persistent on disk.
+Vector store: FAISS (flat), persisted to disk.
 
-Batch embedding generation for memory efficiency.
+Batch embedding for memory efficiency.
 
 PDF ingestion via PyMuPDF.
 
-One-call helper: retrieve_and_format_context(query) returns a concise, formatted context block.
+Helper: retrieve_and_format_context(query) returns a compact, citation-ready block.
 
 Semantic Chunker (semantic_chunker.py)
 
-Hybrid chunking (sections → paragraphs; or fallback).
+Hybrid chunking (sections → paragraphs; fallback strategies).
 
-NLTK sentence tokenizer; paragraph and recursive splitters.
-
-FDA-style section detection.
+NLTK sentence tokenizer; FDA-style section detection.
 
 Context Formatter (context_formatter.py)
 
-Simple deduplication and compact, readable context assembly with separators and length limits.
+Simple dedup + separators; respects context length limits.
 
 LLM Client (llm_client.py)
 
-Calls your Hugging Face Inference Endpoint.
+Hugging Face Inference Endpoint with:
 
-Stop tokens ≤ 4; tries stop → stop_sequences → none (resolves endpoint differences).
+≤ 4 stop tokens & auto-fallback strategy.
 
-Fresh per-call session; logs non-200 body text.
+Fresh per-call session; response body logging.
 
 Small in-memory cache.
 
-reset_hf_client() for hot endpoint rotation.
+reset_hf_client() for endpoint rotation.
 
 Enhanced Guard (guard.py)
 
-Intent recognition: ANSWERING, ACKNOWLEDGING_GAP, CONVERSATIONAL_BRIDGE, OFFERING_ALTERNATIVES, CLARIFYING.
+Intent detection for logging: ANSWERING, ACKNOWLEDGING_GAP, CONVERSATIONAL_BRIDGE, OFFERING_ALTERNATIVES, CLARIFYING.
 
-If facts exist → ANSWERING (mandatory grounding).
+Dual grounding gate for factual content (semantic + lexical).
 
-Dual grounding: embedding similarity (configurable threshold) and lexical overlap.
+Hard rejects for the 5 safety rules, plus misuse and off-label probes w/o “not indicated” context.
 
-Medical safety checks (directives, overstatements).
-
-Graceful degrade if embeddings unavailable.
-
-Appropriate fallbacks (e.g., unsafe medical vs. no context).
+Graceful degrade if embeddings unavailable; category-specific fallbacks.
 
 Embedding Loader (embeddings.py)
 
-Shared singleton loader for SentenceTransformer models.
+Shared singleton for SentenceTransformer model.
 
-Centralizes logging (you’ll see: “Loaded embedding model: all-MiniLM-L6-v2”).
+Centralized logging (e.g., “Loaded embedding model: all-MiniLM-L6-v2”).
 
 Workflow
 
@@ -143,137 +152,94 @@ User input
 
 Agent routing
 
-Standalone greeting? → short friendly reply.
+Standalone greeting? → short, friendly reply.
 
-Otherwise enhance query and run RAG.
+Otherwise → enhance query and run RAG.
 
-Context formatting → compact block.
+Context formatting → compact, deduplicated block.
 
-Generation → HF Endpoint.
+Generation → Hugging Face endpoint.
 
-If model error → show friendly error; stop.
+On error → friendly message, stop.
 
 Guard
 
-Detect intent; extract claims.
+Detect intent (for analysis).
 
-Grounding (semantic + lexical); medical checks.
+Safety checks (5 rules + misuse/off-label).
+
+Dual grounding of factual claims.
 
 Approve or return fallback.
 
-Chat history updated only on approved replies.
+History updated only on approved replies.
 
 Configuration
-Secrets / Environment
 
-Set only these two:
+Secrets / env:
 
-# .streamlit/secrets.toml  (recommended)
-HF_TOKEN = "hf_xxx"
-HF_INFERENCE_ENDPOINT = "https://<your-endpoint-id>.endpoints.huggingface.cloud"
+HF_TOKEN
 
+HF_INFERENCE_ENDPOINT (the full Hugging Face endpoint URL)
 
-or
+Endpoint rotation:
+Update HF_INFERENCE_ENDPOINT in secrets/env, then restart or use Reload Model Client in the sidebar.
 
-# .env or platform variables
-export HF_TOKEN=hf_xxx
-export HF_INFERENCE_ENDPOINT="https://<your-endpoint-id>.endpoints.huggingface.cloud"
+Key parameters (see config.py):
 
+Model: temperature 0.7, top_p 0.9, repetition_penalty 1.1, base max_new_tokens 300.
 
-⚠️ We intentionally pin download hub envs inside code:
-HF_ENDPOINT=https://huggingface.co (for model downloads) — do not use this for inference.
+Stops: up to 4; client auto-fallback handles endpoint differences.
 
-Quick Endpoint Rotation
+RAG: top-k 8; chunks ≈ 800 chars; overlap ≈ 150.
 
-Update HF_INFERENCE_ENDPOINT in secrets/env.
+Embeddings: all-MiniLM-L6-v2; batch size 32.
 
-Restart the app or click “Reload Model Client” in the sidebar.
-
-Key Parameters (config.py)
-
-Model: temperature=0.7, top_p=0.9, repetition_penalty=1.1, max_new_tokens=300 (base call).
-
-Stops: up to 4; client auto-fallbacks if your endpoint expects different keys.
-
-RAG: top-k=8; chunk size ~800 chars; overlap ~150.
-
-Embeddings: all-MiniLM-L6-v2; batch size=32.
-
-Guard: SEMANTIC_SIMILARITY_THRESHOLD (default ~0.60–0.70) + lexical backup; binary approve/reject.
+Guard: SEMANTIC_SIMILARITY_THRESHOLD (≈0.60–0.70) + lexical backup; binary approve/reject.
 
 Conversation: 10 exchanges (20 turns), 30-min timeout.
 
-UI: WELCOME_MESSAGE controls the initial banner text.
+UI: WELCOME_MESSAGE controls the initial greeting.
 
-Installation
-# Python deps
-pip install -r requirements.txt
+Model download hub:
+Internally pinned to https://huggingface.co for downloading open models (distinct from your inference endpoint).
 
-# NLTK data (first run can auto-download; these ensure consistency)
-python -c "import nltk; nltk.download('punkt_tab'); nltk.download('averaged_perceptron_tagger_eng'); nltk.download('words')"
+Safety & compliance
 
-Usage
+Answers must be traceable to retrieved context; otherwise, return a gap message.
 
-Add your PDFs in data/.
+No directives or personalized medical guidance.
 
-Set HF_TOKEN and HF_INFERENCE_ENDPOINT in secrets or env.
+Off-label and abusive routes are refused outright (with appropriate safety messaging).
 
-Run:
+No promotional or competitor content unless explicitly present in context.
 
-streamlit run app.py
+Troubleshooting (quick reference)
 
+422 Unprocessable Entity: Some endpoints accept only four stop tokens or prefer stop_sequences. The client auto-adjusts and logs server error bodies.
 
-In the sidebar, Build / Refresh Index (first time, or after changing data/).
+Import/hot-reload issues: Use prompts.py (replaces prompt.py).
 
-Start chatting in the input at the bottom.
+Frequent fallbacks: Confirm your PDFs contain the topic; rebuild the index; check logs for “Loaded embedding model…”.
 
-Tips
-
-Toggle Debug Mode to see guard details and model/guard errors.
-
-Toggle Show Retrieved Context to inspect the exact grounding snippets.
-
-Safety & Compliance
-
-No ungrounded medical claims: answers must be traceable to retrieved context.
-
-Rejects directive advice (e.g., “you should take 20 mg…”) unless quoting context.
-
-Off-label + competitor mentions are treated conservatively.
-
-If context is missing, the assistant uses a gap acknowledgment instead of guessing.
-
-Troubleshooting
-
-422 Unprocessable Entity from HF:
-
-Some endpoints accept only 4 stop tokens and may prefer stop_sequences. The client auto-adjusts; check logs for the server’s error body.
-
-Import hot-reload errors:
-
-We renamed prompt.py → prompts.py. Ensure imports use prompts.
-
-Model errors (“Error: …”):
-
-The UI shows a friendly message; enable Debug Mode to see details.
-
-No answers / frequent fallbacks:
-
-Verify your data/ PDFs contain the topic; rebuild index; check that the embeddings loaded (look for “Loaded embedding model” in logs).
-
-File Structure
+File structure
 safe_llama_assistant/
-├── app.py                      # Streamlit UI + workflow orchestration
+├── app.py                      # Streamlit UI + orchestration
 ├── conversational_agent.py     # Greeting detection, query enhancement, RAG call
-├── conversation.py             # State, entities, WELCOME_MESSAGE seeding
+├── conversation.py             # Session state, entities, WELCOME_MESSAGE
 ├── rag.py                      # FAISS index, retrieval, PDF ingestion
-├── semantic_chunker.py         # Hybrid chunking (sections/paragraphs/sentences)
+├── semantic_chunker.py         # Hybrid chunking
 ├── context_formatter.py        # Compact, deduplicated context assembly
-├── llm_client.py               # HF Endpoint client (robust stops, retries, logging)
-├── guard.py                    # Intent + grounding + medical safety, binary verdict
-├── embeddings.py               # Singleton SentenceTransformer loader (shared)
-├── config.py                   # App, model, guard, RAG, UI settings
-├── prompts.py                  # System and guard prompts (renamed from prompt.py)
-├── data/                       # Your PDFs
+├── llm_client.py               # HF endpoint client (stops, retries, logging)
+├── guard.py                    # Intent + dual grounding + safety, binary verdict
+├── embeddings.py               # Singleton SentenceTransformer loader
+├── config.py                   # App/model/guard/RAG/UI settings
+├── prompts.py                  # System and guard prompts
+├── data/                       # PDFs
 ├── faiss_index/                # Persisted FAISS index + metadata
 └── test_*.py                   # Tests (guard, chunking, rag, etc.)
+
+
+Principle in one line:
+
+Let the model speak naturally—only when the docs speak first.

@@ -34,7 +34,7 @@ MISUSE_PATTERNS = [
 ]
 OFFLABEL_CUES = [
     r"\boff[- ]label\b", r"\bnot approved\b", r"\bunapproved\b", r"\bnot indicated\b",
-    r"\bfor (?:adhd|weight|sleep|pain|anxiety in children|performance)\b",  # examples; still enforced by grounding
+    r"\bfor (?:adhd|weight|sleep|pain|anxiety in children|performance)\b",
 ]
 PROMO_PATTERNS = [
     r"\bbest\b.*\b(drug|medication|treatment)\b", r"\bmost effective\b", r"\bguaranteed\b",
@@ -88,21 +88,21 @@ class EnhancedGuardAgent:
         if not self.enabled:
             return True, assistant_response, "Guard disabled"
         try:
-            # 0) Critical pre-checks driven by the USER QUESTION (don’t engage on misuse/off-label “how to”)
+            # 0) Critical pre-checks driven by the USER QUESTION
             if self._is_misuse_intent(user_question):
                 return False, self.fallback_messages["misuse_refusal"], "Reject: misuse/abusive route intent detected in user question."
 
             if self._is_offlabel_probe(user_question) and not self._has_safe_offlabel_context(context):
                 return False, self.fallback_messages["off_label_refusal"], "Reject: off-label request without explicit 'not indicated' context."
 
-            # 1) Intent (for logging only; verdict remains binary)
+            # 1) Intent (for logging only)
             intent = self._analyze_response_intent(assistant_response)
             logger.info(f"Identified response intent: {intent}")
 
             # 2) Extract factual claims
             claims = self._extract_factual_claims(assistant_response)
 
-            # 3) Grounding gate: if there is factual content but no context at all → reject
+            # 3) Grounding gate: factual content but no context → reject
             if claims and not (context and context.strip()):
                 return False, self.fallback_messages["no_context"], "Reject: factual content with no retrieved context."
 
@@ -112,7 +112,7 @@ class EnhancedGuardAgent:
                 fallback = self._fallback_for_violations(safety_violations)
                 return False, fallback, f"Reject: {safety_violations[0]['description']}"
 
-            # 5) Grounding similarity per-claim (semantic + lexical)
+            # 5) Per-claim grounding (semantic + lexical)
             grounding_violations = []
             for claim in claims:
                 score = self._semantic_similarity(claim, context)
@@ -155,9 +155,8 @@ class EnhancedGuardAgent:
 
         # 4) Competitor mentions not in context (rough heuristic)
         if self._contains_pattern(rl, COMPETITOR_CUES):
-            # If brand-like tokens that are not in context appear alongside “versus/compared to”, flag it
             brandish = set(re.findall(r'\b[A-Z][a-zA-Z0-9]{2,}\b', response))
-            brandish = {b for b in brandish if b.lower() not in {"I", "We", "Assistant", "User"}}
+            brandish = {b for b in brandish if b.lower() not in {"i", "we", "assistant", "user"}}
             for b in brandish:
                 if b.lower() not in context.lower():
                     v.append({"type": "competitor_mention", "severity": "medium", "description": f"Competitor/product mention not present in context: {b}"})
@@ -181,6 +180,48 @@ class EnhancedGuardAgent:
         if any(p in rl for p in ["i can help with", "would you like to know about", "alternatively"]):
             return "OFFERING_ALTERNATIVES"
         return "CONVERSATIONAL_BRIDGE"
+
+    # ---------- Factual claim extraction ----------
+    def _extract_factual_claims(self, response: str) -> List[str]:
+        """
+        Extract likely factual statements that should be grounded.
+        Heuristic: sentence-level scan with filters for conversational/gap text.
+        """
+        if not response:
+            return []
+
+        # Split into sentences
+        sentences = re.split(r'(?<=[.!?])\s+', response.strip())
+        sentences = [s.strip() for s in sentences if s and len(s.strip()) > 3]
+
+        claims: List[str] = []
+
+        # Exclude obvious conversational/gap sentences
+        conversational_exclusions = [
+            r'^(hello|hi|hey)\b',
+            r"^(thanks|thank you)\b",
+            r"^(i'?m sorry|i do(?: not|n't) have|i can(?:not|\'t))\b",
+            r"(?:not in (?:the )?documentation|don'?t have information|unable to find|no information)",
+        ]
+
+        factual_indicators = [
+            r'\b(?:is|are|was|were|be)\s+\w+',
+            r'\b(?:contains?|includes?|has|have)\s+\w+',
+            r'\b(?:causes?|results?\s+in|leads?\s+to)\s+\w+',
+            r'\b(?:works?\s+by|functions?\s+through)\s+\w+',
+            r'\b\d+\s*(?:percent|%|mg|ml|mcg|iu|units?)\b',
+            r'\b(?:approved|indicated|prescribed)\s+(?:for|to)\b',
+            r'\b(?:effective|ineffective|safe|unsafe)\s+(?:for|in|against)\b',
+        ]
+
+        for s in sentences:
+            sl = s.lower()
+            if any(re.search(p, sl) for p in conversational_exclusions):
+                continue
+            if any(re.search(p, sl) for p in factual_indicators):
+                claims.append(s)
+
+        return claims
 
     # ---------- Helpers: misuse/off-label ----------
     def _is_misuse_intent(self, text: str) -> bool:
@@ -242,6 +283,18 @@ class EnhancedGuardAgent:
 
     def _contains_pattern(self, text_lower: str, patterns: List[str]) -> bool:
         return any(re.search(p, text_lower) for p in patterns)
+
+    def _fallback_for_violations(self, violations: List[Dict[str, Any]]) -> str:
+        types = [v.get("type") for v in violations]
+        if "misuse" in types:
+            return self.fallback_messages["misuse_refusal"]
+        if "off_label" in types:
+            return self.fallback_messages["off_label_refusal"]
+        if "medical_advice" in types or "dosage_not_in_context" in types:
+            return self.fallback_messages["unsafe_medical"]
+        if "ungrounded_claim" in types:
+            return self.fallback_messages["no_context"]
+        return self.fallback_messages["default"]
 
 # Global instance + wrapper
 guard_agent = EnhancedGuardAgent()
