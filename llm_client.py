@@ -80,7 +80,18 @@ def clean_model_output(text: str) -> str:
         if last != -1:
             text = text[:last].rstrip()
 
+    # --- NEW: strip trailing hash markers like "###" or lines that are only hashes ---
+    # Remove inline trailing " ###" (or longer) at end of text
+    text = re.sub(r'\s*#{3,}\s*$', '', text)
+
+    # Also remove any final lines that consist solely of 1–6 hashes
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    while lines and re.fullmatch(r'\s*#{1,6}\s*', lines[-1]):
+        lines.pop()
+    text = "\n".join(lines).rstrip()
+
     return text
+
 
 # ---------- HF client ----------
 class HuggingFaceClient:
