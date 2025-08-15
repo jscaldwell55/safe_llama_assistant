@@ -1,77 +1,73 @@
 # conversation.py
 import logging
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import re
-from config import WELCOME_MESSAGE  # <-- added
+from config import WELCOME_MESSAGE
+
+# Streamlit is optional here so tests/CLI don't break
+try:
+    import streamlit as st  # type: ignore
+except Exception:  # pragma: no cover
+    st = None  # Allows non-Streamlit contexts
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversationTurn:
-    """Represents a single turn in the conversation."""
     role: str  # "user" or "assistant"
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
 
 @dataclass
 class ConversationContext:
-    """Maintains conversation state and context."""
     turns: List[ConversationTurn] = field(default_factory=list)
     active_entities: List[str] = field(default_factory=list)
 
 class ConversationManager:
     """Manages conversational state (memory) and context building."""
-    
     def __init__(self, max_turns: int = 20, session_timeout_minutes: int = 30):
-        # A turn is one user query + one assistant response, so max_turns=20 allows 10 exchanges.
+        # A turn is one user query + one assistant response → max_turns=20 allows 10 exchanges.
         self.max_turns = max_turns
         self.session_timeout = timedelta(minutes=session_timeout_minutes)
         self.conversation: Optional[ConversationContext] = None
-        self.start_new_conversation()  # Start with a fresh conversation
-        
+        self.start_new_conversation()  # Fresh conversation on construction
+
     def start_new_conversation(self):
         """Starts a fresh conversation and seeds a welcome message."""
         self.conversation = ConversationContext()
-        # Seed the initial assistant welcome message (cosmetic)
         if WELCOME_MESSAGE:
             self.conversation.turns.append(
                 ConversationTurn(role="assistant", content=WELCOME_MESSAGE)
             )
         logger.info("Started new conversation")
-    
+
     def add_turn(self, role: str, content: str):
-        """Adds a turn to the current conversation."""
         if not self.conversation:
             self.start_new_conversation()
-            
+
         turn = ConversationTurn(role=role, content=content)
         self.conversation.turns.append(turn)
-        
-        # Simple entity extraction to help with query enhancement
+
+        # Lightweight entity heuristic
         entities = self._extract_entities(content)
         for entity in entities:
             if entity not in self.conversation.active_entities:
                 self.conversation.active_entities.append(entity)
-        self.conversation.active_entities = self.conversation.active_entities[-5:]  # Keep last 5
-        
+        self.conversation.active_entities = self.conversation.active_entities[-5:]  # keep last 5
+
         logger.info(f"Added '{role}' turn. Total turns: {len(self.conversation.turns)}/{self.max_turns}")
-    
+
     def get_turns(self) -> List[Dict[str, str]]:
-        """Returns all turns as a list of dictionaries for Streamlit to display."""
         if not self.conversation:
             return []
         return [{"role": t.role, "content": t.content} for t in self.conversation.turns]
 
     def _extract_entities(self, text: str) -> List[str]:
-        """A simple placeholder for entity extraction."""
-        # This can be improved with a proper NER model later if needed.
-        # For now, we look for capitalized words as a simple heuristic.
         return re.findall(r'\b[A-Z][a-z]{2,}\b', text)
 
     def should_end_session(self) -> bool:
-        """Checks if the session should end due to turn limit or timeout."""
         if not self.conversation:
             return False
         if len(self.conversation.turns) >= self.max_turns:
@@ -83,38 +79,41 @@ class ConversationManager:
                 logger.warning("Session timed out.")
                 return True
         return False
-    
+
     def get_formatted_history(self) -> str:
-        """Builds a simple string of the last few turns for the LLM's context."""
         if not self.conversation or not self.conversation.turns:
             return ""
-        
-        # Provide last 4 turns (2 user, 2 assistant) as context
-        recent_turns = self.conversation.turns[-4:]
+        recent = self.conversation.turns[-4:]  # last 2 user + 2 assistant turns
         history = []
-        for turn in recent_turns:
-            role_formatted = "Human" if turn.role == "user" else "Assistant"
-            history.append(f"{role_formatted}: {turn.content}")
+        for turn in recent:
+            role_fmt = "Human" if turn.role == "user" else "Assistant"
+            history.append(f"{role_fmt}: {turn.content}")
         return "\n".join(history)
-    
+
     def get_enhanced_query(self, original_query: str) -> str:
-        """Enhances a query with active entities to improve RAG retrieval."""
-        query_lower = original_query.lower()
-        # Check if the query is likely a follow-up
-        is_follow_up = any(word in query_lower for word in ['it', 'that', 'they', 'them', 'more', 'also'])
-        
+        ql = original_query.lower()
+        is_follow_up = any(w in ql for w in ['it', 'that', 'they', 'them', 'more', 'also'])
         if is_follow_up and self.conversation and self.conversation.active_entities:
             context_entities = ", ".join(self.conversation.active_entities)
-            enhanced_query = f"{original_query} (related to: {context_entities})"
-            logger.info(f"Enhanced query for RAG: {enhanced_query}")
-            return enhanced_query
-            
+            enhanced = f"{original_query} (related to: {context_entities})"
+            logger.info(f"Enhanced query for RAG: {enhanced}")
+            return enhanced
         return original_query
 
-# Use a lazy-loading function for the global instance to avoid import issues
-_conversation_manager_instance = None
+# --- Streamlit-session-scoped instance ---
+# On a browser refresh, Streamlit creates a NEW session_state → new manager → welcome message shown.
 def get_conversation_manager():
-    global _conversation_manager_instance
-    if _conversation_manager_instance is None:
-        _conversation_manager_instance = ConversationManager()
-    return _conversation_manager_instance
+    # Prefer Streamlit session-scoped instance (resets on browser refresh)
+    if st is not None:
+        if "conversation_manager" not in st.session_state:
+            st.session_state["conversation_manager"] = ConversationManager()
+        return st.session_state["conversation_manager"]
+
+    # Fallback for non-Streamlit contexts (tests, scripts)
+    # Single-process singleton (fine for unit tests)
+    global _cm_singleton  # type: ignore
+    try:
+        _cm_singleton
+    except NameError:
+        _cm_singleton = ConversationManager()  # type: ignore
+    return _cm_singleton  # type: ignore
