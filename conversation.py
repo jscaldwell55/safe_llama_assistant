@@ -1,22 +1,20 @@
-# conversation.py
 import logging
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import re
-from config import WELCOME_MESSAGE
+from config import WELCOME_MESSAGE, MAX_CONVERSATION_TURNS, SESSION_TIMEOUT_MINUTES
 
-# Streamlit is optional here so tests/CLI don't break
 try:
     import streamlit as st  # type: ignore
-except Exception:  # pragma: no cover
-    st = None  # Allows non-Streamlit contexts
+except Exception:
+    st = None
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversationTurn:
-    role: str  # "user" or "assistant"
+    role: str
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
 
@@ -27,37 +25,38 @@ class ConversationContext:
 
 class ConversationManager:
     """Manages conversational state (memory) and context building."""
-    def __init__(self, max_turns: int = 20, session_timeout_minutes: int = 30):
-        # A turn is one user query + one assistant response → max_turns=20 allows 10 exchanges.
-        self.max_turns = max_turns
-        self.session_timeout = timedelta(minutes=session_timeout_minutes)
+    def __init__(
+        self,
+        max_turns: Optional[int] = None,
+        session_timeout_minutes: Optional[int] = None
+    ):
+        # Allow config-driven defaults; 0/None disables turn cap
+        self.max_turns = (MAX_CONVERSATION_TURNS if max_turns is None else max_turns) or 0
+        timeout = SESSION_TIMEOUT_MINUTES if session_timeout_minutes is None else session_timeout_minutes
+        self.session_timeout = timedelta(minutes=timeout)
         self.conversation: Optional[ConversationContext] = None
-        self.start_new_conversation()  # Fresh conversation on construction
+        self.start_new_conversation()
 
     def start_new_conversation(self):
-        """Starts a fresh conversation and seeds a welcome message."""
         self.conversation = ConversationContext()
         if WELCOME_MESSAGE:
-            self.conversation.turns.append(
-                ConversationTurn(role="assistant", content=WELCOME_MESSAGE)
-            )
+            self.conversation.turns.append(ConversationTurn(role="assistant", content=WELCOME_MESSAGE))
         logger.info("Started new conversation")
 
     def add_turn(self, role: str, content: str):
         if not self.conversation:
             self.start_new_conversation()
-
-        turn = ConversationTurn(role=role, content=content)
-        self.conversation.turns.append(turn)
+        self.conversation.turns.append(ConversationTurn(role=role, content=content))
 
         # Lightweight entity heuristic
         entities = self._extract_entities(content)
-        for entity in entities:
-            if entity not in self.conversation.active_entities:
-                self.conversation.active_entities.append(entity)
-        self.conversation.active_entities = self.conversation.active_entities[-5:]  # keep last 5
+        for e in entities:
+            if e not in self.conversation.active_entities:
+                self.conversation.active_entities.append(e)
+        self.conversation.active_entities = self.conversation.active_entities[-5:]
 
-        logger.info(f"Added '{role}' turn. Total turns: {len(self.conversation.turns)}/{self.max_turns}")
+        # Cleaner log (no x/20)
+        logger.info(f"Added '{role}' turn.")
 
     def get_turns(self) -> List[Dict[str, str]]:
         if not self.conversation:
@@ -70,12 +69,13 @@ class ConversationManager:
     def should_end_session(self) -> bool:
         if not self.conversation:
             return False
-        if len(self.conversation.turns) >= self.max_turns:
+        # Hard cap disabled if max_turns == 0
+        if self.max_turns and len(self.conversation.turns) >= self.max_turns:
             logger.warning("Session turn limit reached.")
             return True
         if self.conversation.turns:
-            last_turn_time = self.conversation.turns[-1].timestamp
-            if datetime.now() - last_turn_time > self.session_timeout:
+            last = self.conversation.turns[-1].timestamp
+            if datetime.now() - last > self.session_timeout:
                 logger.warning("Session timed out.")
                 return True
         return False
@@ -100,17 +100,13 @@ class ConversationManager:
             return enhanced
         return original_query
 
-# --- Streamlit-session-scoped instance ---
-# On a browser refresh, Streamlit creates a NEW session_state → new manager → welcome message shown.
+# Streamlit-session-scoped instance
 def get_conversation_manager():
-    # Prefer Streamlit session-scoped instance (resets on browser refresh)
     if st is not None:
         if "conversation_manager" not in st.session_state:
             st.session_state["conversation_manager"] = ConversationManager()
         return st.session_state["conversation_manager"]
-
-    # Fallback for non-Streamlit contexts (tests, scripts)
-    # Single-process singleton (fine for unit tests)
+    # Fallback for non-Streamlit contexts
     global _cm_singleton  # type: ignore
     try:
         _cm_singleton

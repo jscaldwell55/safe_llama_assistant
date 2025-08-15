@@ -55,7 +55,7 @@ ENABLE_GUARD = True
 SEMANTIC_SIMILARITY_THRESHOLD = 0.62  # For grounding validation
 
 # Conversation Configuration
-MAX_CONVERSATION_TURNS = 10   # Reasonable conversation length
+MAX_CONVERSATION_TURNS = 0   # Reasonable conversation length
 SESSION_TIMEOUT_MINUTES = 30  # Auto-end inactive sessions
 MAX_CONTEXT_LENGTH = 4000     # Characters for context window
 
