@@ -4,7 +4,6 @@ import streamlit as st
 import logging
 import sys
 import asyncio
-import threading
 
 # Configure logging FIRST before any imports
 logging.basicConfig(
@@ -18,9 +17,10 @@ logger.info("=== Starting Streamlit app initialization ===")
 # --- LAZY-LOADING IMPORTS ---
 def get_dependencies():
     from config import APP_TITLE, WELCOME_MESSAGE, HF_INFERENCE_ENDPOINT
+    # prompts module (renamed from prompt.py)
     from prompts import format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
-    # Client helpers now include get_hf_client/reset_hf_client for endpoint rotation
-    from llm_client import call_base_assistant, get_hf_client, reset_hf_client
+    # llm client exposes call_* helpers
+    from llm_client import call_base_assistant, reset_hf_client
     from guard import evaluate_response
     from conversation import get_conversation_manager
     from conversational_agent import get_conversational_agent, ConversationMode
@@ -31,7 +31,6 @@ def get_dependencies():
         "format_conversational_prompt": format_conversational_prompt,
         "ACKNOWLEDGE_GAP_PROMPT": ACKNOWLEDGE_GAP_PROMPT,
         "call_base_assistant": call_base_assistant,
-        "get_hf_client": get_hf_client,
         "reset_hf_client": reset_hf_client,
         "evaluate_response": evaluate_response,
         "get_conversation_manager": get_conversation_manager,
@@ -59,34 +58,39 @@ st.title(deps["APP_TITLE"])
 conversation_manager = deps["get_conversation_manager"]()
 conversational_agent = deps["get_conversational_agent"]()
 
-# --- BACKGROUND EVENT LOOP (single, reused) ---
-def _run_loop(loop: asyncio.AbstractEventLoop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
+# --- UTILS ---
+def _mask_endpoint(ep: str) -> str:
+    if not ep:
+        return "(not set)"
+    ep = ep.strip()
+    if len(ep) <= 22:
+        return ep
+    # keep scheme + host prefix and last 8 chars
+    # e.g., https://xyz...cloud → https://xyz…cloud/…c0ffee42
+    try:
+        scheme, rest = ep.split("://", 1)
+        host = rest.split("/", 1)[0]
+        tail = ep[-8:]
+        return f"{scheme}://{host}…/{tail}"
+    except Exception:
+        return ep[:22] + "…"
 
-def _ensure_bg_loop() -> asyncio.AbstractEventLoop:
-    loop = st.session_state.get("_bg_loop")
-    thread = st.session_state.get("_bg_thread")
-    if loop and thread and thread.is_alive():
-        return loop
-    loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=_run_loop, args=(loop,), daemon=True)
-    thread.start()
-    st.session_state["_bg_loop"] = loop
-    st.session_state["_bg_thread"] = thread
-    return loop
-
+# --- ASYNC HELPER ---
 def run_async(coro):
-    """Schedule coroutine on the persistent background loop and wait for result."""
-    loop = _ensure_bg_loop()
-    fut = asyncio.run_coroutine_threadsafe(coro, loop)
-    return fut.result()
+    """Run an async coroutine safely from Streamlit's sync context."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
 
-# Optional: warm up the HF client once (no network call, just ensures cache keys exist)
-try:
-    deps["get_hf_client"]()
-except Exception:
-    pass
+    if loop and loop.is_running():
+        # In case Streamlit already has a loop running, execute in a thread
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+    else:
+        return asyncio.run(coro)
 
 # --- CORE APPLICATION LOGIC ---
 async def handle_query_async(query: str) -> dict:
@@ -125,7 +129,7 @@ async def handle_query_async(query: str) -> dict:
             draft_response = await deps["call_base_assistant"](prompt_for_llm)
 
             # If model returns an error sentinel, short-circuit gracefully
-            if draft_response.startswith("Error:"):
+            if isinstance(draft_response, str) and draft_response.startswith("Error:"):
                 return {
                     "success": False,
                     "response": "I'm sorry — there was a temporary issue contacting the model. Please try again.",
@@ -177,16 +181,21 @@ with st.sidebar:
         st.success("Started new conversation")
         st.rerun()
 
-    st.subheader("🧠 Model")
-    st.caption(f"Endpoint: {deps['HF_INFERENCE_ENDPOINT'] or '(unset)'}")
-    if st.button("Reload Model Client"):
-        deps["reset_hf_client"]()
-        st.success("Model client reloaded (endpoint/session cache cleared).")
+    # Optional: endpoint rotation tool (kept off by default; uncomment if you want)
+    # if debug_mode:
+    #     st.subheader("🧠 Model")
+    #     st.caption(f"Endpoint: {_mask_endpoint(deps['HF_INFERENCE_ENDPOINT'])}")
+    #     if st.button("Reload Model Client"):
+    #         try:
+    #             deps["reset_hf_client"]()
+    #             st.success("Model client reloaded.")
+    #         except Exception as e:
+    #             st.error(f"Failed to reload client: {e}")
 
 # --- MAIN UI ---
 st.markdown("### 💬 Ask me anything about Lexapro")
 
-# Display chat history (conversation manager should seed WELCOME_MESSAGE on new session)
+# Display chat history (conversation manager seeds WELCOME_MESSAGE on new session)
 for turn in conversation_manager.get_turns():
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
@@ -204,7 +213,9 @@ if query := st.chat_input("Type your question…"):
                 st.error("⚠️ **Safety Filter Active**")
                 st.warning(result["response"])
                 if debug_mode:
-                    st.expander("🛡️ Guard Details").write(result.get("debug_info", {}).get("guard_reasoning", "No reason provided."))
+                    st.expander("🛡️ Guard Details").write(
+                        result.get("debug_info", {}).get("guard_reasoning", "No reason provided.")
+                    )
             else:
                 st.write(result["response"])
         else:
