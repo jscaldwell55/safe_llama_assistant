@@ -1,3 +1,5 @@
+# conversation.py
+
 import logging
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
@@ -7,8 +9,10 @@ from config import WELCOME_MESSAGE, MAX_CONVERSATION_TURNS, SESSION_TIMEOUT_MINU
 
 try:
     import streamlit as st  # type: ignore
+    HAS_STREAMLIT = True
 except Exception:
     st = None
+    HAS_STREAMLIT = False
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +26,8 @@ class ConversationTurn:
 class ConversationContext:
     turns: List[ConversationTurn] = field(default_factory=list)
     active_entities: List[str] = field(default_factory=list)
+    last_activity: datetime = field(default_factory=datetime.now)  # Track actual activity
+    session_started: datetime = field(default_factory=datetime.now)
 
 class ConversationManager:
     """Manages conversational state (memory) and context building."""
@@ -33,19 +39,57 @@ class ConversationManager:
         # Allow config-driven defaults; 0/None disables turn cap
         self.max_turns = (MAX_CONVERSATION_TURNS if max_turns is None else max_turns) or 0
         timeout = SESSION_TIMEOUT_MINUTES if session_timeout_minutes is None else session_timeout_minutes
-        self.session_timeout = timedelta(minutes=timeout)
-        self.conversation: Optional[ConversationContext] = None
-        self.start_new_conversation()
+        self.session_timeout_minutes = timeout
+        self.session_timeout = timedelta(minutes=timeout) if timeout > 0 else None
+        
+        # Initialize conversation state from Streamlit session state if available
+        if HAS_STREAMLIT and st is not None:
+            if "conversation_context" not in st.session_state:
+                # First time initialization
+                self._init_new_conversation()
+            else:
+                # Restore existing conversation
+                self.conversation = st.session_state["conversation_context"]
+                # Check for timeout only if timeout is enabled
+                if self.session_timeout and self._check_timeout():
+                    logger.warning("Session timed out due to inactivity")
+                    self._init_new_conversation()
+        else:
+            # Non-Streamlit context
+            self._init_new_conversation()
 
-    def start_new_conversation(self):
+    def _init_new_conversation(self):
+        """Initialize a new conversation and store in session state if available"""
         self.conversation = ConversationContext()
         if WELCOME_MESSAGE:
             self.conversation.turns.append(ConversationTurn(role="assistant", content=WELCOME_MESSAGE))
+        
+        # Store in Streamlit session state
+        if HAS_STREAMLIT and st is not None:
+            st.session_state["conversation_context"] = self.conversation
+        
         logger.info("Started new conversation")
+
+    def _check_timeout(self) -> bool:
+        """Check if session has timed out based on last activity"""
+        if not self.session_timeout or not self.conversation:
+            return False
+        
+        time_since_activity = datetime.now() - self.conversation.last_activity
+        return time_since_activity > self.session_timeout
+
+    def start_new_conversation(self):
+        """Explicitly start a new conversation"""
+        self._init_new_conversation()
 
     def add_turn(self, role: str, content: str):
         if not self.conversation:
-            self.start_new_conversation()
+            self._init_new_conversation()
+        
+        # Update last activity time
+        self.conversation.last_activity = datetime.now()
+        
+        # Add the turn
         self.conversation.turns.append(ConversationTurn(role=role, content=content))
 
         # Lightweight entity heuristic
@@ -55,7 +99,10 @@ class ConversationManager:
                 self.conversation.active_entities.append(e)
         self.conversation.active_entities = self.conversation.active_entities[-5:]
 
-        # Cleaner log (no x/20)
+        # Update session state
+        if HAS_STREAMLIT and st is not None:
+            st.session_state["conversation_context"] = self.conversation
+
         logger.info(f"Added '{role}' turn.")
 
     def get_turns(self) -> List[Dict[str, str]]:
@@ -67,17 +114,21 @@ class ConversationManager:
         return re.findall(r'\b[A-Z][a-z]{2,}\b', text)
 
     def should_end_session(self) -> bool:
+        """Check if session should end due to turn limit or timeout"""
         if not self.conversation:
             return False
-        # Hard cap disabled if max_turns == 0
+        
+        # Check turn limit
         if self.max_turns and len(self.conversation.turns) >= self.max_turns:
             logger.warning("Session turn limit reached.")
             return True
-        if self.conversation.turns:
-            last = self.conversation.turns[-1].timestamp
-            if datetime.now() - last > self.session_timeout:
-                logger.warning("Session timed out.")
+        
+        # Check timeout based on last activity (not last turn)
+        if self.session_timeout:
+            if self._check_timeout():
+                logger.warning("Session timed out due to inactivity.")
                 return True
+        
         return False
 
     def get_formatted_history(self) -> str:
@@ -102,7 +153,7 @@ class ConversationManager:
 
 # Streamlit-session-scoped instance
 def get_conversation_manager():
-    if st is not None:
+    if HAS_STREAMLIT and st is not None:
         if "conversation_manager" not in st.session_state:
             st.session_state["conversation_manager"] = ConversationManager()
         return st.session_state["conversation_manager"]
