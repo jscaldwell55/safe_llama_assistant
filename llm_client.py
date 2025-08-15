@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 from typing import Dict, Any, Optional
-import hashlib
+import hashlib  # kept if you want to add response caching later
 import re
-import time
+import weakref
 
 from config import HF_TOKEN, HF_INFERENCE_ENDPOINT, MODEL_PARAMS
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Output cleaning (post-generation)
 # -------------------------------
 
-# Loose patterns for one-line “meta” sentences we never want to show users
+# One-line “meta” sentences we never want to show users
 _META_LINE_PATTERNS = [
     r"^\s*note\s*:\s*",                                  # "Note: ..."
     r"^\s*this (answer|response) (?:is|was)\b",          # "This response is..."
@@ -65,7 +65,7 @@ def clean_model_output(text: str) -> str:
         lower = ln.lower()
         if any(re.match(pat, lower) for pat in _META_LINE_PATTERNS):
             continue
-        # very common meta sentence variants
+        # common meta sentence variants
         if "this response" in lower and any(k in lower for k in ["neutral", "complies", "adheres", "follows", "meets"]):
             continue
         cleaned_lines.append(ln)
@@ -96,13 +96,34 @@ def clean_model_output(text: str) -> str:
 
 
 # -------------------------------
+# Per-event-loop session cache
+# -------------------------------
+
+_sessions_by_loop: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, aiohttp.ClientSession]" = weakref.WeakKeyDictionary()
+
+async def _get_loop_session(headers: Dict[str, str]) -> aiohttp.ClientSession:
+    """
+    Return an aiohttp.ClientSession cached for the current event loop.
+    - Avoids cross-loop reuse (fixes 'Future attached to a different loop').
+    - Reuses keep-alive connections within the same loop for lower latency.
+    """
+    loop = asyncio.get_running_loop()
+    sess = _sessions_by_loop.get(loop)
+    if not sess or sess.closed:
+        connector = aiohttp.TCPConnector(limit=10, limit_per_host=10)  # keep SSL verification enabled
+        sess = aiohttp.ClientSession(connector=connector, headers=headers)
+        _sessions_by_loop[loop] = sess
+    return sess
+
+
+# -------------------------------
 # HF client
 # -------------------------------
 
 class HuggingFaceClient:
     """
     Minimal, robust client for Hugging Face Inference Endpoints.
-    - Fresh aiohttp session per call (prevents event loop issues in Streamlit).
+    - Per-event-loop session cache for connection reuse (lower latency).
     - Parameter fallbacks for 'stop' vs 'stop_sequences' vs none.
     """
     def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
@@ -154,40 +175,40 @@ class HuggingFaceClient:
         last_error_text = None
         timeout = aiohttp.ClientTimeout(total=60)
 
+        # Use the per-loop session (reused across calls on the same loop)
+        session = await _get_loop_session(self.headers)
+
         for i, params in enumerate(variants, start=1):
             logger.info(f"Sending request to HF endpoint (variant {i}/3)")
             payload = {"inputs": prompt, "parameters": params}
 
-            # Fresh session per attempt; solves cross-loop problems
             try:
-                connector = aiohttp.TCPConnector(limit=10, limit_per_host=10, ssl=False)
-                async with aiohttp.ClientSession(connector=connector, headers=self.headers) as session:
-                    async with session.post(self.endpoint, json=payload, timeout=timeout) as response:
-                        status = response.status
-                        text = await response.text()
+                async with session.post(self.endpoint, json=payload, timeout=timeout) as response:
+                    status = response.status
+                    text = await response.text()
 
-                        if status != 200:
-                            # Log the server's body to aid debugging (422, etc.)
-                            logger.error(f"HF endpoint returned {status}. Body: {text}")
-                            last_error_text = text
-                            # try next variant
-                            continue
+                    if status != 200:
+                        # Log the server's body to aid debugging (e.g., 422 stop-token validation)
+                        logger.error(f"HF endpoint returned {status}. Body: {text}")
+                        last_error_text = text
+                        # try next variant
+                        continue
 
-                        # Expect either { "generated_text": "..."} list or raw text
-                        try:
-                            result = json.loads(text)
-                        except json.JSONDecodeError:
-                            return clean_model_output(text)
+                    # Expect either [{ "generated_text": "..."}] or raw textual/json content
+                    try:
+                        result = json.loads(text)
+                    except json.JSONDecodeError:
+                        return clean_model_output(text)
 
-                        if isinstance(result, list) and result and "generated_text" in result[0]:
-                            generated_text = result[0]["generated_text"] or ""
-                            # Some endpoints echo the prompt; strip if needed
-                            if generated_text.startswith(prompt):
-                                generated_text = generated_text[len(prompt):].lstrip()
-                            return clean_model_output(generated_text)
+                    if isinstance(result, list) and result and isinstance(result[0], dict) and "generated_text" in result[0]:
+                        generated_text = (result[0].get("generated_text") or "")
+                        # Some endpoints echo the prompt; strip if needed
+                        if generated_text.startswith(prompt):
+                            generated_text = generated_text[len(prompt):].lstrip()
+                        return clean_model_output(generated_text)
 
-                        # Fallback: stringify
-                        return clean_model_output(str(result))
+                    # Fallback: stringify unknown structure
+                    return clean_model_output(str(result))
 
             except aiohttp.ClientError as e:
                 logger.error(f"Request failed: {e}", exc_info=True)
@@ -206,8 +227,8 @@ class HuggingFaceClient:
 # Convenience wrappers
 # -------------------------------
 
-# We keep a lightweight, stateless client factory. No cached session => loop-safe.
 def _client() -> HuggingFaceClient:
+    # Stateless factory; the per-loop session is cached separately
     return HuggingFaceClient()
 
 async def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
