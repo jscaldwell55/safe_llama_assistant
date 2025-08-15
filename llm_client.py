@@ -4,7 +4,7 @@ import aiohttp
 import asyncio
 import json
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, AsyncGenerator
 import re
 
 from config import HF_TOKEN, HF_INFERENCE_ENDPOINT, MODEL_PARAMS
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _META_LINE_PATTERNS = [
     r"^\s*note\s*:\s*",
     r"^\s*this (answer|response) (?:is|was)\b",
-    r"^\s*i (?:am|’m|\'m)\s+(?:an|a)\s+ai\b",
+    r"^\s*i (?:am|'m|\'m)\s+(?:an|a)\s+ai\b",
     r"^\s*as (?:an|a) (?:ai|language model)\b",
     r"^\s*please (?:ignore|disregard)\b",
     r"^\s*for (?:educational|informational) purposes\b",
@@ -127,17 +127,25 @@ def clean_model_output(text: str) -> str:
 
     return text
 
+def clean_streaming_chunk(chunk: str) -> str:
+    """Light cleaning for streaming chunks without breaking flow"""
+    # Remove obvious prompt echoes
+    for prefix in ["Assistant:", "assistant:", "ASSISTANT:"]:
+        if chunk.startswith(prefix):
+            chunk = chunk[len(prefix):].lstrip()
+    return chunk
+
 
 # -------------------------------
-# HF client
+# HF client with streaming support
 # -------------------------------
 
 class HuggingFaceClient:
     """
-    Minimal, robust client for Hugging Face Inference Endpoints.
+    Enhanced client for Hugging Face Inference Endpoints with streaming support.
     - Single aiohttp session per call (reused across parameter variants).
     - Parameter fallbacks for 'stop' vs 'stop_sequences' vs none.
-    - No manual connector management (prevents unclosed session/connector warnings).
+    - Streaming support for better perceived latency.
     """
     def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
         if not token:
@@ -155,6 +163,7 @@ class HuggingFaceClient:
         logger.info(f"HuggingFaceClient initialized with endpoint: {endpoint[:60]}...")
 
     async def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
+        """Standard non-streaming generation"""
         if parameters is None:
             parameters = MODEL_PARAMS.copy()
 
@@ -227,6 +236,91 @@ class HuggingFaceClient:
         # If all variants failed:
         return f"Error: Could not connect to the model service. Last error: {last_error_text or 'unknown'}"
 
+    async def stream_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]:
+        """
+        Stream response tokens as they arrive for better perceived latency.
+        Note: Requires endpoint support for streaming (not all HF endpoints support this).
+        """
+        if parameters is None:
+            parameters = MODEL_PARAMS.copy()
+        
+        # Enable streaming in parameters
+        parameters["stream"] = True
+        parameters["return_full_text"] = False
+        
+        # Simplified parameters for streaming (avoid stop token issues)
+        parameters.pop("stop", None)
+        parameters.pop("stop_sequences", None)
+        
+        timeout = aiohttp.ClientTimeout(total=120, connect=10)  # Longer timeout for streaming
+        
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            payload = {
+                "inputs": prompt,
+                "parameters": parameters,
+                "stream": True
+            }
+            
+            try:
+                async with session.post(self.endpoint, json=payload, timeout=timeout) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Streaming request failed: {response.status} - {error_text}")
+                        yield f"Error: Streaming not supported or failed: {response.status}"
+                        return
+                    
+                    # Process streaming response
+                    accumulated = ""
+                    async for line in response.content:
+                        if not line:
+                            continue
+                        
+                        try:
+                            line_text = line.decode('utf-8').strip()
+                            if not line_text or line_text.startswith(':'):  # Skip SSE comments
+                                continue
+                            
+                            # Handle Server-Sent Events format
+                            if line_text.startswith('data: '):
+                                line_text = line_text[6:]
+                            
+                            if line_text == '[DONE]':
+                                break
+                            
+                            # Parse JSON chunk
+                            data = json.loads(line_text)
+                            
+                            # Extract token from various possible formats
+                            token = None
+                            if isinstance(data, dict):
+                                token = data.get('token', {}).get('text', '')
+                                if not token:
+                                    token = data.get('generated_text', '')
+                                if not token:
+                                    token = data.get('text', '')
+                            
+                            if token:
+                                # Clean and yield the token
+                                clean_token = clean_streaming_chunk(token)
+                                if clean_token:
+                                    accumulated += clean_token
+                                    yield clean_token
+                                    
+                        except json.JSONDecodeError:
+                            # Some endpoints return plain text chunks
+                            if line_text and not line_text.startswith('data:'):
+                                yield clean_streaming_chunk(line_text)
+                        except Exception as e:
+                            logger.debug(f"Error processing stream chunk: {e}")
+                            continue
+                            
+            except aiohttp.ClientError as e:
+                logger.error(f"Streaming request failed: {e}")
+                yield f"Error: Streaming failed: {str(e)}"
+            except Exception as e:
+                logger.error(f"Unexpected streaming error: {e}")
+                yield f"Error: Unexpected streaming error: {str(e)}"
+
 
 # -------------------------------
 # Convenience wrappers
@@ -261,13 +355,42 @@ async def call_base_assistant(prompt: str) -> str:
     raw = await call_huggingface(prompt, base_params)
     return clean_model_output(raw)
 
+async def stream_base_assistant(prompt: str) -> AsyncGenerator[str, None]:
+    """
+    Stream response from base assistant for better perceived latency.
+    Falls back to regular generation if streaming fails.
+    """
+    base_params = MODEL_PARAMS.copy()
+    base_params.update({
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "repetition_penalty": 1.1,
+        "max_new_tokens": 300,
+    })
+    
+    try:
+        client = _client()
+        async for chunk in client.stream_response(prompt, base_params):
+            if chunk.startswith("Error:"):
+                # Streaming failed, fall back to regular generation
+                logger.warning("Streaming failed, falling back to regular generation")
+                result = await call_base_assistant(prompt)
+                yield result
+                return
+            yield chunk
+    except Exception as e:
+        logger.error(f"Streaming error: {e}", exc_info=True)
+        # Fall back to regular generation
+        result = await call_base_assistant(prompt)
+        yield result
+
 async def call_guard_agent(prompt: str) -> str:
     guard_params = MODEL_PARAMS.copy()
     guard_params.update({
-        "temperature": 0.3,
+        "temperature": 0.2,
         "top_p": 0.9,
         "repetition_penalty": 1.0,
-        "max_new_tokens": 200,
+        "max_new_tokens": 50,
         "stop": ["\n\n", "User:", "Assistant:", "###"]
     })
     raw = await call_huggingface(prompt, guard_params)

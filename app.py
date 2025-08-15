@@ -6,6 +6,7 @@ import logging
 import sys
 import asyncio
 import importlib
+import time
 
 # Configure logging FIRST before any imports
 logging.basicConfig(
@@ -42,6 +43,7 @@ def get_dependencies():
 
     llm_mod = _safe_import_module("llm_client")
     call_base_assistant = getattr(llm_mod, "call_base_assistant")
+    stream_base_assistant = getattr(llm_mod, "stream_base_assistant", None)  # New streaming function
 
     guard_mod = _safe_import_module("guard")
     evaluate_response = getattr(guard_mod, "evaluate_response")
@@ -59,6 +61,7 @@ def get_dependencies():
         "format_conversational_prompt": format_conversational_prompt,
         "ACKNOWLEDGE_GAP_PROMPT": ACKNOWLEDGE_GAP_PROMPT,
         "call_base_assistant": call_base_assistant,
+        "stream_base_assistant": stream_base_assistant,
         "evaluate_response": evaluate_response,
         "get_conversation_manager": get_conversation_manager,
         "get_conversational_agent": get_conversational_agent,
@@ -85,6 +88,24 @@ st.title(deps["APP_TITLE"])
 conversation_manager = deps["get_conversation_manager"]()
 conversational_agent = deps["get_conversational_agent"]()
 
+# --- HELPER FUNCTIONS ---
+def _is_likely_conversational(query: str) -> bool:
+    """Quick check if query is likely conversational (no medical content expected)"""
+    q_lower = query.lower()
+    conversational_indicators = [
+        "thank", "hello", "hi", "how are you", "goodbye", "bye",
+        "what can you do", "who are you", "help me understand",
+        "good morning", "good afternoon", "good evening"
+    ]
+    return any(ind in q_lower for ind in conversational_indicators) and len(query) < 50
+
+def _format_conversational_only_prompt(query: str) -> str:
+    """Simpler prompt for conversational queries"""
+    return f"""You are a helpful pharmaceutical assistant. Respond naturally and conversationally.
+
+User: {query}
+Assistant:"""
+
 # --- ASYNC HELPER ---
 def run_async(coro):
     """Run an async coroutine safely from Streamlit's sync context."""
@@ -101,14 +122,34 @@ def run_async(coro):
     else:
         return asyncio.run(coro)
 
-# --- CORE APPLICATION LOGIC ---
-async def handle_query_async(query: str) -> dict:
+# --- OPTIMIZED PARALLEL PROCESSING ---
+async def handle_query_async_parallel(query: str) -> dict:
     """
-    Handles the user query via RAG -> LLM -> Guard.
-    On model errors, shows a friendly message and does NOT write to history.
+    Handles user query with PARALLEL processing for improved latency.
+    RAG retrieval happens while we prepare other components.
     """
+    start_time = time.time()
+    
     try:
-        agent_decision = conversational_agent.process_query(query)
+        # Start RAG retrieval immediately (non-blocking)
+        agent_task = asyncio.create_task(
+            asyncio.to_thread(conversational_agent.process_query, query)
+        )
+        
+        # Check if likely conversational while RAG runs
+        is_likely_conv = _is_likely_conversational(query)
+        
+        # Get conversation history in parallel
+        history_task = asyncio.create_task(
+            asyncio.to_thread(conversation_manager.get_formatted_history)
+        )
+        
+        # Wait for agent decision and history
+        agent_decision, conversation_history = await asyncio.gather(
+            agent_task, history_task
+        )
+        
+        logger.info(f"RAG retrieval took {time.time() - start_time:.2f}s")
 
         # End-of-session handling
         if agent_decision.mode == deps["ConversationMode"].SESSION_END:
@@ -119,53 +160,79 @@ async def handle_query_async(query: str) -> dict:
                 "approved": True,
                 "context_str": "",
                 "debug_info": agent_decision.debug_info,
+                "latency": time.time() - start_time,
             }
 
         # Greeting already handled by agent
         if not agent_decision.requires_generation:
-            final_response_text = deps["WELCOME_MESSAGE"]
-            is_approved = True
-            guard_reasoning = "Not required for direct agent response."
+            return {
+                "success": True,
+                "response": deps["WELCOME_MESSAGE"],
+                "approved": True,
+                "context_str": "",
+                "debug_info": agent_decision.debug_info,
+                "latency": time.time() - start_time,
+            }
+
+        # Optimize prompt based on query type
+        if is_likely_conv and not agent_decision.context_str:
+            # Skip heavy prompt formatting for simple conversational queries
+            prompt_for_llm = _format_conversational_only_prompt(query)
         else:
-            # Build prompt with retrieved context + history
+            # Full RAG-based prompt
             prompt_for_llm = deps["format_conversational_prompt"](
                 query=query,
                 formatted_context=agent_decision.context_str,
-                conversation_context=conversation_manager.get_formatted_history(),
+                conversation_context=conversation_history,
             )
 
-            # Generate
-            draft_response = await deps["call_base_assistant"](prompt_for_llm)
+        # Generate response
+        gen_start = time.time()
+        draft_response = await deps["call_base_assistant"](prompt_for_llm)
+        logger.info(f"Generation took {time.time() - gen_start:.2f}s")
 
-            # If model returns an error sentinel, short-circuit gracefully
-            if draft_response.startswith("Error:"):
-                return {
-                    "success": False,
-                    "response": "I'm sorry — there was a temporary issue contacting the model. Please try again.",
-                    "approved": False,
-                    "context_str": agent_decision.context_str,
-                    "debug_info": {**agent_decision.debug_info, "model_error": draft_response},
-                }
+        # Handle model errors
+        if draft_response.startswith("Error:"):
+            return {
+                "success": False,
+                "response": "I'm sorry — there was a temporary issue contacting the model. Please try again.",
+                "approved": False,
+                "context_str": agent_decision.context_str,
+                "debug_info": {**agent_decision.debug_info, "model_error": draft_response},
+                "latency": time.time() - start_time,
+            }
 
-            # Guard validation
-            is_approved, final_response_text, guard_reasoning = deps["evaluate_response"](
-                context=agent_decision.context_str,
-                user_question=query,
-                assistant_response=draft_response,
-                conversation_history=conversation_manager.get_formatted_history(),
-            )
+        # Guard validation (optimized with skipping logic)
+        guard_start = time.time()
+        is_approved, final_response_text, guard_reasoning = deps["evaluate_response"](
+            context=agent_decision.context_str,
+            user_question=query,
+            assistant_response=draft_response,
+            conversation_history=conversation_history,
+        )
+        logger.info(f"Guard evaluation took {time.time() - guard_start:.2f}s")
 
-        # Write to history only on approved replies
+        # Add to history if approved (parallel writes)
         if is_approved:
-            conversation_manager.add_turn("user", query)
-            conversation_manager.add_turn("assistant", final_response_text)
+            await asyncio.gather(
+                asyncio.to_thread(conversation_manager.add_turn, "user", query),
+                asyncio.to_thread(conversation_manager.add_turn, "assistant", final_response_text)
+            )
+
+        total_latency = time.time() - start_time
+        logger.info(f"Total query processing took {total_latency:.2f}s")
 
         return {
             "success": True,
             "response": final_response_text,
             "approved": is_approved,
             "context_str": agent_decision.context_str,
-            "debug_info": {**agent_decision.debug_info, "guard_reasoning": guard_reasoning},
+            "debug_info": {
+                **agent_decision.debug_info, 
+                "guard_reasoning": guard_reasoning,
+                "latency_ms": int(total_latency * 1000),
+                "is_conversational": is_likely_conv,
+            },
         }
 
     except Exception as e:
@@ -176,13 +243,81 @@ async def handle_query_async(query: str) -> dict:
             "approved": False,
             "context_str": "",
             "debug_info": {"error": str(e)},
+            "latency": time.time() - start_time,
         }
+
+# --- STREAMING VERSION (if supported) ---
+async def handle_query_streaming(query: str, placeholder):
+    """
+    Handle query with response streaming for better perceived latency.
+    Falls back to regular processing if streaming not available.
+    """
+    if not deps.get("stream_base_assistant"):
+        # Fall back to regular processing
+        result = await handle_query_async_parallel(query)
+        return result
+    
+    start_time = time.time()
+    
+    try:
+        # Start RAG retrieval
+        agent_decision = await asyncio.to_thread(
+            conversational_agent.process_query, query
+        )
+        
+        # Build prompt
+        prompt_for_llm = deps["format_conversational_prompt"](
+            query=query,
+            formatted_context=agent_decision.context_str,
+            conversation_context=conversation_manager.get_formatted_history(),
+        )
+        
+        # Stream response
+        accumulated_response = ""
+        async for chunk in deps["stream_base_assistant"](prompt_for_llm):
+            accumulated_response += chunk
+            placeholder.write(accumulated_response + "▌")
+        
+        # Guard validation on complete response
+        is_approved, final_response_text, guard_reasoning = deps["evaluate_response"](
+            context=agent_decision.context_str,
+            user_question=query,
+            assistant_response=accumulated_response,
+            conversation_history=conversation_manager.get_formatted_history(),
+        )
+        
+        if is_approved:
+            conversation_manager.add_turn("user", query)
+            conversation_manager.add_turn("assistant", final_response_text)
+        
+        return {
+            "success": True,
+            "response": final_response_text,
+            "approved": is_approved,
+            "context_str": agent_decision.context_str,
+            "debug_info": {
+                **agent_decision.debug_info,
+                "guard_reasoning": guard_reasoning,
+                "streamed": True,
+                "latency_ms": int((time.time() - start_time) * 1000),
+            },
+        }
+        
+    except Exception as e:
+        logger.error(f"Streaming error: {e}", exc_info=True)
+        # Fall back to regular processing
+        return await handle_query_async_parallel(query)
 
 # --- SIDEBAR UI ---
 with st.sidebar:
     st.header("🔧 Settings")
     debug_mode = st.checkbox("Debug Mode", value=False)
     show_context = st.checkbox("Show Retrieved Context", value=False)
+    enable_streaming = st.checkbox("Enable Streaming (Beta)", value=False)
+    
+    if debug_mode:
+        st.subheader("⚡ Performance")
+        st.info("Parallel processing enabled\nLLM guard skipping active")
 
     st.subheader("💬 Conversation")
     if st.button("New Conversation", type="primary"):
@@ -193,7 +328,7 @@ with st.sidebar:
 # --- MAIN UI ---
 st.markdown("### 💬 Ask me anything about Lexapro")
 
-# Display chat history (conversation manager should seed WELCOME_MESSAGE on new session)
+# Display chat history
 for turn in conversation_manager.get_turns():
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
@@ -203,15 +338,25 @@ if query := st.chat_input("Type your question…"):
     st.chat_message("user").write(query)
 
     with st.chat_message("assistant"):
-        with st.spinner("🤖 Thinking..."):
-            result = run_async(handle_query_async(query))
+        if enable_streaming and deps.get("stream_base_assistant"):
+            # Streaming mode
+            placeholder = st.empty()
+            with st.spinner(""):
+                result = run_async(handle_query_streaming(query, placeholder))
+            placeholder.empty()  # Clear the placeholder
+        else:
+            # Regular mode with spinner
+            with st.spinner("🤖 Thinking..."):
+                result = run_async(handle_query_async_parallel(query))
 
         if result["success"]:
             if not result["approved"]:
                 st.error("⚠️ **Safety Filter Active**")
                 st.warning(result["response"])
                 if debug_mode:
-                    st.expander("🛡️ Guard Details").write(result.get("debug_info", {}).get("guard_reasoning", "No reason provided."))
+                    st.expander("🛡️ Guard Details").write(
+                        result.get("debug_info", {}).get("guard_reasoning", "No reason provided.")
+                    )
             else:
                 st.write(result["response"])
         else:
@@ -223,4 +368,7 @@ if query := st.chat_input("Type your question…"):
 
         if debug_mode:
             with st.expander("🔧 Debug Information"):
-                st.json(result.get("debug_info", {}))
+                debug_info = result.get("debug_info", {})
+                if "latency_ms" in debug_info:
+                    st.metric("Response Time", f"{debug_info['latency_ms']}ms")
+                st.json(debug_info)

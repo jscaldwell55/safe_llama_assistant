@@ -80,6 +80,43 @@ class HybridGuardAgent:
         from llm_client import call_guard_agent
         return await call_guard_agent(prompt)
 
+    def _is_conversational_only(self, question: str, response: str) -> bool:
+        """
+        Determine if this is conversational exchange without pharmaceutical facts.
+        Be PERMISSIVE - only return False if there's clear medical/drug content.
+        """
+        r_lower = response.lower()
+        
+        # Strong indicators this IS pharmaceutical/medical content (needs grounding)
+        pharmaceutical_indicators = [
+            r'\b\d+\s*(?:mg|ml|mcg|iu|units?)\b',  # Dosages
+            r'\b(?:lexapro|escitalopram|ssri|antidepressant)\b',  # Drug names
+            r'\b(?:dose|dosage|dosing|administration)\b',
+            r'\b(?:side effect|adverse|reaction|interaction)\b',
+            r'\b(?:indication|contraindication|warning)\b',
+            r'\b(?:treatment|therapy|medication|prescription)\b',
+            r'\b(?:clinical|efficacy|safety profile)\b',
+            r'\b(?:take|taking|taken)\s+(?:with|without|before|after)\b',
+            r'\b(?:oral|injection|intravenous|topical)\b',
+            r'\b(?:overdose|withdrawal|dependence)\b',
+        ]
+        
+        # If response contains pharmaceutical content, it needs grounding
+        for pattern in pharmaceutical_indicators:
+            if re.search(pattern, r_lower):
+                return False
+        
+        # Otherwise, treat it as conversational
+        # This allows the LLM to:
+        # - Answer "how are you?" naturally
+        # - Explain what it can help with
+        # - Handle clarifications
+        # - Provide encouragement
+        # - Make appropriate referrals
+        # - Be empathetic
+        # - And much more...
+        return True
+
     # ---------- Public API ----------
     def evaluate_response(
         self,
@@ -97,6 +134,10 @@ class HybridGuardAgent:
             self.use_llm_guard = USE_LLM_GUARD
         
         try:
+            # Check if this is pure conversation (no medical content)
+            if self._is_conversational_only(user_question, assistant_response):
+                return True, assistant_response, "Approve: Conversational response, no medical content"
+            
             # Phase 1: Quick heuristic pre-checks for obvious violations
             obvious_violation = self._obvious_violation_check(user_question, assistant_response)
             if obvious_violation:
@@ -383,33 +424,36 @@ class HybridGuardAgent:
 
     # ---------- Helper methods (kept from original) ----------
     def _extract_factual_claims(self, response: str) -> List[str]:
+        """
+        Extract only pharmaceutical/medical factual claims that need grounding.
+        Be permissive - conversational content doesn't count as 'claims'.
+        """
         if not response:
             return []
+        
         sentences = re.split(r'(?<=[.!?])\s+', response.strip())
         sentences = [s.strip() for s in sentences if s and len(s.strip()) > 3]
 
         claims: List[str] = []
-        conversational_exclusions = [
-            r'^(hello|hi|hey)\b',
-            r"^(thanks|thank you)\b",
-            r"^(i'?m sorry|i do(?: not|n't) have|i can(?:not|\'t))\b",
-            r"(?:not in (?:the )?documentation|don'?t have information|unable to find|no information)",
-        ]
-        factual_indicators = [
-            r'\b(?:is|are|was|were|be)\s+\w+',
-            r'\b(?:contains?|includes?|has|have)\s+\w+',
-            r'\b(?:causes?|results?\s+in|leads?\s+to)\s+\w+',
-            r'\b(?:works?\s+by|functions?\s+through)\s+\w+',
-            r'\b\d+\s*(?:percent|%|mg|ml|mcg|iu|units?)\b',
+        
+        # Only look for sentences with clear medical/pharmaceutical facts
+        pharmaceutical_claim_indicators = [
+            r'\b\d+\s*(?:mg|ml|mcg|iu|units?)\b',  # Dosages
+            r'\b(?:lexapro|escitalopram|ssri)\b',  # Specific drugs
+            r'\b(?:causes?|results?\s+in|leads?\s+to)\s+\w+',  # Causal medical claims
+            r'\b(?:treats?|treatment|therapy|medication)\b',
             r'\b(?:approved|indicated|prescribed)\s+(?:for|to)\b',
             r'\b(?:effective|ineffective|safe|unsafe)\s+(?:for|in|against)\b',
+            r'\b(?:side effect|adverse|interaction)\b',
+            r'\b(?:clinical|efficacy|safety)\b',
         ]
+        
         for s in sentences:
             sl = s.lower()
-            if any(re.search(p, sl) for p in conversational_exclusions):
-                continue
-            if any(re.search(p, sl) for p in factual_indicators):
+            # Only count as a claim if it contains pharmaceutical/medical facts
+            if any(re.search(p, sl) for p in pharmaceutical_claim_indicators):
                 claims.append(s)
+        
         return claims
 
     def _semantic_similarity(self, statement: str, context: str) -> float:
