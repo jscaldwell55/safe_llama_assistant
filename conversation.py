@@ -1,71 +1,61 @@
 # conversation.py
 import logging
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import re
+from config import MAX_CONVERSATION_TURNS, SESSION_TIMEOUT_MINUTES
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversationTurn:
-    """Represents a single turn in the conversation."""
     role: str  # "user" or "assistant"
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
 
 @dataclass
 class ConversationContext:
-    """Maintains conversation state and context."""
     turns: List[ConversationTurn] = field(default_factory=list)
     active_entities: List[str] = field(default_factory=list)
 
 class ConversationManager:
     """Manages conversational state (memory) and context building."""
-    
-    def __init__(self, max_turns: int = 20, session_timeout_minutes: int = 30):
-        # A turn is one user query + one assistant response, so max_turns=20 allows 10 exchanges.
+    def __init__(self, max_turns: int = MAX_CONVERSATION_TURNS * 2, session_timeout_minutes: int = SESSION_TIMEOUT_MINUTES):
+        # max_turns counts individual turns; 2 per exchange
         self.max_turns = max_turns
         self.session_timeout = timedelta(minutes=session_timeout_minutes)
         self.conversation: Optional[ConversationContext] = None
-        self.start_new_conversation() # Start with a fresh conversation
-        
+        self.start_new_conversation()
+
     def start_new_conversation(self):
-        """Starts a fresh conversation."""
         self.conversation = ConversationContext()
         logger.info("Started new conversation")
-    
+
     def add_turn(self, role: str, content: str):
-        """Adds a turn to the current conversation."""
         if not self.conversation:
             self.start_new_conversation()
-            
         turn = ConversationTurn(role=role, content=content)
         self.conversation.turns.append(turn)
-        
-        # Simple entity extraction to help with query enhancement
+
         entities = self._extract_entities(content)
         for entity in entities:
             if entity not in self.conversation.active_entities:
                 self.conversation.active_entities.append(entity)
-        self.conversation.active_entities = self.conversation.active_entities[-5:] # Keep last 5
-        
+        self.conversation.active_entities = self.conversation.active_entities[-5:]
+
         logger.info(f"Added '{role}' turn. Total turns: {len(self.conversation.turns)}/{self.max_turns}")
-    
+
     def get_turns(self) -> List[Dict[str, str]]:
-        """Returns all turns as a list of dictionaries for Streamlit to display."""
         if not self.conversation:
             return []
         return [{"role": t.role, "content": t.content} for t in self.conversation.turns]
 
     def _extract_entities(self, text: str) -> List[str]:
-        """A simple placeholder for entity extraction."""
-        # This can be improved with a proper NER model later if needed.
-        # For now, we look for capitalized words as a simple heuristic.
+        # Simple heuristic: capitalized words of len≥3
         return re.findall(r'\b[A-Z][a-z]{2,}\b', text)
 
     def should_end_session(self) -> bool:
-        """Checks if the session should end due to turn limit or timeout."""
         if not self.conversation:
             return False
         if len(self.conversation.turns) >= self.max_turns:
@@ -77,35 +67,28 @@ class ConversationManager:
                 logger.warning("Session timed out.")
                 return True
         return False
-    
+
     def get_formatted_history(self) -> str:
-        """Builds a simple string of the last few turns for the LLM's context."""
         if not self.conversation or not self.conversation.turns:
             return ""
-        
-        # Provide last 4 turns (2 user, 2 assistant) as context
         recent_turns = self.conversation.turns[-4:]
         history = []
         for turn in recent_turns:
             role_formatted = "Human" if turn.role == "user" else "Assistant"
             history.append(f"{role_formatted}: {turn.content}")
         return "\n".join(history)
-    
+
     def get_enhanced_query(self, original_query: str) -> str:
-        """Enhances a query with active entities to improve RAG retrieval."""
         query_lower = original_query.lower()
-        # Check if the query is likely a follow-up
         is_follow_up = any(word in query_lower for word in ['it', 'that', 'they', 'them', 'more', 'also'])
-        
         if is_follow_up and self.conversation and self.conversation.active_entities:
             context_entities = ", ".join(self.conversation.active_entities)
             enhanced_query = f"{original_query} (related to: {context_entities})"
             logger.info(f"Enhanced query for RAG: {enhanced_query}")
             return enhanced_query
-            
         return original_query
 
-# Use a lazy-loading function for the global instance to avoid import issues
+# Global singleton
 _conversation_manager_instance = None
 def get_conversation_manager():
     global _conversation_manager_instance
