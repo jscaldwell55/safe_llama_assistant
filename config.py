@@ -2,8 +2,7 @@
 
 import os
 
-# IMPORTANT: Set the HuggingFace Hub URL for model downloads
-# This ensures models are downloaded from the public hub, not your inference endpoint
+# Ensure model downloads use the public hub (not your inference endpoint)
 os.environ["HF_ENDPOINT"] = "https://huggingface.co"
 os.environ["HUGGINGFACE_HUB_URL"] = "https://huggingface.co"
 
@@ -11,66 +10,66 @@ os.environ["HUGGINGFACE_HUB_URL"] = "https://huggingface.co"
 try:
     import streamlit as st
     HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
-    # Try to get the inference endpoint from secrets first, then environment
     HF_INFERENCE_ENDPOINT = st.secrets.get("HF_INFERENCE_ENDPOINT", os.getenv("HF_INFERENCE_ENDPOINT"))
     if not HF_INFERENCE_ENDPOINT:
-        # Fallback to HF_ENDPOINT if the new name isn't set
         HF_INFERENCE_ENDPOINT = st.secrets.get("HF_ENDPOINT", os.getenv("HF_CUSTOM_ENDPOINT"))
 except (ImportError, FileNotFoundError, AttributeError):
-    HF_TOKEN = os.getenv("HF_TOKEN")  # Fallback to environment variable
+    HF_TOKEN = os.getenv("HF_TOKEN")
     HF_INFERENCE_ENDPOINT = os.getenv("HF_INFERENCE_ENDPOINT", os.getenv("HF_CUSTOM_ENDPOINT"))
 
-# Just validate that endpoint exists, don't reject specific URLs
 if not HF_INFERENCE_ENDPOINT:
-    print("WARNING: HF_ENDPOINT is not configured. Please set it in Streamlit secrets or environment variables.")
-    print("Example format: https://[your-endpoint-id].endpoints.huggingface.cloud")
+    print("WARNING: HF_INFERENCE_ENDPOINT is not configured. Set it in Streamlit secrets or env.")
+    print("Example: https://<your-endpoint-id>.endpoints.huggingface.cloud")
 else:
     print(f"INFO: Using HF_INFERENCE_ENDPOINT: {HF_INFERENCE_ENDPOINT[:50]}...")
 
-# Model Configuration - Optimized for natural conversation
+# Model Generation Defaults
 MODEL_PARAMS = {
-    "max_new_tokens": 512,      # Increased for fuller responses
-    "temperature": 0.7,         # Higher for more natural variation
+    "max_new_tokens": 512,
+    "temperature": 0.7,
     "do_sample": True,
-    "top_p": 0.9,               # Higher for richer vocabulary
-    "repetition_penalty": 1.1,  # Avoid repetitive phrasing
-    "return_full_text": False   # Don't return the prompt in response
+    "top_p": 0.9,
+    "repetition_penalty": 1.1,
+    "return_full_text": False
 }
 
-# RAG Configuration - Enhanced for better retrieval
+# RAG Configuration
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-CHUNK_SIZE = 800              # Larger chunks for more context
-CHUNK_OVERLAP = 150           # More overlap to preserve context
-TOP_K_RETRIEVAL = 8           # More candidates for better coverage
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 150
+TOP_K_RETRIEVAL = 8
 INDEX_PATH = "faiss_index"
 PDF_DATA_PATH = "data"
-EMBEDDING_BATCH_SIZE = 32     # Process embeddings in batches for better memory management
+EMBEDDING_BATCH_SIZE = 32
 
-# Semantic Chunking Configuration
-CHUNKING_STRATEGY = "hybrid"  # Can be: sections, paragraphs, sentences, recursive, hybrid
-MAX_CHUNK_TOKENS = 800        # Maximum tokens per semantic chunk
+# Semantic Chunking
+CHUNKING_STRATEGY = "hybrid"
+MAX_CHUNK_TOKENS = 800
 
 # Guard Agent Configuration
 ENABLE_GUARD = True
-SEMANTIC_SIMILARITY_THRESHOLD = 0.62  # For grounding validation
+SEMANTIC_SIMILARITY_THRESHOLD = 0.62  # numeric grounding threshold (per-claim)
+LEXICAL_OVERLAP_MIN = 0.30           # lexical fallback for paraphrases
+TERM_HIT_MIN = 3                      # enumeration leniency (≥3 exact term matches)
+USE_LLM_GUARD = True                  # agentic LLM safety/grounding evaluator (cannot override numeric ungrounded gate)
 
 # Conversation Configuration
-MAX_CONVERSATION_TURNS = 0   # Reasonable conversation length
-SESSION_TIMEOUT_MINUTES = 30  # Auto-end inactive sessions
-MAX_CONTEXT_LENGTH = 4000     # Characters for context window
+MAX_CONVERSATION_TURNS = 0
+SESSION_TIMEOUT_MINUTES = 30
+MAX_CONTEXT_LENGTH = 4000
 
 # UI Configuration
 APP_TITLE = "Pharma Enterprise Assistant"
 WELCOME_MESSAGE = "Hello! How can I help you today?"
 DEFAULT_FALLBACK_MESSAGE = "I don't have that information in our knowledge base. Could you rephrase your question or ask about something else?"
 
-# System Messages - Simple and trust-based
+# System Messages
 SYSTEM_MESSAGES = {
     "no_context": "I don't have information about that in our documentation. Would you like to ask about something else?",
     "error": "I encountered an error processing your request. Please try again or start a new conversation.",
     "session_end": "We've reached the conversation limit. Thank you for chatting! Please start a new conversation to continue."
 }
 
-# Logging Configuration
+# Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
