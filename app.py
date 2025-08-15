@@ -5,7 +5,7 @@ import logging
 import sys
 import asyncio
 
-# Configure logging centrally (do NOT basicConfig in libraries)
+# Configure logging centrally (libraries should NOT basicConfig)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,7 +18,7 @@ logger.info("=== Starting Streamlit app initialization ===")
 def get_dependencies():
     from config import APP_TITLE, SYSTEM_MESSAGES
     from prompt import format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
-    from llm_client import call_base_assistant, get_hf_client
+    from llm_client import call_base_assistant, get_hf_client, reset_hf_client
     from guard import evaluate_response
     from conversation import get_conversation_manager
     from conversational_agent import get_conversational_agent, ConversationMode
@@ -30,6 +30,7 @@ def get_dependencies():
         "ACKNOWLEDGE_GAP_PROMPT": ACKNOWLEDGE_GAP_PROMPT,
         "call_base_assistant": call_base_assistant,
         "get_hf_client": get_hf_client,
+        "reset_hf_client": reset_hf_client,
         "evaluate_response": evaluate_response,
         "get_conversation_manager": get_conversation_manager,
         "get_conversational_agent": get_conversational_agent,
@@ -72,7 +73,8 @@ def run_async(coro):
 
 async def handle_query_async(query: str) -> dict:
     """
-    Robust 'RAG-then-Check' workflow with early no-context handling.
+    Robust 'RAG-then-Check' workflow with early no-context handling
+    and graceful model error handling.
     """
     try:
         agent_decision = conversational_agent.process_query(query)
@@ -98,6 +100,17 @@ async def handle_query_async(query: str) -> dict:
                 )
                 draft_response = await deps["call_base_assistant"](prompt_for_llm)
 
+                # If the model call failed, do not call the guard, do not save to history
+                lower = (draft_response or "").lower()
+                if lower.startswith("error:") or lower.startswith("configuration error:"):
+                    return {
+                        "success": False,
+                        "response": deps["SYSTEM_MESSAGES"]["error"],
+                        "approved": False,
+                        "context_str": agent_decision.context_str,
+                        "debug_info": {**agent_decision.debug_info, "model_error": draft_response}
+                    }
+
                 is_approved, final_response_text, guard_reasoning = deps["evaluate_response"](
                     context=agent_decision.context_str,
                     user_question=query,
@@ -105,7 +118,8 @@ async def handle_query_async(query: str) -> dict:
                     conversation_history=conversation_manager.get_formatted_history()
                 )
         else:
-            final_response_text = "Hello! How can I help you with our documentation today?"
+            # Standalone greeting handling
+            final_response_text = "Hi! Fire away with a question about our docs."
             is_approved = True
             guard_reasoning = "Not required for direct agent response."
 
@@ -146,6 +160,11 @@ with st.sidebar:
         with st.spinner("Building FAISS index..."):
             deps["build_index"](force_rebuild=True)
         st.success("Index built successfully.")
+
+    st.subheader("🧰 Maintenance")
+    if st.button("Reload Model Client"):
+        deps["reset_hf_client"]()
+        st.success("Model client reloaded. New endpoint will be used on next message.")
 
 # --- MAIN ---
 st.markdown("### 💬 Ask me anything about our knowledge base")

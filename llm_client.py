@@ -30,54 +30,95 @@ class HuggingFaceClient:
 
     async def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
         params = parameters.copy() if parameters else MODEL_PARAMS.copy()
-        cache_key = self._cache_key(prompt, params)
         if not hasattr(self, "_cache"):
             self._cache = {}
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+        ck = self._cache_key(prompt, params)
+        if ck in self._cache:
+            return self._cache[ck]
 
         result = await self._generate_response_internal(prompt, params)
+
         # Limit cache size
         if len(self._cache) > 100:
             for k in list(self._cache.keys())[:20]:
                 self._cache.pop(k, None)
-        self._cache[cache_key] = result
+        self._cache[ck] = result
         return result
 
-    async def _generate_response_internal(self, prompt: str, parameters: Dict[str, Any]) -> str:
-        payload = {"inputs": prompt, "parameters": parameters}
+    async def _post_once(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """One HTTP POST with a fresh session. Returns (status, data_text, parsed_json_if_any)."""
         timeout = aiohttp.ClientTimeout(total=60)
-        connector = aiohttp.TCPConnector(limit=10, limit_per_host=10)
+        async with aiohttp.ClientSession(headers=self.headers, timeout=timeout) as session:
+            async with session.post(self.endpoint, json=payload) as response:
+                text = await response.text()
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    data = None
+                return {"status": response.status, "text": text, "json": data}
 
-        for attempt in range(3):
+    async def _generate_response_internal(self, prompt: str, parameters: Dict[str, Any]) -> str:
+        """
+        Try multiple parameter variants to handle different Inference Endpoint backends:
+        1) TGI-style:          parameters with 'stop'
+        2) transformers-style: parameters with 'stop_sequences'
+        3) minimal:            parameters without stop keys
+        """
+        # Build variants
+        base = parameters.copy()
+        stop_list = base.pop("stop", None)
+
+        variants: list[Dict[str, Any]] = []
+        # 1) TGI-style (stop)
+        if stop_list:
+            v1 = base.copy()
+            v1["stop"] = stop_list
+            variants.append(v1)
+        else:
+            variants.append(base.copy())
+
+        # 2) stop_sequences
+        if stop_list:
+            v2 = base.copy()
+            v2["stop_sequences"] = stop_list
+            variants.append(v2)
+
+        # 3) minimal (no stop)
+        variants.append(base.copy())
+
+        errors = []
+        for i, params in enumerate(variants, start=1):
+            payload = {"inputs": prompt, "parameters": params}
+            logger.info(f"Sending request to HF endpoint (variant {i}/{len(variants)})")
             try:
-                logger.info(f"Sending request to HF endpoint (attempt {attempt + 1}/3)")
-                async with aiohttp.ClientSession(connector=connector, headers=self.headers, timeout=timeout) as session:
-                    async with session.post(self.endpoint, json=payload) as response:
-                        response.raise_for_status()
-                        data = await response.json()
-                        if isinstance(data, list) and data and isinstance(data[0], dict) and "generated_text" in data[0]:
-                            generated_text = data[0]["generated_text"]
-                            if generated_text.startswith(prompt):
-                                return generated_text[len(prompt):].strip()
-                            return generated_text
-                        # Some deployments return dicts
-                        if isinstance(data, dict) and "generated_text" in data:
-                            return data["generated_text"]
-                        logger.warning(f"Unexpected response format: {data}")
-                        return str(data)
-            except aiohttp.ClientResponseError as e:
-                if e.status == 404:
-                    logger.error("404 Not Found: Check your endpoint URL and deployment.", exc_info=True)
-                    return "Error: The HuggingFace model endpoint is not accessible. Please check your endpoint configuration."
-                logger.error(f"Request failed with status {e.status}: {e}", exc_info=True)
+                result = await self._post_once(payload)
+                status, text, data = result["status"], result["text"], result["json"]
+
+                if status == 200:
+                    # TGI often returns [{"generated_text": "..."}]
+                    if isinstance(data, list) and data and isinstance(data[0], dict) and "generated_text" in data[0]:
+                        generated_text = data[0]["generated_text"]
+                        return generated_text[len(prompt):].strip() if generated_text.startswith(prompt) else generated_text
+                    # Some backends return {"generated_text": "..."}
+                    if isinstance(data, dict) and "generated_text" in data:
+                        return data["generated_text"]
+                    # Fallback: best effort
+                    logger.warning(f"200 OK but unrecognized response format: {text[:300]}...")
+                    return text
+
+                # Non-200 => capture and try next variant (422 likely means bad param name)
+                logger.error(f"HF endpoint returned {status}. Body: {text[:800]}")
+                errors.append(f"{status}: {text[:300]}")
+
             except Exception as e:
                 logger.error(f"Request failed: {e}", exc_info=True)
+                errors.append(repr(e))
 
-            if attempt < 2:
-                await asyncio.sleep(2 ** attempt)
+            # small backoff between variants
+            await asyncio.sleep(0.3)
 
-        return "Error: Could not connect to the model service after multiple attempts. Please check your configuration."
+        # None of the variants worked
+        return "Error: Could not generate from the model (tried multiple parameter formats). " + (errors[0] if errors else "")
 
 # --- Convenience functions ---
 
@@ -106,7 +147,12 @@ async def call_base_assistant(prompt: str) -> str:
         "top_p": 0.9,
         "repetition_penalty": 1.1,
         "max_new_tokens": 300,
-        # Prefer 'stop' for broader compatibility with TGI
+        # prefer 'stop', but _generate_response_internal will try fallbacks if needed
         "stop": ["\nUser:", "\nHuman:", "\nAssistant:", "###", "<|endoftext|>"]
     })
     return await call_huggingface(prompt, base_params)
+
+def reset_hf_client():
+    """Optional: allows reloading the client after rotating the endpoint via the UI."""
+    global _hf_client_instance
+    _hf_client_instance = None
