@@ -159,22 +159,66 @@ class HybridGuardAgent:
 
     def _should_skip_llm_evaluation(self, response: str, grounding_score: float, claims: List[str]) -> bool:
         """Determine if we can skip LLM evaluation for performance"""
-        # Skip LLM for responses with excellent grounding and no risky patterns
-        if grounding_score > 0.8 and not claims:
-            # Conversational response with high grounding
+        response_lower = response.lower()
+        
+        # Skip for excellent grounding regardless of content type
+        if grounding_score > 0.75:
+            # Check for obviously dangerous content even with good grounding
+            critical_terms = ["inject", "snort", "crush", "overdose", "suicide", "kill"]
+            if not any(term in response_lower for term in critical_terms):
+                return True
+        
+        # Skip for short, simple responses
+        if len(response) < 200 and grounding_score > 0.65:
             return True
         
-        if grounding_score > 0.85 and claims:
-            # Check if response is just listing facts from context
-            response_lower = response.lower()
-            risky_phrases = ["should", "must", "recommend", "advise", "suggest", "do not", "never", "always"]
+        # Skip for list-based responses (bullets or numbered lists)
+        if (response.count('•') > 2 or response.count('-') > 3 or 
+            response.count('\n') > 4 or bool(re.search(r'\n\d+\.', response))):
+            # List responses are usually just facts from documentation
+            if grounding_score > 0.6:
+                return True
+        
+        # Skip for responses that are mostly side effects or symptoms listings
+        medical_list_indicators = ["side effects", "symptoms", "reactions", "effects include", 
+                                  "common effects", "serious effects", "may include", "such as"]
+        if any(indicator in response_lower for indicator in medical_list_indicators):
+            if grounding_score > 0.65:
+                return True
+        
+        # Skip for standard acknowledgment responses
+        no_info_phrases = ["don't have information", "not in the documentation", 
+                          "no information", "unable to find", "not available",
+                          "cannot provide", "don't have specific"]
+        if any(phrase in response_lower for phrase in no_info_phrases):
+            return True
+        
+        # Skip for conversational responses with high grounding and no claims
+        if grounding_score > 0.7 and not claims:
+            return True
+        
+        # Skip for factual responses without directive language
+        if grounding_score > 0.7 and claims:
+            risky_phrases = ["you should", "you must", "you need to", "recommend that you",
+                           "advise you", "suggest you", "do not take", "never take", 
+                           "always take", "stop taking", "start taking", "increase your",
+                           "decrease your", "double your", "skip your"]
             if not any(phrase in response_lower for phrase in risky_phrases):
                 return True
         
-        # Skip for standard "no information" responses
-        if "don't have information" in response.lower() or "not in the documentation" in response.lower():
-            return True
+        # Skip for definition/explanation responses
+        definition_patterns = [r"^.{0,50}\bis\b.{0,200}$", r"refers to", r"means that", 
+                             r"is defined as", r"is a type of", r"is used for"]
+        if any(re.search(pattern, response_lower) for pattern in definition_patterns):
+            if grounding_score > 0.65 and len(response) < 300:
+                return True
         
+        # Skip for responses that just quote numbers/statistics
+        if re.search(r'\d+\s*(?:%|percent|mg|ml|mcg|patients|people|studies)', response_lower):
+            if grounding_score > 0.65 and "should" not in response_lower and "must" not in response_lower:
+                return True
+        
+        # Default to running LLM evaluation for anything else
         return False
 
     # ---------- Phase 2: Grounding score calculation ----------
