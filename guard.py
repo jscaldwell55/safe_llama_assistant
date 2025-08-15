@@ -1,155 +1,438 @@
-# guard.py
+# guard.py - Simplified Validation for Persona-Based Architecture
 
 import logging
-from typing import Dict, Any, Tuple, List, Optional
 import re
+import json
 import numpy as np
-import asyncio
-import concurrent.futures
+from typing import Dict, Any, Tuple, List, Optional
+from dataclasses import dataclass
+from enum import Enum
+
 from config import (
-    DEFAULT_FALLBACK_MESSAGE,
     ENABLE_GUARD,
-    EMBEDDING_MODEL_NAME,
     SEMANTIC_SIMILARITY_THRESHOLD,
+    USE_LLM_GUARD,
+    DEFAULT_FALLBACK_MESSAGE
 )
 
 logger = logging.getLogger(__name__)
 
-# --- Embedding model (shared if available) ---
-def _load_embedding_model():
-    try:
-        from embeddings import get_embedding_model  # shared singleton
-        return get_embedding_model()
-    except Exception:
-        try:
-            from sentence_transformers import SentenceTransformer
-            return SentenceTransformer(EMBEDDING_MODEL_NAME)
-        except Exception as e:
-            logger.error(f"Guard could not init embedding model: {e}")
-            return None
+# ============================================================================
+# VALIDATION TYPES AND STRUCTURES
+# ============================================================================
 
-# --- Patterns for critical checks (kept for pre-filtering obvious violations) ---
-MISUSE_PATTERNS = [
-    r"\bcrush(?:ing)?\b", r"\bsnort(?:ing|ed)?\b", r"\binject(?:ing|ed|ion)?\b",
-    r"\bsmok(?:e|ing|ed)\b", r"\bplug(?:ging)?\b", r"\bboof(?:ing)?\b", r"\bparachut(?:e|ing)\b",
-    r"\biv\b", r"\bdissolv(?:e|ing)\b.*\b(in|into)\b.*\b(injection|needle|vein)\b",
-    r"\bchew(?:ing)?\b.*\btablet\b", r"\bmix(?:ing)?\b.*\b(alcohol|vodka|beer|wine)\b",
-]
-OFFLABEL_CUES = [
-    r"\boff[- ]label\b", r"\bnot approved\b", r"\bunapproved\b", r"\bnot indicated\b",
-    r"\bfor (?:adhd|weight|sleep|pain|anxiety in children|performance)\b",
-]
-DOSING_DIRECTIVES = [
-    r'\byou (should|must|need to) take\b', r'\bstart (taking|with)\b.*\bmg\b',
-    r'\bstop taking\b', r'\bincrease your dose\b', r'\bdecrease your dose\b',
-    r'\btake \d+\s*mg\b', r'\bdo not take\b.*\bif you\b'
-]
+class ValidationResult(Enum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    MODIFIED = "modified"
 
-class HybridGuardAgent:
+@dataclass
+class ValidationDecision:
+    result: ValidationResult
+    final_response: str
+    reasoning: str
+    confidence: float = 0.0
+    modifications: List[str] = None
+    metadata: Dict[str, Any] = None
+
+# ============================================================================
+# STREAMLINED VALIDATOR
+# ============================================================================
+
+class PersonaValidator:
     """
-    Hybrid guard using both heuristics and LLM reasoning:
-      1) Quick heuristic pre-checks for obvious violations
-      2) Semantic grounding checks
-      3) LLM-based comprehensive safety evaluation (optional)
+    Simplified validator for the Persona-based architecture.
+    Since personas already enforce constraints, validation is lighter.
     """
-
+    
     def __init__(self):
         self.enabled = ENABLE_GUARD
-        self.use_llm_guard = None  # Will be loaded from config
-        self.embedding_model = _load_embedding_model()
-        try:
-            self.sim_threshold = float(SEMANTIC_SIMILARITY_THRESHOLD)
-        except Exception:
-            self.sim_threshold = 0.65
-
-        # User-facing fallbacks
-        self.fallback_messages = {
-            "default": "I can't help with that. Can we talk about something else?",
-            "no_context": "I don't have sufficient information in our knowledge base to answer that. Could you rephrase your question or ask about something else?",
-            "unsafe_medical": "I cannot provide medical advice. Please consult with a healthcare professional for medical guidance.",
-            "off_label_refusal": "I can't provide information about unapproved or off-label uses. I can share what's documented in the approved labeling.",
-            "misuse_refusal": (
-                "I can't help with questions about misusing or altering medications. "
-                "If you're in immediate danger, call local emergency services. "
-                "For confidential support with substance use, in the U.S. you can call SAMHSA at 1-800-662-HELP (4357)."
-            ),
+        self.use_llm = USE_LLM_GUARD
+        self.sim_threshold = SEMANTIC_SIMILARITY_THRESHOLD
+        self.embedding_model = self._load_embedding_model()
+        
+        # Critical patterns that still need checking
+        self.critical_patterns = {
+            "dosage_directive": r'\b(?:take|consume|inject|use)\s+\d+\s*(?:mg|ml|mcg)\b',
+            "medical_imperative": r'\b(?:you must|you should|never take|always take|stop taking)\b',
+            "diagnostic": r'\b(?:you have|you are suffering from|diagnosed with)\b',
+            "dangerous_route": r'\b(?:crush|snort|inject|smoke|dissolve)\b'
         }
-
-    async def _call_guard_llm(self, prompt: str) -> str:
-        """Call the guard LLM asynchronously"""
-        from llm_client import call_guard_agent
-        return await call_guard_agent(prompt)
-
-    def _is_conversational_only(self, question: str, response: str) -> bool:
+    
+    def _load_embedding_model(self):
+        """Load embedding model for semantic similarity"""
+        try:
+            from embeddings import get_embedding_model
+            return get_embedding_model()
+        except Exception as e:
+            logger.warning(f"Could not load embedding model: {e}")
+            return None
+    
+    async def validate_response(
+        self,
+        response: str,
+        strategy_used: str,
+        components: Optional[Dict[str, Any]] = None,
+        context: str = "",
+        query: str = ""
+    ) -> ValidationDecision:
         """
-        Determine if this is conversational exchange without pharmaceutical facts.
-        Be PERMISSIVE - only return False if there's clear medical/drug content.
-        Allow empathetic responses even if they mention conditions.
+        Validate a response based on the strategy used to generate it
         """
-        r_lower = response.lower()
-        q_lower = question.lower()
+        if not self.enabled:
+            return ValidationDecision(
+                result=ValidationResult.APPROVED,
+                final_response=response,
+                reasoning="Validation disabled",
+                confidence=1.0
+            )
         
-        # Check if this is an empathetic/supportive response
-        empathetic_indicators = [
-            "i hear you", "i'm sorry", "that must be", "that sounds",
-            "it's understandable", "many people", "you're not alone",
-            "thank you for sharing", "i understand", "that's difficult",
-            "can be challenging", "can be hard", "going through"
+        try:
+            # Strategy-specific validation
+            if strategy_used == "pure_empathy":
+                # Pure empathy responses don't need grounding checks
+                return await self._validate_empathy_only(response)
+                
+            elif strategy_used == "pure_facts":
+                # Pure facts need strict grounding
+                return await self._validate_facts_only(response, context)
+                
+            elif strategy_used == "synthesized":
+                # Synthesized responses need component-aware validation
+                return await self._validate_synthesized(
+                    response, components, context, query
+                )
+                
+            else:  # conversational
+                # Light validation for conversational responses
+                return await self._validate_conversational(response)
+                
+        except Exception as e:
+            logger.error(f"Validation error: {e}", exc_info=True)
+            return ValidationDecision(
+                result=ValidationResult.REJECTED,
+                final_response=DEFAULT_FALLBACK_MESSAGE,
+                reasoning=f"Validation error: {str(e)}",
+                confidence=0.0
+            )
+    
+    async def _validate_empathy_only(self, response: str) -> ValidationDecision:
+        """
+        Validate pure empathetic responses.
+        These should NOT contain medical facts.
+        """
+        response_lower = response.lower()
+        
+        # Check for leaked medical information
+        medical_terms = [
+            r'\b\d+\s*(?:mg|ml|mcg)\b',  # Dosages
+            r'\b(?:lexapro|escitalopram|ssri)\b',  # Drug names
+            r'\b(?:side effect|adverse|interaction)\b',  # Medical terms
+            r'\b(?:indication|contraindication)\b'
         ]
         
-        # If response is primarily empathetic, allow it even with medical mentions
-        if any(phrase in r_lower for phrase in empathetic_indicators):
-            # Only flag if it contains specific dosages or instructions
-            dangerous_patterns = [
-                r'\b\d+\s*(?:mg|ml|mcg)\b',  # Specific dosages
-                r'\btake\s+\d+\b',  # Take X tablets
-                r'\b(?:increase|decrease|stop|start)\s+(?:your|the)\s+(?:dose|medication)\b',
-            ]
-            for pattern in dangerous_patterns:
-                if re.search(pattern, r_lower):
-                    return False
-            # Otherwise, allow empathetic responses
+        for pattern in medical_terms:
+            if re.search(pattern, response_lower):
+                return ValidationDecision(
+                    result=ValidationResult.REJECTED,
+                    final_response="I understand your concerns. I'm here to help you find the information you need.",
+                    reasoning="Empathetic response contained medical information",
+                    confidence=0.9
+                )
+        
+        # Check for dangerous patterns
+        for pattern_name, pattern in self.critical_patterns.items():
+            if re.search(pattern, response_lower):
+                return ValidationDecision(
+                    result=ValidationResult.REJECTED,
+                    final_response="I understand you're looking for help. Please consult with a healthcare professional.",
+                    reasoning=f"Critical pattern detected: {pattern_name}",
+                    confidence=0.95
+                )
+        
+        return ValidationDecision(
+            result=ValidationResult.APPROVED,
+            final_response=response,
+            reasoning="Pure empathy response validated",
+            confidence=0.9
+        )
+    
+    async def _validate_facts_only(self, response: str, context: str) -> ValidationDecision:
+        """
+        Validate pure factual responses.
+        These need strict grounding in context.
+        """
+        if not context or not context.strip():
+            return ValidationDecision(
+                result=ValidationResult.REJECTED,
+                final_response="I don't have that information in the documentation.",
+                reasoning="No context available for factual response",
+                confidence=0.95
+            )
+        
+        # Calculate grounding score
+        grounding_score = self._calculate_grounding_score(response, context)
+        
+        if grounding_score < self.sim_threshold:
+            # Try lexical grounding as fallback
+            if not self._lexical_grounding_check(response, context):
+                return ValidationDecision(
+                    result=ValidationResult.REJECTED,
+                    final_response="I don't have sufficient information about that in the documentation.",
+                    reasoning=f"Poor grounding score: {grounding_score:.2f}",
+                    confidence=0.8
+                )
+        
+        # Check for critical patterns even in grounded responses
+        response_lower = response.lower()
+        for pattern_name, pattern in self.critical_patterns.items():
+            if re.search(pattern, response_lower):
+                # For facts, check if the pattern is actually in the context
+                if not re.search(pattern, context.lower()):
+                    return ValidationDecision(
+                        result=ValidationResult.REJECTED,
+                        final_response="I cannot provide that type of information.",
+                        reasoning=f"Critical pattern not grounded: {pattern_name}",
+                        confidence=0.9
+                    )
+        
+        return ValidationDecision(
+            result=ValidationResult.APPROVED,
+            final_response=response,
+            reasoning=f"Factual response grounded (score: {grounding_score:.2f})",
+            confidence=min(0.95, grounding_score + 0.3)
+        )
+    
+    async def _validate_synthesized(
+        self,
+        response: str,
+        components: Optional[Dict[str, Any]],
+        context: str,
+        query: str
+    ) -> ValidationDecision:
+        """
+        Validate synthesized responses.
+        Only the factual component needs grounding.
+        """
+        # If we have components, validate them separately
+        if components:
+            facts_component = components.get("facts_component", "")
+            
+            if facts_component and facts_component != "No relevant information found in documentation.":
+                # Validate just the facts component
+                grounding_score = self._calculate_grounding_score(facts_component, context)
+                
+                if grounding_score < self.sim_threshold:
+                    return ValidationDecision(
+                        result=ValidationResult.REJECTED,
+                        final_response=self._create_safe_fallback(query),
+                        reasoning=f"Facts component poorly grounded: {grounding_score:.2f}",
+                        confidence=0.8
+                    )
+        
+        # Check the full response for critical patterns
+        response_lower = response.lower()
+        for pattern_name, pattern in self.critical_patterns.items():
+            if re.search(pattern, response_lower):
+                # For synthesized responses, be more lenient if it's quoting context
+                if context and re.search(pattern, context.lower()):
+                    continue  # Pattern is in context, allow it
+                    
+                return ValidationDecision(
+                    result=ValidationResult.REJECTED,
+                    final_response=self._create_safe_fallback(query),
+                    reasoning=f"Critical pattern in synthesis: {pattern_name}",
+                    confidence=0.85
+                )
+        
+        # LLM validation if enabled and needed
+        if self.use_llm and self._needs_llm_validation(response):
+            llm_decision = await self._llm_safety_check(response, context, query)
+            if llm_decision.result == ValidationResult.REJECTED:
+                return llm_decision
+        
+        return ValidationDecision(
+            result=ValidationResult.APPROVED,
+            final_response=response,
+            reasoning="Synthesized response validated",
+            confidence=0.85,
+            metadata={"synthesis_validation": "component-aware"}
+        )
+    
+    async def _validate_conversational(self, response: str) -> ValidationDecision:
+        """
+        Light validation for conversational responses
+        """
+        response_lower = response.lower()
+        
+        # Only check for the most critical patterns
+        critical_checks = ["diagnostic", "dangerous_route"]
+        for pattern_name in critical_checks:
+            if pattern_name in self.critical_patterns:
+                pattern = self.critical_patterns[pattern_name]
+                if re.search(pattern, response_lower):
+                    return ValidationDecision(
+                        result=ValidationResult.REJECTED,
+                        final_response="I can help you with that. What would you like to know?",
+                        reasoning=f"Critical pattern in conversation: {pattern_name}",
+                        confidence=0.9
+                    )
+        
+        return ValidationDecision(
+            result=ValidationResult.APPROVED,
+            final_response=response,
+            reasoning="Conversational response approved",
+            confidence=0.95
+        )
+    
+    def _calculate_grounding_score(self, text: str, context: str) -> float:
+        """Calculate semantic similarity score between text and context"""
+        if not context or not self.embedding_model:
+            return 0.0
+        
+        try:
+            text_embedding = self.embedding_model.encode(
+                text, convert_to_tensor=False, show_progress_bar=False
+            )
+            context_embedding = self.embedding_model.encode(
+                context, convert_to_tensor=False, show_progress_bar=False
+            )
+            
+            similarity = float(
+                np.dot(text_embedding, context_embedding) / 
+                (np.linalg.norm(text_embedding) * np.linalg.norm(context_embedding))
+            )
+            
+            return similarity
+            
+        except Exception as e:
+            logger.error(f"Error calculating grounding score: {e}")
+            return 0.0
+    
+    def _lexical_grounding_check(self, text: str, context: str) -> bool:
+        """Simple lexical overlap check as fallback"""
+        if not context:
+            return False
+            
+        text_words = set(re.findall(r'\b\w+\b', text.lower()))
+        context_words = set(re.findall(r'\b\w+\b', context.lower()))
+        
+        # Remove stop words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for'}
+        text_words -= stop_words
+        context_words -= stop_words
+        
+        if not text_words:
             return True
+            
+        overlap = len(text_words & context_words) / len(text_words)
+        return overlap > 0.5
+    
+    def _needs_llm_validation(self, response: str) -> bool:
+        """Determine if LLM validation is needed"""
+        # Skip LLM for very short responses
+        if len(response) < 50:
+            return False
         
-        # Check if user is sharing personal experience (not asking for facts)
-        personal_sharing = [
-            "i am", "i'm", "i feel", "i have", "my doctor", "my therapist",
-            "diagnosed", "struggling", "dealing with", "going through"
-        ]
-        if any(phrase in q_lower for phrase in personal_sharing):
-            # User is sharing personally - response can be supportive without grounding
-            if not re.search(r'\b\d+\s*(?:mg|ml|mcg)\b', r_lower):  # Unless giving dosages
-                return True
+        # Skip for responses that are clearly just lists
+        if response.count('\n') > 5 or response.count('•') > 3:
+            return False
         
-        # Strong indicators this IS pharmaceutical/medical content (needs grounding)
-        pharmaceutical_indicators = [
-            r'\b\d+\s*(?:mg|ml|mcg|iu|units?)\b',  # Dosages
-            r'\b(?:lexapro|escitalopram|ssri|antidepressant)\b',  # Drug names
-            r'\b(?:dose|dosage|dosing|administration)\b',
-            r'\b(?:side effect|adverse|reaction|interaction)\b',
-            r'\b(?:indication|contraindication|warning)\b',
-            r'\b(?:treatment|therapy|medication|prescription)\b',
-            r'\b(?:clinical|efficacy|safety profile)\b',
-            r'\b(?:take|taking|taken)\s+(?:with|without|before|after)\b',
-            r'\b(?:oral|injection|intravenous|topical)\b',
-            r'\b(?:overdose|withdrawal|dependence)\b',
-        ]
+        # Need LLM for complex responses
+        return len(response) > 200
+    
+    async def _llm_safety_check(
+        self,
+        response: str,
+        context: str,
+        query: str
+    ) -> ValidationDecision:
+        """Use LLM for safety validation"""
+        try:
+            from prompts import format_validation_prompt
+            from llm_client import call_guard_agent
+            
+            prompt = format_validation_prompt(context, query, response)
+            llm_response = await call_guard_agent(prompt)
+            
+            # Parse LLM response
+            return self._parse_llm_validation(llm_response, response)
+            
+        except Exception as e:
+            logger.error(f"LLM validation failed: {e}")
+            # Don't reject on LLM failure, just log
+            return ValidationDecision(
+                result=ValidationResult.APPROVED,
+                final_response=response,
+                reasoning="LLM validation failed, defaulting to approve",
+                confidence=0.5
+            )
+    
+    def _parse_llm_validation(self, llm_response: str, original_response: str) -> ValidationDecision:
+        """Parse LLM validation response"""
+        try:
+            # Try to extract JSON
+            json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                
+                verdict = data.get("verdict", "APPROVE")
+                confidence = float(data.get("confidence", 0.7))
+                
+                if verdict == "REJECT":
+                    return ValidationDecision(
+                        result=ValidationResult.REJECTED,
+                        final_response=DEFAULT_FALLBACK_MESSAGE,
+                        reasoning=f"LLM rejection: {data.get('issues', [])}",
+                        confidence=confidence
+                    )
+                elif verdict == "NEEDS_MODIFICATION":
+                    # Could implement modification logic here
+                    return ValidationDecision(
+                        result=ValidationResult.MODIFIED,
+                        final_response=original_response,  # For now, keep original
+                        reasoning="LLM suggested modifications",
+                        confidence=confidence,
+                        modifications=data.get("issues", [])
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to parse LLM validation JSON: {e}")
         
-        # If response contains pharmaceutical content, it needs grounding
-        for pattern in pharmaceutical_indicators:
-            if re.search(pattern, r_lower):
-                # Exception: Allow if it's just acknowledging + redirecting
-                if "consult" in r_lower or "talk to your" in r_lower or "speak with" in r_lower:
-                    redirect_phrases = ["healthcare provider", "doctor", "professional", "therapist"]
-                    if any(phrase in r_lower for phrase in redirect_phrases):
-                        # It's redirecting to professional help, allow it
-                        continue
-                return False
+        # Default to approval if parsing fails
+        return ValidationDecision(
+            result=ValidationResult.APPROVED,
+            final_response=original_response,
+            reasoning="LLM validation parsed as approval",
+            confidence=0.7
+        )
+    
+    def _create_safe_fallback(self, query: str) -> str:
+        """Create a safe fallback response based on query type"""
+        query_lower = query.lower()
         
-        # Otherwise, treat it as conversational
-        return True
+        if any(word in query_lower for word in ["worried", "scared", "anxious"]):
+            return "I understand your concerns. For medical guidance, please consult with your healthcare provider."
+        elif "?" in query:
+            return "I don't have sufficient information about that in the documentation."
+        else:
+            return DEFAULT_FALLBACK_MESSAGE
 
-    # ---------- Public API ----------
+# ============================================================================
+# LEGACY COMPATIBILITY
+# ============================================================================
+
+class HybridGuardAgent:
+    """Legacy compatibility wrapper"""
+    
+    def __init__(self):
+        self.validator = PersonaValidator()
+        self.enabled = ENABLE_GUARD
+        self.fallback_messages = {
+            "default": DEFAULT_FALLBACK_MESSAGE,
+            "no_context": "I don't have that information in the documentation.",
+            "unsafe_medical": "Please consult with a healthcare professional.",
+        }
+    
     def evaluate_response(
         self,
         context: str,
@@ -157,389 +440,34 @@ class HybridGuardAgent:
         assistant_response: str,
         conversation_history: Optional[str] = None,
     ) -> Tuple[bool, str, str]:
-        if not self.enabled:
-            return True, assistant_response, "Guard disabled"
+        """Legacy synchronous interface"""
+        import asyncio
         
-        # Load LLM guard setting if not already loaded
-        if self.use_llm_guard is None:
-            from config import USE_LLM_GUARD
-            self.use_llm_guard = USE_LLM_GUARD
-        
-        try:
-            # Check if this is pure conversation (no medical content)
-            if self._is_conversational_only(user_question, assistant_response):
-                return True, assistant_response, "Approve: Conversational response, no medical content"
-            
-            # Phase 1: Quick heuristic pre-checks for obvious violations
-            obvious_violation = self._obvious_violation_check(user_question, assistant_response)
-            if obvious_violation:
-                fallback = self._fallback_for_violation_type(obvious_violation["type"])
-                return False, fallback, f"Reject (heuristic): {obvious_violation['description']}"
-
-            # Phase 2: Semantic grounding check
-            claims = self._extract_factual_claims(assistant_response)
-            if claims and not (context and context.strip()):
-                return False, self.fallback_messages["no_context"], "Reject: factual content with no retrieved context."
-            
-            grounding_score = self._calculate_grounding_score(assistant_response, context)
-            
-            # Phase 3: LLM-based comprehensive evaluation (skip if disabled or for simple responses)
-            if not self.use_llm_guard:
-                # Just use heuristics and grounding
-                llm_verdict = {
-                    "verdict": "APPROVE" if grounding_score > self.sim_threshold else "UNCERTAIN",
-                    "intent": "ANSWERING",
-                    "reason": "LLM guard disabled, using heuristics only",
-                    "confidence": 0.7
-                }
-            elif self._should_skip_llm_evaluation(assistant_response, grounding_score, claims):
-                llm_verdict = {
-                    "verdict": "APPROVE",
-                    "intent": "ANSWERING",
-                    "reason": "Simple response with good grounding, skipped LLM check",
-                    "confidence": 0.85
-                }
-            else:
-                llm_verdict = self._run_llm_evaluation(
-                    context, user_question, assistant_response, 
-                    conversation_history, grounding_score
-                )
-            
-            # Phase 4: Combine signals for final decision
-            return self._final_verdict(
-                assistant_response, grounding_score, llm_verdict, claims, context
-            )
-
-        except Exception as e:
-            logger.error(f"Guard evaluation failed: {e}", exc_info=True)
-            return False, self.fallback_messages["default"], f"Guard evaluation error: {str(e)}"
-
-    # ---------- Phase 1: Obvious violation checks ----------
-    def _obvious_violation_check(self, question: str, response: str) -> Optional[Dict[str, Any]]:
-        """Quick pattern-based check for obvious violations"""
-        ql = question.lower()
-        rl = response.lower()
-        
-        # Check for misuse intent
-        if self._contains_pattern(ql, MISUSE_PATTERNS) or self._contains_pattern(rl, MISUSE_PATTERNS):
-            return {"type": "misuse", "description": "Misuse or unapproved route detected"}
-        
-        # Check for obvious directive medical language
-        if self._contains_pattern(rl, DOSING_DIRECTIVES):
-            return {"type": "medical_advice", "description": "Directive medical language detected"}
-        
-        return None
-
-    def _should_skip_llm_evaluation(self, response: str, grounding_score: float, claims: List[str]) -> bool:
-        """Determine if we can skip LLM evaluation for performance"""
-        response_lower = response.lower()
-        
-        # Skip for excellent grounding regardless of content type
-        if grounding_score > 0.75:
-            # Check for obviously dangerous content even with good grounding
-            critical_terms = ["inject", "snort", "crush", "overdose", "suicide", "kill"]
-            if not any(term in response_lower for term in critical_terms):
-                return True
-        
-        # Skip for short, simple responses
-        if len(response) < 200 and grounding_score > 0.65:
-            return True
-        
-        # Skip for list-based responses (bullets or numbered lists)
-        if (response.count('•') > 2 or response.count('-') > 3 or 
-            response.count('\n') > 4 or bool(re.search(r'\n\d+\.', response))):
-            # List responses are usually just facts from documentation
-            if grounding_score > 0.6:
-                return True
-        
-        # Skip for responses that are mostly side effects or symptoms listings
-        medical_list_indicators = ["side effects", "symptoms", "reactions", "effects include", 
-                                  "common effects", "serious effects", "may include", "such as"]
-        if any(indicator in response_lower for indicator in medical_list_indicators):
-            if grounding_score > 0.65:
-                return True
-        
-        # Skip for standard acknowledgment responses
-        no_info_phrases = ["don't have information", "not in the documentation", 
-                          "no information", "unable to find", "not available",
-                          "cannot provide", "don't have specific"]
-        if any(phrase in response_lower for phrase in no_info_phrases):
-            return True
-        
-        # Skip for conversational responses with high grounding and no claims
-        if grounding_score > 0.7 and not claims:
-            return True
-        
-        # Skip for factual responses without directive language
-        if grounding_score > 0.7 and claims:
-            risky_phrases = ["you should", "you must", "you need to", "recommend that you",
-                           "advise you", "suggest you", "do not take", "never take", 
-                           "always take", "stop taking", "start taking", "increase your",
-                           "decrease your", "double your", "skip your"]
-            if not any(phrase in response_lower for phrase in risky_phrases):
-                return True
-        
-        # Skip for definition/explanation responses
-        definition_patterns = [r"^.{0,50}\bis\b.{0,200}$", r"refers to", r"means that", 
-                             r"is defined as", r"is a type of", r"is used for"]
-        if any(re.search(pattern, response_lower) for pattern in definition_patterns):
-            if grounding_score > 0.65 and len(response) < 300:
-                return True
-        
-        # Skip for responses that just quote numbers/statistics
-        if re.search(r'\d+\s*(?:%|percent|mg|ml|mcg|patients|people|studies)', response_lower):
-            if grounding_score > 0.65 and "should" not in response_lower and "must" not in response_lower:
-                return True
-        
-        # Default to running LLM evaluation for anything else
-        return False
-
-    # ---------- Phase 2: Grounding score calculation ----------
-    def _calculate_grounding_score(self, response: str, context: str) -> float:
-        """Calculate overall grounding score for the response"""
-        if not context:
-            return 0.0
-        
-        # Get semantic similarity for the full response
-        full_score = self._semantic_similarity(response, context)
-        
-        # Also check individual claims
-        claims = self._extract_factual_claims(response)
-        if not claims:
-            return full_score
-        
-        claim_scores = [self._semantic_similarity(claim, context) for claim in claims]
-        avg_claim_score = sum(claim_scores) / len(claim_scores) if claim_scores else 0
-        
-        # Weight both full response and individual claims
-        return 0.4 * full_score + 0.6 * avg_claim_score
-
-    def _run_async_safe(self, coro):
-        """Run an async coroutine safely, handling existing event loops"""
-        try:
-            # Check if there's already a running event loop
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop, we can use asyncio.run()
-            return asyncio.run(coro)
-        
-        # There's a running loop (likely from Streamlit), use thread pool
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(asyncio.run, coro)
-            return future.result()
-
-    # ---------- Phase 3: LLM evaluation ----------
-    def _run_llm_evaluation(
-        self, context: str, question: str, response: str, 
-        conversation_history: Optional[str], grounding_score: float
-    ) -> Dict[str, Any]:
-        """Run LLM-based evaluation (with proper async handling)"""
-        try:
-            # Format the prompt for the guard LLM
-            from prompts import format_guard_prompt
-            prompt = format_guard_prompt(
+        # Create async validation call
+        async def validate():
+            return await self.validator.validate_response(
+                response=assistant_response,
+                strategy_used="unknown",  # Legacy doesn't know strategy
                 context=context,
-                question=question,
-                answer=response,
-                conversation_history=conversation_history
+                query=user_question
             )
-            
-            # Add grounding score to help LLM
-            prompt += f"\n\nGrounding Score: {grounding_score:.2f}"
-            
-            # Call the LLM with proper async handling
-            llm_response = self._run_async_safe(self._call_guard_llm(prompt))
-            
-            # Parse LLM verdict
-            return self._parse_llm_verdict(llm_response)
-            
-        except Exception as e:
-            logger.error(f"LLM evaluation failed: {e}", exc_info=True)
-            # Fallback to heuristics if LLM fails
-            return {"verdict": "UNCERTAIN", "reason": f"LLM evaluation failed: {str(e)}"}
-
-    def _parse_llm_verdict(self, llm_response: str) -> Dict[str, Any]:
-        """Parse the LLM's verdict from its response"""
-        response_lower = llm_response.lower()
         
-        # Look for clear verdict signals
-        if "approve" in response_lower and "reject" not in response_lower:
-            # Extract intent and reason
-            intent_match = re.search(r'\[Intent:\s*([^\]]+)\]', llm_response, re.IGNORECASE)
-            reason_match = re.search(r'\[(?:Brief\s+)?reason:\s*([^\]]+)\]', llm_response, re.IGNORECASE)
-            
-            return {
-                "verdict": "APPROVE",
-                "intent": intent_match.group(1) if intent_match else "UNKNOWN",
-                "reason": reason_match.group(1) if reason_match else llm_response,
-                "confidence": self._extract_confidence(llm_response)
-            }
-        
-        elif "reject" in response_lower:
-            # Extract violation type and issue
-            violation_match = re.search(r'\[([^\]]+)\]', llm_response)
-            issue_match = re.search(r'\[Specific issue:\s*([^\]]+)\]', llm_response, re.IGNORECASE)
-            
-            return {
-                "verdict": "REJECT",
-                "violation_type": violation_match.group(1) if violation_match else "UNKNOWN",
-                "issue": issue_match.group(1) if issue_match else llm_response,
-                "confidence": self._extract_confidence(llm_response)
-            }
-        
-        else:
-            return {
-                "verdict": "UNCERTAIN",
-                "reason": llm_response,
-                "confidence": 0.5
-            }
-
-    def _extract_confidence(self, llm_response: str) -> float:
-        """Extract confidence score if mentioned by LLM"""
-        confidence_match = re.search(r'confidence[:\s]+(\d+(?:\.\d+)?)', llm_response, re.IGNORECASE)
-        if confidence_match:
-            try:
-                return float(confidence_match.group(1))
-            except:
-                pass
-        # Default confidence based on verdict clarity
-        if "strongly" in llm_response.lower() or "clearly" in llm_response.lower():
-            return 0.9
-        elif "uncertain" in llm_response.lower() or "unclear" in llm_response.lower():
-            return 0.5
-        return 0.75
-
-    # ---------- Phase 4: Final verdict combination ----------
-    def _final_verdict(
-        self, 
-        response: str,
-        grounding_score: float,
-        llm_verdict: Dict[str, Any],
-        claims: List[str],
-        context: str
-    ) -> Tuple[bool, str, str]:
-        """Combine all signals for final decision"""
-        
-        # Strong rejection from LLM with high confidence
-        if llm_verdict["verdict"] == "REJECT" and llm_verdict.get("confidence", 0) > 0.7:
-            violation_type = llm_verdict.get("violation_type", "safety_violation")
-            fallback = self._fallback_for_violation_type(violation_type)
-            return False, fallback, f"Reject (LLM): {llm_verdict.get('issue', 'Safety violation detected')}"
-        
-        # Poor grounding score (even if LLM approves)
-        if grounding_score < self.sim_threshold and claims:
-            # Double-check with lexical grounding as fallback
-            if not self._lexically_grounded(response, context):
-                return False, self.fallback_messages["no_context"], f"Reject: Poor grounding (score={grounding_score:.2f})"
-        
-        # LLM uncertain but grounding is good
-        if llm_verdict["verdict"] == "UNCERTAIN" and grounding_score > self.sim_threshold:
-            # Trust grounding and approve with caution
-            return True, response, f"Approve with caution: Good grounding ({grounding_score:.2f}), LLM uncertain"
-        
-        # LLM approves with good grounding
-        if llm_verdict["verdict"] == "APPROVE" and grounding_score > self.sim_threshold:
-            intent = llm_verdict.get("intent", "ANSWERING")
-            return True, response, f"Approve: LLM approved (intent={intent}), grounding={grounding_score:.2f}"
-        
-        # Default to safety when uncertain
-        if llm_verdict["verdict"] == "UNCERTAIN":
-            return False, self.fallback_messages["default"], "Reject: Uncertain safety evaluation"
-        
-        # Approve if LLM approves (even with lower grounding for conversational responses)
-        if llm_verdict["verdict"] == "APPROVE":
-            intent = llm_verdict.get("intent", "ANSWERING")
-            return True, response, f"Approve: LLM approved (intent={intent})"
-        
-        # Default reject
-        return False, self.fallback_messages["default"], "Reject: Failed comprehensive evaluation"
-
-    # ---------- Helper methods (kept from original) ----------
-    def _extract_factual_claims(self, response: str) -> List[str]:
-        """
-        Extract only pharmaceutical/medical factual claims that need grounding.
-        Be permissive - conversational content doesn't count as 'claims'.
-        """
-        if not response:
-            return []
-        
-        sentences = re.split(r'(?<=[.!?])\s+', response.strip())
-        sentences = [s.strip() for s in sentences if s and len(s.strip()) > 3]
-
-        claims: List[str] = []
-        
-        # Only look for sentences with clear medical/pharmaceutical facts
-        pharmaceutical_claim_indicators = [
-            r'\b\d+\s*(?:mg|ml|mcg|iu|units?)\b',  # Dosages
-            r'\b(?:lexapro|escitalopram|ssri)\b',  # Specific drugs
-            r'\b(?:causes?|results?\s+in|leads?\s+to)\s+\w+',  # Causal medical claims
-            r'\b(?:treats?|treatment|therapy|medication)\b',
-            r'\b(?:approved|indicated|prescribed)\s+(?:for|to)\b',
-            r'\b(?:effective|ineffective|safe|unsafe)\s+(?:for|in|against)\b',
-            r'\b(?:side effect|adverse|interaction)\b',
-            r'\b(?:clinical|efficacy|safety)\b',
-        ]
-        
-        for s in sentences:
-            sl = s.lower()
-            # Only count as a claim if it contains pharmaceutical/medical facts
-            if any(re.search(p, sl) for p in pharmaceutical_claim_indicators):
-                claims.append(s)
-        
-        return claims
-
-    def _semantic_similarity(self, statement: str, context: str) -> float:
-        if not context:
-            return 0.0
-        if not self.embedding_model:
-            return 1.0 if self._lexically_grounded(statement, context) else 0.0
+        # Run async in sync context
         try:
-            stmt = self.embedding_model.encode(statement, convert_to_tensor=False, show_progress_bar=False)
-            ctx_sentences = [s.strip() for s in re.split(r'[.!?]+', context) if len(s.strip()) > 20]
-            if not ctx_sentences:
-                ctx = self.embedding_model.encode(context, convert_to_tensor=False, show_progress_bar=False)
-                return float(np.dot(stmt, ctx) / (np.linalg.norm(stmt) * np.linalg.norm(ctx)))
-            max_sim = 0.0
-            for c in ctx_sentences:
-                ce = self.embedding_model.encode(c, convert_to_tensor=False, show_progress_bar=False)
-                sim = float(np.dot(stmt, ce) / (np.linalg.norm(stmt) * np.linalg.norm(ce)))
-                max_sim = max(max_sim, sim)
-            return max_sim
-        except Exception as e:
-            logger.error(f"Error calculating grounding score: {e}")
-            return 1.0 if self._lexically_grounded(statement, context) else 0.0
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        decision = loop.run_until_complete(validate())
+        
+        # Convert to legacy format
+        is_approved = decision.result == ValidationResult.APPROVED
+        return is_approved, decision.final_response, decision.reasoning
 
-    def _lexically_grounded(self, statement: str, context: str) -> bool:
-        if not context:
-            return False
-        claim_words = set(re.findall(r'\b\w+\b', statement.lower()))
-        ctx_words = set(re.findall(r'\b\w+\b', context.lower()))
-        stop = {'the','a','an','and','or','but','in','on','at','to','for','of','with','by','from','that','this','it','as'}
-        claim_words -= stop
-        ctx_words -= stop
-        if not claim_words:
-            return True
-        overlap = len(claim_words & ctx_words) / len(claim_words)
-        return overlap > 0.50
-
-    def _contains_pattern(self, text_lower: str, patterns: List[str]) -> bool:
-        return any(re.search(p, text_lower) for p in patterns)
-
-    def _fallback_for_violation_type(self, violation_type: str) -> str:
-        violation_lower = violation_type.lower()
-        if "misuse" in violation_lower:
-            return self.fallback_messages["misuse_refusal"]
-        elif "off" in violation_lower and "label" in violation_lower:
-            return self.fallback_messages["off_label_refusal"]
-        elif "medical" in violation_lower or "dosage" in violation_lower:
-            return self.fallback_messages["unsafe_medical"]
-        elif "ground" in violation_lower:
-            return self.fallback_messages["no_context"]
-        else:
-            return self.fallback_messages["default"]
-
-# Global instance + wrapper
+# Global instances
 guard_agent = HybridGuardAgent()
+persona_validator = PersonaValidator()
 
 def evaluate_response(
     context: str,
@@ -547,11 +475,7 @@ def evaluate_response(
     assistant_response: str,
     conversation_history: Optional[str] = None,
 ) -> Tuple[bool, str, str]:
-    return guard_agent.evaluate_response(context, user_question, assistant_response, conversation_history)
-
-# Legacy helpers
-def is_safe_response(text: str) -> bool:
-    return len(text.strip()) >= 10
-
-def redirect_response() -> str:
-    return DEFAULT_FALLBACK_MESSAGE
+    """Legacy global function"""
+    return guard_agent.evaluate_response(
+        context, user_question, assistant_response, conversation_history
+    )
