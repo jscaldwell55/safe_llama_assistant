@@ -5,6 +5,7 @@ from typing import Dict, Any, Tuple, List, Optional
 import re
 import numpy as np
 import asyncio
+import concurrent.futures
 from config import (
     DEFAULT_FALLBACK_MESSAGE,
     ENABLE_GUARD,
@@ -55,7 +56,6 @@ class HybridGuardAgent:
     def __init__(self):
         self.enabled = ENABLE_GUARD
         self.embedding_model = _load_embedding_model()
-        self.llm_client = None  # Will be lazy-loaded
         try:
             self.sim_threshold = float(SEMANTIC_SIMILARITY_THRESHOLD)
         except Exception:
@@ -74,12 +74,10 @@ class HybridGuardAgent:
             ),
         }
 
-    def _get_llm_client(self):
-        """Lazy load the LLM client to avoid circular imports"""
-        if self.llm_client is None:
-            from llm_client import call_guard_agent
-            self.llm_client = call_guard_agent
-        return self.llm_client
+    async def _call_guard_llm(self, prompt: str) -> str:
+        """Call the guard LLM asynchronously"""
+        from llm_client import call_guard_agent
+        return await call_guard_agent(prompt)
 
     # ---------- Public API ----------
     def evaluate_response(
@@ -157,12 +155,26 @@ class HybridGuardAgent:
         # Weight both full response and individual claims
         return 0.4 * full_score + 0.6 * avg_claim_score
 
+    def _run_async_safe(self, coro):
+        """Run an async coroutine safely, handling existing event loops"""
+        try:
+            # Check if there's already a running event loop
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop, we can use asyncio.run()
+            return asyncio.run(coro)
+        
+        # There's a running loop (likely from Streamlit), use thread pool
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+
     # ---------- Phase 3: LLM evaluation ----------
     def _run_llm_evaluation(
         self, context: str, question: str, response: str, 
         conversation_history: Optional[str], grounding_score: float
     ) -> Dict[str, Any]:
-        """Run LLM-based evaluation (with async-to-sync bridge)"""
+        """Run LLM-based evaluation (with proper async handling)"""
         try:
             # Format the prompt for the guard LLM
             from prompts import format_guard_prompt
@@ -176,8 +188,8 @@ class HybridGuardAgent:
             # Add grounding score to help LLM
             prompt += f"\n\nGrounding Score: {grounding_score:.2f}"
             
-            # Call the LLM (handle async)
-            llm_response = asyncio.run(self._get_llm_client()(prompt))
+            # Call the LLM with proper async handling
+            llm_response = self._run_async_safe(self._call_guard_llm(prompt))
             
             # Parse LLM verdict
             return self._parse_llm_verdict(llm_response)
