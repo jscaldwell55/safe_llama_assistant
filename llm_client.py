@@ -4,39 +4,47 @@ import asyncio
 import json
 import logging
 from typing import Dict, Any, Optional
-from functools import lru_cache
-try:
-    from functools import cache
-except ImportError:
-    cache = lru_cache(maxsize=None)
 import hashlib
+import re
+import time
+
 from config import HF_TOKEN, HF_INFERENCE_ENDPOINT, MODEL_PARAMS
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- NEW: output sanitizer ----------
-import re
+# -------------------------------
+# Output cleaning (post-generation)
+# -------------------------------
 
+# Loose patterns for one-line “meta” sentences we never want to show users
 _META_LINE_PATTERNS = [
-    r'^\s*note\s*:.*',                      # Note: ...
-    r'^\s*please ignore.*',                 # Please ignore...
-    r'^\s*here (?:is|\'s) the revised response.*',
-    r'^\s*additional queries and responses.*',
-    r'^\s*(user|assistant)\s*:',            # User: / Assistant:
-    r'^\s*###\s*end response.*',
+    r"^\s*note\s*:\s*",                                  # "Note: ..."
+    r"^\s*this (answer|response) (?:is|was)\b",          # "This response is..."
+    r"^\s*i (?:am|’m|\'m)\s+(?:an|a)\s+ai\b",            # "I'm an AI..."
+    r"^\s*as (?:an|a) (?:ai|language model)\b",          # "As an AI..."
+    r"^\s*please (?:ignore|disregard)\b",                # "Please ignore..."
+    r"^\s*for (?:educational|informational) purposes\b", # "For informational purposes..."
+    r"^\s*this (?:message|content)\s+(?:complies|adheres|follows)\b",
+    r"^\s*i cannot (?:do that|comply)\b",
+    r"^\s*debug\s*:",                                    # "Debug:"
 ]
 
 def clean_model_output(text: str) -> str:
+    """
+    Remove prompt echo, meta/process chatter, OOB markers, duplicated paras,
+    and dangling artifacts like trailing '###' or an unmatched '('.
+    """
     if not text:
         return text or ""
 
-    # Remove prompt echo
+    # Normalize and strip prompt echoes
     text = text.strip()
     for prefix in ["Assistant:", "assistant:", "ASSISTANT:"]:
         if text.startswith(prefix):
             text = text[len(prefix):].lstrip()
 
-    # Cut off at common out-of-band markers
+    # Cut off at common out-of-band markers the model sometimes emits
     cut_markers = [
         "### End Response", "### End", "Additional Queries and Responses",
         "\nUser:", "\nAssistant:", "\n\nUser:", "\n\nAssistant:"
@@ -50,12 +58,15 @@ def clean_model_output(text: str) -> str:
     # Remove parenthetical labels e.g. (Label: Retrieved information)
     text = re.sub(r"\(\s*(label|source)\s*:[^)]+\)", "", text, flags=re.IGNORECASE)
 
-    # Drop meta lines
+    # Drop obvious meta/process lines
     lines = [ln for ln in text.splitlines() if ln.strip()]
     cleaned_lines = []
     for ln in lines:
         lower = ln.lower()
         if any(re.match(pat, lower) for pat in _META_LINE_PATTERNS):
+            continue
+        # very common meta sentence variants
+        if "this response" in lower and any(k in lower for k in ["neutral", "complies", "adheres", "follows", "meets"]):
             continue
         cleaned_lines.append(ln)
     text = "\n".join(cleaned_lines).strip()
@@ -71,165 +82,139 @@ def clean_model_output(text: str) -> str:
             unique_paras.append(p)
     text = "\n\n".join(unique_paras).strip()
 
-    # Fix dangling trailing "(" fragments
+    # Remove a trailing orphan marker or dangling "(..."
+    text = re.sub(r"(?:#+\s*)+$", "", text).rstrip()  # trailing ### or ####
     if text.endswith("("):
         text = text[:-1].rstrip()
+    # If there are more '(' than ')', drop from last unmatched '('
     if text.count("(") > text.count(")"):
-        # remove from last unmatched "(" to end
         last = text.rfind("(")
         if last != -1:
             text = text[:last].rstrip()
 
-    # --- NEW: strip trailing hash markers like "###" or lines that are only hashes ---
-    # Remove inline trailing " ###" (or longer) at end of text
-    text = re.sub(r'\s*#{3,}\s*$', '', text)
-
-    # Also remove any final lines that consist solely of 1–6 hashes
-    lines = [ln.rstrip() for ln in text.splitlines()]
-    while lines and re.fullmatch(r'\s*#{1,6}\s*', lines[-1]):
-        lines.pop()
-    text = "\n".join(lines).rstrip()
-
     return text
 
 
-# ---------- HF client ----------
-class HuggingFaceClient:
-    """Client for interacting with Hugging Face Inference Endpoints"""
+# -------------------------------
+# HF client
+# -------------------------------
 
+class HuggingFaceClient:
+    """
+    Minimal, robust client for Hugging Face Inference Endpoints.
+    - Fresh aiohttp session per call (prevents event loop issues in Streamlit).
+    - Parameter fallbacks for 'stop' vs 'stop_sequences' vs none.
+    """
     def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
+        if not token:
+            raise ValueError("HF_TOKEN is not configured.")
+        if not endpoint:
+            raise ValueError("HF_INFERENCE_ENDPOINT is not configured.")
+
+        # Normalize endpoint (strip trailing slash)
+        endpoint = endpoint.rstrip("/")
         self.token = token
         self.endpoint = endpoint
-
-        if not self.token:
-            raise ValueError("HF_TOKEN is not configured. Please set it in Streamlit secrets or environment variables.")
-        if not self.endpoint:
-            raise ValueError("HF_INFERENCE_ENDPOINT is not configured. Please set it in Streamlit secrets or environment variables.")
-
-        logger.info(f"HuggingFaceClient initialized with endpoint: {self.endpoint[:60]}...")
-        if self.endpoint.endswith('/'):
-            self.endpoint = self.endpoint.rstrip('/')
-
-        self.headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        self._session = None
-
-    async def _get_session(self):
-        if self._session is None:
-            connector = aiohttp.TCPConnector(limit=10, limit_per_host=10)
-            self._session = aiohttp.ClientSession(connector=connector, headers=self.headers)
-        return self._session
-
-    async def close(self):
-        if self._session:
-            await self._session.close()
-            self._session = None
-
-    def _cache_key(self, prompt: str, parameters: Dict[str, Any]) -> str:
-        return hashlib.md5(json.dumps({"prompt": prompt, "params": parameters}, sort_keys=True).encode()).hexdigest()
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        logger.info(f"HuggingFaceClient initialized with endpoint: {endpoint[:60]}...")
 
     async def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
         if parameters is None:
             parameters = MODEL_PARAMS.copy()
-        cache_key = self._cache_key(prompt, parameters)
-        if not hasattr(self, "_cache"):
-            self._cache = {}
-        if cache_key in getattr(self, "_cache", {}):
-            return self._cache[cache_key]
-        result = await self._generate_response_internal(prompt, parameters)
-        # sanitize before caching/returning
-        result_clean = clean_model_output(result)
-        # small cache with eviction
-        if len(self._cache) > 100:
-            for k in list(self._cache.keys())[:20]:
-                del self._cache[k]
-        self._cache[cache_key] = result_clean
-        return result_clean
 
-    async def _generate_response_internal(self, prompt: str, parameters: Dict[str, Any]) -> str:
-        payload_variants = []
+        # Ensure we never send >4 stops
+        def clamp_stops(p: Dict[str, Any]) -> Dict[str, Any]:
+            p = dict(p)
+            for k in ("stop", "stop_sequences"):
+                if k in p and isinstance(p[k], (list, tuple)):
+                    p[k] = list(p[k])[:4]
+            return p
 
-        # Variant 1: up to 4 stop tokens
-        v1 = parameters.copy()
-        v1["stop"] = ["\nUser:", "\nHuman:", "\nAssistant:", "###"]
-        if "stop_sequences" in v1:
-            v1.pop("stop_sequences", None)
-        payload_variants.append({"inputs": prompt, "parameters": v1})
+        variants: list[Dict[str, Any]] = []
 
-        # Variant 2: stop_sequences instead
-        v2 = parameters.copy()
-        v2.pop("stop", None)
-        v2["stop_sequences"] = ["\nUser:", "\nHuman:", "\nAssistant:", "###"]
-        payload_variants.append({"inputs": prompt, "parameters": v2})
+        # Variant 1: prefer 'stop' key if present (≤ 4)
+        v1 = clamp_stops(parameters)
+        variants.append(v1)
 
-        # Variant 3: no stops
-        v3 = parameters.copy()
-        v3.pop("stop", None)
-        v3.pop("stop_sequences", None)
-        payload_variants.append({"inputs": prompt, "parameters": v3})
+        # Variant 2: map stop -> stop_sequences, remove stop
+        v2 = clamp_stops(parameters)
+        if "stop" in v2:
+            v2["stop_sequences"] = v2.pop("stop")
+        variants.append(v2)
 
-        session = await self._get_session()
+        # Variant 3: no stops at all
+        v3 = dict(parameters)
+        for k in ("stop", "stop_sequences"):
+            v3.pop(k, None)
+        variants.append(v3)
+
+        last_error_text = None
         timeout = aiohttp.ClientTimeout(total=60)
 
-        for i, payload in enumerate(payload_variants, start=1):
+        for i, params in enumerate(variants, start=1):
+            logger.info(f"Sending request to HF endpoint (variant {i}/3)")
+            payload = {"inputs": prompt, "parameters": params}
+
+            # Fresh session per attempt; solves cross-loop problems
             try:
-                logger.info(f"Sending request to HF endpoint (variant {i}/3)")
-                async with session.post(self.endpoint, json=payload, timeout=timeout) as response:
-                    body = await response.text()
-                    if response.status != 200:
-                        logger.error(f"HF endpoint returned {response.status}. Body: {body}")
-                        continue
-                    try:
-                        result = json.loads(body)
-                    except Exception:
-                        logger.error(f"Unexpected non-JSON body: {body[:300]}")
-                        return body
-                    if isinstance(result, list) and result and "generated_text" in result[0]:
-                        gen = result[0]["generated_text"]
-                        if gen.startswith(prompt):
-                            gen = gen[len(prompt):].lstrip()
-                        return gen
-                    else:
-                        logger.warning(f"Unexpected response format: {result}")
-                        return str(result)
+                connector = aiohttp.TCPConnector(limit=10, limit_per_host=10, ssl=False)
+                async with aiohttp.ClientSession(connector=connector, headers=self.headers) as session:
+                    async with session.post(self.endpoint, json=payload, timeout=timeout) as response:
+                        status = response.status
+                        text = await response.text()
+
+                        if status != 200:
+                            # Log the server's body to aid debugging (422, etc.)
+                            logger.error(f"HF endpoint returned {status}. Body: {text}")
+                            last_error_text = text
+                            # try next variant
+                            continue
+
+                        # Expect either { "generated_text": "..."} list or raw text
+                        try:
+                            result = json.loads(text)
+                        except json.JSONDecodeError:
+                            return clean_model_output(text)
+
+                        if isinstance(result, list) and result and "generated_text" in result[0]:
+                            generated_text = result[0]["generated_text"] or ""
+                            # Some endpoints echo the prompt; strip if needed
+                            if generated_text.startswith(prompt):
+                                generated_text = generated_text[len(prompt):].lstrip()
+                            return clean_model_output(generated_text)
+
+                        # Fallback: stringify
+                        return clean_model_output(str(result))
+
             except aiohttp.ClientError as e:
                 logger.error(f"Request failed: {e}", exc_info=True)
+                last_error_text = str(e)
+                continue
             except Exception as e:
                 logger.error(f"Unexpected error: {e}", exc_info=True)
+                last_error_text = str(e)
+                continue
 
-        return "Error: Could not connect to the model service after multiple attempts. Please check your configuration."
+        # If all variants failed:
+        return f"Error: Could not connect to the model service. Last error: {last_error_text or 'unknown'}"
 
-# --- Convenience functions using the lazy-loaded client ---
-_hf_client_instance = None
 
-def get_hf_client():
-    global _hf_client_instance
-    if _hf_client_instance is None:
-        _hf_client_instance = HuggingFaceClient()
-    return _hf_client_instance
+# -------------------------------
+# Convenience wrappers
+# -------------------------------
 
-def reset_hf_client():
-    global _hf_client_instance
-    if _hf_client_instance is not None:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = None
-        async def _close():
-            try:
-                await _hf_client_instance.close()
-            except Exception:
-                pass
-        if loop and loop.is_running():
-            asyncio.create_task(_close())
-        else:
-            asyncio.run(_close())
-    _hf_client_instance = None
+# We keep a lightweight, stateless client factory. No cached session => loop-safe.
+def _client() -> HuggingFaceClient:
+    return HuggingFaceClient()
 
 async def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
     try:
-        client = get_hf_client()
-        raw = await client.generate_response(prompt, parameters)
-        return raw  # already cleaned
+        client = _client()
+        out = await client.generate_response(prompt, parameters)
+        return out
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         return f"Configuration error: {str(e)}"
@@ -240,16 +225,24 @@ async def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = N
 async def call_base_assistant(prompt: str) -> str:
     base_params = MODEL_PARAMS.copy()
     base_params.update({
-        "temperature": 0.7, "top_p": 0.9, "repetition_penalty": 1.1,
-        "max_new_tokens": 300
-        # stop/stop_sequences handled by variants above
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "repetition_penalty": 1.1,
+        "max_new_tokens": 300,
+        # Try to stop on role markers / section fences; we cap at 4 internally
+        "stop": ["\nUser:", "\nHuman:", "\nAssistant:", "###"]
     })
-    return await call_huggingface(prompt, base_params)
+    raw = await call_huggingface(prompt, base_params)
+    return clean_model_output(raw)
 
 async def call_guard_agent(prompt: str) -> str:
     guard_params = MODEL_PARAMS.copy()
     guard_params.update({
-        "temperature": 0.3, "top_p": 0.9, "repetition_penalty": 1.0,
-        "max_new_tokens": 200
+        "temperature": 0.3,
+        "top_p": 0.9,
+        "repetition_penalty": 1.0,
+        "max_new_tokens": 200,
+        "stop": ["\n\n", "User:", "Assistant:", "###"]
     })
-    return await call_huggingface(prompt, guard_params)
+    raw = await call_huggingface(prompt, guard_params)
+    return clean_model_output(raw)
