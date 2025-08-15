@@ -1,94 +1,105 @@
 # context_formatter.py
 import logging
-from typing import List, Dict, Optional
 import re
+from typing import Iterable, List, Union, Dict
 
 logger = logging.getLogger(__name__)
 
-class ContextFormatter:
-    """Simplified context formatting that trusts the model to understand relevance"""
-    
-    def __init__(self):
-        self.max_context_length = 4000  # Character limit for context
-    
-    def format_enhanced_context(self, chunks: List[str], query: str, 
-                              conversation_context: str = "", 
-                              conversation_entities: List[str] = None) -> str:
-        """
-        Format context simply and clearly for the model.
-        Trust the model to determine what's relevant.
-        """
-        
-        if not chunks:
-            return ""
-        
-        # Simple deduplication - remove exact or near-exact duplicates
-        unique_chunks = self._simple_deduplicate(chunks)
-        
-        # Build context
-        context_parts = []
-        
-        # Add conversation history if it exists
-        if conversation_context:
-            context_parts.append(conversation_context)
-            context_parts.append("")  # Blank line
-        
-        # Add retrieved information
-        context_parts.append("Retrieved information:")
-        context_parts.append("")
-        
-        # Add chunks up to length limit
-        current_length = len("\n".join(context_parts))
-        
-        for i, chunk in enumerate(unique_chunks):
-            # Simple formatting - let the model parse naturally
-            chunk_text = chunk.strip()
-            
-            # Check length
-            if current_length + len(chunk_text) + 50 > self.max_context_length:
-                # Add note about truncation
-                context_parts.append("[Additional information truncated due to length]")
-                break
-            
-            # Add chunk with simple separator
-            if i > 0:
-                context_parts.append("---")
-            context_parts.append(chunk_text)
-            current_length += len(chunk_text) + 10
-        
-        formatted_context = "\n".join(context_parts)
-        
-        logger.info(f"Formatted {len(unique_chunks)} chunks into {len(formatted_context)} chars")
-        
-        return formatted_context
-    
-    def _simple_deduplicate(self, chunks: List[str]) -> List[str]:
-        """Remove obvious duplicates while preserving order"""
-        seen_content = set()
-        unique_chunks = []
-        
-        for chunk in chunks:
-            # Create a normalized version for comparison
-            normalized = " ".join(chunk.lower().split())[:200]  # First 200 chars normalized
-            
-            if normalized not in seen_content:
-                seen_content.add(normalized)
-                unique_chunks.append(chunk)
-        
-        return unique_chunks
-    
-    def extract_key_information(self, chunks: List[str], query: str) -> Dict[str, List[str]]:
-        """
-        Simple categorization if needed.
-        But generally, we trust the model to understand context.
-        """
-        # For backward compatibility, return all chunks as general info
-        return {
-            'general_info': chunks,
-            'side_effects': [],
-            'dosage_info': [],
-            'warnings': []
-        }
+# ---------- helpers to keep context clean and sentence-complete ----------
 
-# Global context formatter instance
-context_formatter = ContextFormatter()
+_SENT_END = re.compile(r'[.!?)]\s*$')
+
+def _clip_to_sentence_boundaries(text: str) -> str:
+    """Trim a paragraph so it ends on a sentence boundary."""
+    if not text:
+        return text
+    text = text.strip()
+
+    # Already ends cleanly?
+    if _SENT_END.search(text):
+        return text
+
+    # Otherwise, cut back to the last terminator if any
+    m = list(re.finditer(r'[.!?)]', text))
+    if m:
+        return text[:m[-1].end()].rstrip()
+
+    # Fallback: drop a very short dangling last line
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) >= 2 and len(lines[-1].split()) <= 5:
+        return "\n".join(lines[:-1]).strip()
+    return text
+
+
+def _dedupe_exact_lines(text: str) -> str:
+    """Remove exact duplicate lines, preserving first occurrence."""
+    seen = set()
+    out_lines: List[str] = []
+    for ln in [l for l in text.splitlines() if l.strip()]:
+        key = ln.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out_lines.append(ln)
+    return "\n".join(out_lines)
+
+
+def finalize_context_block(raw: str) -> str:
+    """
+    Apply sentence-boundary clipping per paragraph and exact-line dedupe.
+    Keep it conservative—do not paraphrase or remove medically-relevant content.
+    """
+    paras = [p.strip() for p in re.split(r'\n{2,}', raw or '') if p.strip()]
+    clipped = [_clip_to_sentence_boundaries(p) for p in paras]
+    final_text = "\n\n".join(clipped).strip()
+    final_text = _dedupe_exact_lines(final_text)
+    return final_text
+
+
+# ---------- primary formatting API ----------
+
+def _extract_text(chunk: Union[str, Dict[str, str]]) -> str:
+    """Accepts either raw strings or dicts with 'text'/'content' keys."""
+    if isinstance(chunk, str):
+        return chunk
+    if isinstance(chunk, dict):
+        for k in ("text", "content", "chunk", "body"):
+            if k in chunk and isinstance(chunk[k], str):
+                return chunk[k]
+    return ""
+
+
+def format_context(chunks: Iterable[Union[str, Dict[str, str]]],
+                   max_chars: int = 4000) -> str:
+    """
+    Build a compact, readable context block from retrieved chunks.
+    - Joins paragraphs with a blank line
+    - Clips to sentence boundaries
+    - Light exact-line dedupe
+    - Enforces a soft max length (character-based)
+    """
+    texts: List[str] = []
+    running_len = 0
+
+    for ch in chunks or []:
+        t = _extract_text(ch).strip()
+        if not t:
+            continue
+        # keep each chunk as its own paragraph to preserve local structure
+        candidate = t if t.endswith(("\n", "\r")) else f"{t}"
+        if running_len + len(candidate) > max_chars and running_len > 0:
+            break
+        texts.append(candidate)
+        running_len += len(candidate)
+
+    raw_block = "\n\n".join(texts).strip()
+    formatted = finalize_context_block(raw_block)
+
+    logger.info(f"Formatted {len(texts)} chunks into {len(formatted)} chars")
+    return formatted
+
+
+__all__ = [
+    "format_context",
+    "finalize_context_block",
+]
