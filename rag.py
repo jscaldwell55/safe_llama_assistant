@@ -9,7 +9,7 @@ import numpy as np
 
 from embeddings import get_embedding_model
 from semantic_chunker import SemanticChunker
-from context_formatter import format_enhanced_context, format_retrieved_context
+from context_formatter import format_retrieved_context
 from config import (
     INDEX_PATH, PDF_DATA_PATH, CHUNK_SIZE, CHUNK_OVERLAP, TOP_K_RETRIEVAL,
     CHUNKING_STRATEGY, MAX_CHUNK_TOKENS, EMBEDDING_BATCH_SIZE
@@ -157,20 +157,13 @@ def retrieve_and_format_context(query: str, k: int = TOP_K_RETRIEVAL) -> str:
 
     # Assemble "Source + Content" chunks, then let the formatter deduplicate/trim
     chunks = [
-        (
-            f"Source: {res['metadata'].get('source','N/A')}, "
-            f"Chunk {res['metadata'].get('chunk_id','N/A')}\n"
-            f"{res['text']}"
-        ).strip()
+        f"Source: {res['metadata'].get('source','N/A')}, "
+        f"Chunk {res['metadata'].get('chunk_id','N/A')}\n"
+        f"{res['text']}".strip()
         for res in results
     ]
-
-    # Prefer enhanced formatter (accepts query), fall back to basic if needed
-    try:
-        formatted = format_enhanced_context(chunks, query)
-    except Exception:
-        formatted = format_retrieved_context(chunks)
-
+    # Use the function directly (it's not a module)
+    formatted = format_retrieved_context(chunks)
     return formatted
 
 def build_index(pdf_directory: str = PDF_DATA_PATH, force_rebuild: bool = False):

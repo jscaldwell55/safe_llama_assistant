@@ -1,9 +1,9 @@
-# app.py
 import os
 import streamlit as st
 import logging
 import sys
 import asyncio
+import importlib
 
 # Configure logging FIRST before any imports
 logging.basicConfig(
@@ -14,14 +14,43 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info("=== Starting Streamlit app initialization ===")
 
+def _safe_import_module(modname: str):
+    """
+    Robust import that survives Streamlit hot-reload partial module states.
+    If a module failed previously, sys.modules[modname] can be a stale placeholder.
+    """
+    try:
+        return importlib.import_module(modname)
+    except KeyError:
+        # Clear any broken placeholder and try again
+        sys.modules.pop(modname, None)
+        return importlib.import_module(modname)
+    except Exception:
+        # One more hard refresh attempt
+        sys.modules.pop(modname, None)
+        return importlib.import_module(modname)
+
 # --- LAZY-LOADING IMPORTS ---
 def get_dependencies():
     from config import APP_TITLE, WELCOME_MESSAGE
-    from prompts import format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
-    from llm_client import call_base_assistant              # ⬅️ only this; no reset/get_hf_client
-    from guard import evaluate_response
-    from conversation import get_conversation_manager
-    from conversational_agent import get_conversational_agent, ConversationMode
+    # prompts module (renamed from prompt.py)
+    prompts_mod = _safe_import_module("prompts")
+    format_conversational_prompt = getattr(prompts_mod, "format_conversational_prompt")
+    ACKNOWLEDGE_GAP_PROMPT = getattr(prompts_mod, "ACKNOWLEDGE_GAP_PROMPT")
+
+    llm_mod = _safe_import_module("llm_client")
+    call_base_assistant = getattr(llm_mod, "call_base_assistant")
+
+    guard_mod = _safe_import_module("guard")
+    evaluate_response = getattr(guard_mod, "evaluate_response")
+
+    conv_mod = _safe_import_module("conversation")
+    get_conversation_manager = getattr(conv_mod, "get_conversation_manager")
+
+    agent_mod = _safe_import_module("conversational_agent")
+    get_conversational_agent = getattr(agent_mod, "get_conversational_agent")
+    ConversationMode = getattr(agent_mod, "ConversationMode")
+
     return {
         "APP_TITLE": APP_TITLE,
         "WELCOME_MESSAGE": WELCOME_MESSAGE,
