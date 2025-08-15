@@ -52,7 +52,7 @@ MAX_CHUNK_TOKENS = 800        # Maximum tokens per semantic chunk
 
 # Guard Agent Configuration
 ENABLE_GUARD = True
-SEMANTIC_SIMILARITY_THRESHOLD = 0.7  # For grounding validation
+SEMANTIC_SIMILARITY_THRESHOLD = 0.62  # For grounding validation
 
 # Conversation Configuration
 MAX_CONVERSATION_TURNS = 10   # Reasonable conversation length
