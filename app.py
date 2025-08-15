@@ -87,7 +87,6 @@ async def handle_query_async(query: str) -> dict:
                 )
                 draft_response = await deps["call_base_assistant"](prompt_for_llm)
 
-                # Short-circuit if model call failed
                 lower = (draft_response or "").lower()
                 if lower.startswith("error:") or lower.startswith("configuration error:"):
                     return {
@@ -151,12 +150,15 @@ with st.sidebar:
         deps["reset_hf_client"]()
         st.success("Model client reloaded. New endpoint will be used on next message.")
 
-st.markdown("### 💬 Ask me anything about our knowledge base")
+# UPDATED header line below:
+st.markdown("### 💬 Ask me anything about Lexapro")
 
+# Display chat history
 for turn in conversation_manager.get_turns():
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
 
+# Handle user input
 if query := st.chat_input("What would you like to know?"):
     st.chat_message("user").write(query)
     with st.chat_message("assistant"):

@@ -3,9 +3,6 @@ import logging
 from typing import Dict, Any, Tuple, List, Optional
 import re
 import numpy as np
-
-# We don't actually need the formatted guard prompt text at runtime here,
-# so we avoid importing prompts to reduce hot-reload churn.
 from config import (
     DEFAULT_FALLBACK_MESSAGE,
     ENABLE_GUARD,
@@ -15,46 +12,70 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-# --- Embedding model access ---
+# --- Embedding model (shared if available) ---
 def _load_embedding_model():
-    """
-    Try to use the shared embeddings loader if present; otherwise load locally.
-    Returns None on failure (guard will degrade gracefully).
-    """
     try:
-        # Preferred: shared singleton loader (emits logs like "embeddings - INFO - Loaded ...")
-        from embeddings import get_embedding_model  # type: ignore
+        from embeddings import get_embedding_model  # shared singleton
         return get_embedding_model()
     except Exception:
-        # Fallback: direct load (avoid noisy logs on Streamlit hot-reload)
         try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
+            from sentence_transformers import SentenceTransformer
             return SentenceTransformer(EMBEDDING_MODEL_NAME)
         except Exception as e:
             logger.error(f"Guard could not init embedding model: {e}")
             return None
 
+# --- Patterns for critical checks ---
+MISUSE_PATTERNS = [
+    r"\bcrush(?:ing)?\b", r"\bsnort(?:ing|ed)?\b", r"\binject(?:ing|ed|ion)?\b",
+    r"\bsmok(?:e|ing|ed)\b", r"\bplug(?:ging)?\b", r"\bboof(?:ing)?\b", r"\bparachut(?:e|ing)\b",
+    r"\biv\b", r"\bdissolv(?:e|ing)\b.*\b(in|into)\b.*\b(injection|needle|vein)\b",
+    r"\bchew(?:ing)?\b.*\btablet\b", r"\bmix(?:ing)?\b.*\b(alcohol|vodka|beer|wine)\b",
+]
+OFFLABEL_CUES = [
+    r"\boff[- ]label\b", r"\bnot approved\b", r"\bunapproved\b", r"\bnot indicated\b",
+    r"\bfor (?:adhd|weight|sleep|pain|anxiety in children|performance)\b",  # examples; still enforced by grounding
+]
+PROMO_PATTERNS = [
+    r"\bbest\b.*\b(drug|medication|treatment)\b", r"\bmost effective\b", r"\bguaranteed\b",
+    r"\bamazing results\b", r"\bbreakthrough\b", r"\bmiraculous\b", r"\brevolutionary\b",
+]
+DOSING_DIRECTIVES = [
+    r'\byou (should|must|need to) take\b', r'\bstart (taking|with)\b.*\bmg\b',
+    r'\bstop taking\b', r'\bincrease your dose\b', r'\bdecrease your dose\b',
+    r'\btake \d+\s*mg\b', r'\bdo not take\b.*\bif you\b'
+]
+COMPETITOR_CUES = [
+    r"\bversus\b", r"\bvs\.\b", r"\bcompared to\b", r"\bunlike\b"
+]
 
 class EnhancedGuardAgent:
     """
-    Intent-aware guard agent that evaluates responses based on conversational context and safety requirements.
-    Binary approve/reject with context grounding + medical safety checks.
+    Binary guard:
+      1) Grounding to RAG context (semantic + lexical).
+      2) Enforce 5 Critical Safety Requirements with immediate reject on violation.
     """
 
     def __init__(self):
         self.enabled = ENABLE_GUARD
+        self.embedding_model = _load_embedding_model()
+        try:
+            self.sim_threshold = float(SEMANTIC_SIMILARITY_THRESHOLD)
+        except Exception:
+            self.sim_threshold = 0.65  # sensible default
+
+        # User-facing fallbacks
         self.fallback_messages = {
             "default": "I can't help with that. Can we talk about something else?",
             "no_context": "I don't have sufficient information in our knowledge base to answer that. Could you rephrase your question or ask about something else?",
             "unsafe_medical": "I cannot provide medical advice. Please consult with a healthcare professional for medical guidance.",
-            "no_info": "I'm sorry, I don't seem to have any information on that topic in our documentation. Can I help you with something else?",
+            "off_label_refusal": "I can’t provide information about unapproved or off-label uses. I can share what’s documented in the approved labeling.",
+            "misuse_refusal": (
+                "I can’t help with questions about misusing or altering medications. "
+                "If you’re in immediate danger, call local emergency services. "
+                "For confidential support with substance use, in the U.S. you can call SAMHSA at 1-800-662-HELP (4357)."
+            ),
         }
-        self.embedding_model = _load_embedding_model()
-        # Use configured threshold; if unset, default to a slightly more permissive 0.60 to reduce false rejects.
-        try:
-            self.sim_threshold = float(SEMANTIC_SIMILARITY_THRESHOLD)
-        except Exception:
-            self.sim_threshold = 0.60
 
     # ---------- Public API ----------
     def evaluate_response(
@@ -64,314 +85,132 @@ class EnhancedGuardAgent:
         assistant_response: str,
         conversation_history: Optional[str] = None,
     ) -> Tuple[bool, str, str]:
-        """
-        Returns: (is_approved, final_response, guard_reasoning)
-        """
         if not self.enabled:
             return True, assistant_response, "Guard disabled"
-
         try:
+            # 0) Critical pre-checks driven by the USER QUESTION (don’t engage on misuse/off-label “how to”)
+            if self._is_misuse_intent(user_question):
+                return False, self.fallback_messages["misuse_refusal"], "Reject: misuse/abusive route intent detected in user question."
+
+            if self._is_offlabel_probe(user_question) and not self._has_safe_offlabel_context(context):
+                return False, self.fallback_messages["off_label_refusal"], "Reject: off-label request without explicit 'not indicated' context."
+
+            # 1) Intent (for logging only; verdict remains binary)
             intent = self._analyze_response_intent(assistant_response)
             logger.info(f"Identified response intent: {intent}")
 
-            claims = self._extract_claims_by_intent(assistant_response, intent)
-            violations = self._check_violations_by_intent(
-                assistant_response, context, claims, intent
-            )
-            verdict = self._make_verdict(violations, intent)
+            # 2) Extract factual claims
+            claims = self._extract_factual_claims(assistant_response)
 
-            if verdict["verdict"] == "APPROVE":
-                return True, assistant_response, verdict["reasoning"]
+            # 3) Grounding gate: if there is factual content but no context at all → reject
+            if claims and not (context and context.strip()):
+                return False, self.fallback_messages["no_context"], "Reject: factual content with no retrieved context."
 
-            # REJECT path → choose appropriate fallback
-            fallback = self._get_appropriate_fallback(verdict.get("violations", []))
-            return False, fallback, verdict["reasoning"]
+            # 4) Safety checks (5 Critical Requirements)
+            safety_violations = self._safety_violations(user_question, assistant_response, context)
+            if safety_violations:
+                fallback = self._fallback_for_violations(safety_violations)
+                return False, fallback, f"Reject: {safety_violations[0]['description']}"
+
+            # 5) Grounding similarity per-claim (semantic + lexical)
+            grounding_violations = []
+            for claim in claims:
+                score = self._semantic_similarity(claim, context)
+                if score < self.sim_threshold and not self._lexically_grounded(claim, context):
+                    grounding_violations.append({
+                        "type": "ungrounded_claim",
+                        "severity": "high",
+                        "claim": claim,
+                        "score": score,
+                        "description": f"Claim not supported by context (score={score:.2f})"
+                    })
+            if grounding_violations:
+                return False, self.fallback_messages["no_context"], "Reject: ungrounded factual claim(s)."
+
+            # APPROVE
+            return True, assistant_response, f"Approve: grounded and safety-compliant (intent={intent})."
 
         except Exception as e:
             logger.error(f"Guard evaluation failed: {e}", exc_info=True)
             return False, self.fallback_messages["default"], f"Guard evaluation error: {str(e)}"
 
-    # ---------- Intent detection ----------
-    def _has_factual_content(self, text: str) -> bool:
-        indicators = [
-            r'\b(?:is|are|was|were)\s+\w+',
-            r'\b(?:contains?|includes?|has|have)\s+\w+',
-            r'\b(?:causes?|results?\s+in|leads?\s+to)\s+\w+',
-            r'\b(?:works?\s+by|functions?\s+through)\s+\w+',
-            r'\b\d+\s*(?:percent|%|mg|ml|mcg|iu|units?)\b',
-            r'\b(?:approved|indicated|prescribed)\s+(?:for|to)\b',
-            r'\b(?:effective|ineffective|safe|unsafe)\s+(?:for|in|against)\b',
-        ]
-        tl = text.lower()
-        return any(re.search(p, tl) for p in indicators)
-
-    def _analyze_response_intent(self, response: str) -> str:
+    # ---------- Critical requirement checks ----------
+    def _safety_violations(self, question: str, response: str, context: str) -> List[Dict[str, Any]]:
+        v: List[Dict[str, Any]] = []
         rl = response.lower()
 
-        # If there is any factual content, treat as ANSWERING (even if it starts with a greeting)
+        # 1) Medical advice / treatment recommendations (beyond documented)
+        if self._contains_pattern(rl, DOSING_DIRECTIVES):
+            v.append({"type": "medical_advice", "severity": "critical", "description": "Directive medical language."})
+
+        # 2) Dosage instructions not explicitly in context
+        if re.search(r'\b\d+\s*mg\b', rl) and not self._lexically_grounded(response, context):
+            v.append({"type": "dosage_not_in_context", "severity": "critical", "description": "Dosage mentioned without explicit support in context."})
+
+        # 3) Off-label / unapproved route of administration
+        if self._is_misuse_intent(question) or self._contains_pattern(rl, MISUSE_PATTERNS):
+            v.append({"type": "misuse", "severity": "critical", "description": "Misuse or unapproved route of administration."})
+        if self._is_offlabel_probe(question) and not self._has_safe_offlabel_context(context):
+            v.append({"type": "off_label", "severity": "high", "description": "Off-label topic without explicit 'not indicated' support."})
+
+        # 4) Competitor mentions not in context (rough heuristic)
+        if self._contains_pattern(rl, COMPETITOR_CUES):
+            # If brand-like tokens that are not in context appear alongside “versus/compared to”, flag it
+            brandish = set(re.findall(r'\b[A-Z][a-zA-Z0-9]{2,}\b', response))
+            brandish = {b for b in brandish if b.lower() not in {"I", "We", "Assistant", "User"}}
+            for b in brandish:
+                if b.lower() not in context.lower():
+                    v.append({"type": "competitor_mention", "severity": "medium", "description": f"Competitor/product mention not present in context: {b}"})
+                    break
+
+        # 5) Promotional language
+        if self._contains_pattern(rl, PROMO_PATTERNS):
+            v.append({"type": "promotional_language", "severity": "medium", "description": "Promotional or exaggerated wording."})
+
+        return v
+
+    # ---------- Intent detection (logging only) ----------
+    def _analyze_response_intent(self, response: str) -> str:
         if self._has_factual_content(response):
             return "ANSWERING"
-
-        # Clarifying (no facts)
-        if any(
-            p in rl
-            for p in ["could you clarify", "could you specify", "which aspect", "do you mean", "are you asking about"]
-        ):
+        rl = response.lower()
+        if any(p in rl for p in ["could you clarify", "could you specify", "which aspect", "do you mean", "are you asking about"]):
             return "CLARIFYING"
-
-        # Acknowledging gap (no facts)
-        if any(
-            p in rl
-            for p in [
-                "don't have information",
-                "don't have specific",
-                "no information available",
-                "not in our documentation",
-                "not in the provided",
-                "unable to find",
-                "don't see any mention",
-                "doesn't appear to be documented",
-            ]
-        ):
+        if any(p in rl for p in ["i don't have information", "not in the documentation", "unable to find"]):
             return "ACKNOWLEDGING_GAP"
-
-        # Alternatives (no facts)
-        if any(
-            p in rl
-            for p in [
-                "i can help with",
-                "i can provide information about",
-                "would you like to know about",
-                "i can share information on",
-                "related topics include",
-                "alternatively",
-            ]
-        ):
+        if any(p in rl for p in ["i can help with", "would you like to know about", "alternatively"]):
             return "OFFERING_ALTERNATIVES"
-
-        # Otherwise, conversational bridge
         return "CONVERSATIONAL_BRIDGE"
 
-    # ---------- Claim extraction ----------
-    def _extract_claims_by_intent(self, response: str, intent: str) -> List[Dict[str, Any]]:
-        if intent in ["CONVERSATIONAL_BRIDGE", "CLARIFYING"]:
-            return []
-        if intent == "ACKNOWLEDGING_GAP":
-            return self._extract_alternative_claims(response)
-        return self._extract_factual_claims(response)
+    # ---------- Helpers: misuse/off-label ----------
+    def _is_misuse_intent(self, text: str) -> bool:
+        return self._contains_pattern(text.lower(), MISUSE_PATTERNS)
 
-    def _extract_alternative_claims(self, response: str) -> List[Dict[str, Any]]:
-        claims = []
-        rl = response.lower()
-        patterns = [
-            r"i can (provide|share|help with) information about ([^.]+)",
-            r"our documentation (includes|covers|contains) ([^.]+)",
-            r"available information includes ([^.]+)",
-            r"we have (information|documentation) on ([^.]+)",
-        ]
-        for pattern in patterns:
-            for m in re.finditer(pattern, rl):
-                claims.append({"text": m.group(0), "type": "available_info", "requires_grounding": True})
-        return claims
+    def _is_offlabel_probe(self, text: str) -> bool:
+        tl = text.lower()
+        return any(re.search(p, tl) for p in OFFLABEL_CUES)
 
-    def _extract_factual_claims(self, response: str) -> List[Dict[str, Any]]:
-        sentences = re.split(r'[.!?]+', response)
-        claims = []
-        indicators = [
-            r'\b(?:is|are|was|were)\s+\w+',
-            r'\b(?:contains?|includes?|has|have)\s+\w+',
-            r'\b(?:causes?|results?\s+in|leads?\s+to)\s+\w+',
-            r'\b(?:works?\s+by|functions?\s+through)\s+\w+',
-            r'\b\d+\s*(?:percent|%|mg|ml|mcg|iu|units?)\b',
-            r'\b(?:approved|indicated|prescribed)\s+(?:for|to)\b',
-            r'\b(?:effective|ineffective|safe|unsafe)\s+(?:for|in|against)\b',
-        ]
-        conversational = [
-            r'^(?:hello|hi|hey|thanks|thank you)',
-            r'^\s*(?:i\'m sorry|i don\'t|i can\'t)',
-            r'^\s*(?:would you like|do you have)',
-            r'^\s*(?:based on|according to)',
-            r'don\'t have (?:specific |any )?information',
-            r'(?:not |don\'t see any )(?:mention|information|details)',
-            r'unable to (?:find|provide)',
-            r'(?:not |doesn\'t appear to be )(?:in|documented)',
-            r'no (?:specific |documented )?(?:information|details|data)',
-            r'knowledge base (?:doesn\'t|does not) (?:contain|include|have)',
-        ]
-        for s in sentences:
-            s = s.strip()
-            if len(s) < 10:
-                continue
-            if any(re.search(p, s.lower()) for p in conversational):
-                continue
-            if any(re.search(p, s.lower()) for p in indicators):
-                claims.append({"text": s, "type": "factual", "requires_grounding": True})
-        return claims
-
-    # ---------- Violation checks ----------
-    def _check_violations_by_intent(
-        self, response: str, context: str, claims: List[Dict[str, Any]], intent: str
-    ) -> List[Dict[str, Any]]:
-        violations = []
-
-        # ANSWERING or OFFERING_ALTERNATIVES without context is not allowed
-        if intent in ["ANSWERING", "OFFERING_ALTERNATIVES"] and not (context and context.strip()):
-            return [
-                {
-                    "type": "ungrounded_claim",
-                    "severity": "high",
-                    "description": "Factual response attempted without retrieved context",
-                }
-            ]
-
-        if intent == "CONVERSATIONAL_BRIDGE":
-            if self._contains_medical_directive(response):
-                violations.append(
-                    {"type": "medical_advice", "severity": "critical", "description": "Medical directive in conversational response"}
-                )
-            return violations
-
-        if intent == "ACKNOWLEDGING_GAP":
-            for claim in claims:
-                if claim.get("requires_grounding") and not self._is_claim_grounded_lexical(claim["text"], context):
-                    violations.append(
-                        {"type": "ungrounded_claim", "severity": "high", "description": f"Claims availability not in context: {claim['text']}"}
-                    )
-            return violations
-
-        if intent in ["ANSWERING", "OFFERING_ALTERNATIVES"]:
-            violations.extend(self._validate_factual_response(response, context, claims))
-            return violations
-
-        if intent == "CLARIFYING":
-            if self._contains_medical_directive(response):
-                violations.append(
-                    {"type": "medical_advice", "severity": "critical", "description": "Medical directive in clarifying response"}
-                )
-            return violations
-
-        return violations
-
-    def _validate_factual_response(self, response: str, context: str, claims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        violations = []
-        for claim in claims:
-            score = self._calculate_grounding_score(claim["text"], context)
-
-            # Require BOTH low embedding similarity AND poor lexical overlap before flagging ungrounded.
-            if score < self.sim_threshold and not self._is_claim_grounded_lexical(claim["text"], context):
-                violations.append(
-                    {
-                        "type": "ungrounded_claim",
-                        "severity": "high",
-                        "claim": claim["text"],
-                        "score": score,
-                        "description": f"Insufficient grounding (score: {score:.2f})",
-                    }
-                )
-
-        violations.extend(self._check_medical_safety(response, context))
-        if self._contains_promotional_language(response):
-            violations.append(
-                {"type": "promotional_language", "severity": "medium", "description": "Contains promotional or exaggerated claims"}
-            )
-        return violations
-
-    # ---------- Verdict & fallbacks ----------
-    def _make_verdict(self, violations: List[Dict[str, Any]], intent: str) -> Dict[str, Any]:
-        if violations:
-            order = ["critical", "high", "medium", "low"]
-            by = {}
-            for v in violations:
-                by.setdefault(v.get("severity", "low"), []).append(v)
-            most = next((by[s][0] for s in order if s in by and by[s]), violations[0])
-            return {
-                "verdict": "REJECT",
-                "reasoning": f"Safety violation detected: {most['description']}",
-                "violations": violations,
-                "intent": intent,
-            }
-        return {"verdict": "APPROVE", "reasoning": f"Response approved - Intent: {intent}", "intent": intent}
-
-    def _get_appropriate_fallback(self, violations: List[Dict[str, Any]]) -> str:
-        """Pick a user-facing fallback based on the most severe violation types."""
-        types = {v.get("type") for v in violations}
-        if {"medical_advice", "off_label"} & types:
-            return self.fallback_messages["unsafe_medical"]
-        if {"ungrounded_claim", "knowledge_leakage"} & types:
-            return self.fallback_messages["no_context"]
-        if {"promotional_language"} & types:
-            return self.fallback_messages["default"]
-        # Default safety net
-        return self.fallback_messages["default"]
-
-    # ---------- Helpers ----------
-    def _contains_medical_directive(self, response: str) -> bool:
-        patterns = [
-            r'\byou (should|must|need to) take\b',
-            r'\bstart (taking|with)\b.*\bmg\b',
-            r'\bstop taking\b',
-            r'\bincrease your dose\b',
-            r'\bdecrease your dose\b',
-            r'\btake \d+\s*mg\b',
-            r'\bdo not take\b.*\bif you\b',
-        ]
-        rl = response.lower()
-        for p in patterns:
-            if re.search(p, rl) and not any(ind in rl for ind in ["according to", "documentation states", "guidelines say"]):
-                return True
-        return False
-
-    def _check_medical_safety(self, response: str, context: str) -> List[Dict[str, Any]]:
-        violations = []
-        rl = response.lower()
-        checks = [
-            (r'effective for treating', 'efficacy_claim'),
-            (r'will help with', 'efficacy_claim'),
-            (r'cures?', 'efficacy_claim'),
-            (r'safe for everyone', 'safety_overstatement'),
-            (r'no side effects', 'safety_overstatement'),
-            (r'completely safe', 'safety_overstatement'),
-        ]
-        for pattern, vtype in checks:
-            if re.search(pattern, rl) and not self._is_claim_grounded_lexical(pattern, context):
-                violations.append({"type": "medical_advice", "severity": "high", "description": f"Ungrounded {vtype.replace('_', ' ')}"})
-        return violations
-
-    def _contains_promotional_language(self, response: str) -> bool:
-        patterns = [
-            r'\bbest\b.*\b(drug|medication|treatment)\b',
-            r'\bmost effective\b',
-            r'\bguaranteed\b',
-            r'\bamazing results\b',
-            r'\bbreakthrough\b',
-            r'\bmiraculous\b',
-            r'\brevolutionary\b',
-        ]
-        return any(re.search(p, response.lower()) for p in patterns)
-
-    def _is_claim_grounded_lexical(self, claim: str, context: str) -> bool:
+    def _has_safe_offlabel_context(self, context: str) -> bool:
+        """Allow only the statement that something is NOT indicated if the context explicitly says so."""
         if not context:
             return False
-        claim_words = set(re.findall(r'\b\w+\b', claim.lower()))
-        context_words = set(re.findall(r'\b\w+\b', context.lower()))
-        stop = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from'}
-        claim_words -= stop
-        context_words -= stop
-        if not claim_words:
-            return True
-        overlap = len(claim_words & context_words) / len(claim_words)
-        return overlap > 0.50  # slightly permissive to reduce false negatives
+        return bool(re.search(r"\b(not indicated|not approved)\b", context.lower()))
 
-    def _calculate_grounding_score(self, statement: str, context: str) -> float:
-        """
-        Max cosine similarity against context sentences.
-        If no embedding model, fall back to lexical grounding as a proxy.
-        """
+    # ---------- Helpers: grounding ----------
+    def _has_factual_content(self, text: str) -> bool:
+        indicators = [
+            r'\b(?:is|are|was|were)\s+\w+', r'\b(?:contains?|includes?|has|have)\s+\w+',
+            r'\b(?:causes?|results?\s+in|leads?\s+to)\s+\w+', r'\b(?:works?\s+by|functions?\s+through)\s+\w+',
+            r'\b\d+\s*(?:percent|%|mg|ml|mcg|iu|units?)\b', r'\b(?:approved|indicated|prescribed)\s+(?:for|to)\b',
+            r'\b(?:effective|ineffective|safe|unsafe)\s+(?:for|in|against)\b',
+        ]
+        return any(re.search(p, text.lower()) for p in indicators)
+
+    def _semantic_similarity(self, statement: str, context: str) -> float:
         if not context:
             return 0.0
         if not self.embedding_model:
-            return 1.0 if self._is_claim_grounded_lexical(statement, context) else 0.0
-
+            return 1.0 if self._lexically_grounded(statement, context) else 0.0
         try:
             stmt = self.embedding_model.encode(statement, convert_to_tensor=False, show_progress_bar=False)
             ctx_sentences = [s.strip() for s in re.split(r'[.!?]+', context) if len(s.strip()) > 20]
@@ -386,11 +225,25 @@ class EnhancedGuardAgent:
             return max_sim
         except Exception as e:
             logger.error(f"Error calculating grounding score: {e}")
-            # degrade gracefully
-            return 1.0 if self._is_claim_grounded_lexical(statement, context) else 0.0
+            return 1.0 if self._lexically_grounded(statement, context) else 0.0
 
+    def _lexically_grounded(self, statement: str, context: str) -> bool:
+        if not context:
+            return False
+        claim_words = set(re.findall(r'\b\w+\b', statement.lower()))
+        ctx_words = set(re.findall(r'\b\w+\b', context.lower()))
+        stop = {'the','a','an','and','or','but','in','on','at','to','for','of','with','by','from','that','this','it','as'}
+        claim_words -= stop
+        ctx_words -= stop
+        if not claim_words:
+            return True
+        overlap = len(claim_words & ctx_words) / len(claim_words)
+        return overlap > 0.50
 
-# Global guard agent instance & public wrapper
+    def _contains_pattern(self, text_lower: str, patterns: List[str]) -> bool:
+        return any(re.search(p, text_lower) for p in patterns)
+
+# Global instance + wrapper
 guard_agent = EnhancedGuardAgent()
 
 def evaluate_response(
