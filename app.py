@@ -1,4 +1,4 @@
-# app.py - Streamlined with Persona Conductor Architecture
+# app.py - Safe Migration Version with Feature Detection
 
 import os
 import streamlit as st
@@ -15,38 +15,75 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
-logger.info("=== Starting Streamlit app with Persona Conductor ===")
 
 # ============================================================================
-# LAZY LOADING OF DEPENDENCIES
+# FEATURE DETECTION - Check which architecture is available
+# ============================================================================
+
+def detect_architecture():
+    """Detect whether new Persona Conductor architecture is available"""
+    try:
+        from conversational_agent import get_persona_conductor, PersonaConductor
+        logger.info("=== Starting Streamlit app with Persona Conductor ===")
+        return "persona_conductor"
+    except ImportError:
+        logger.info("=== Starting Streamlit app with Legacy Architecture ===")
+        return "legacy"
+
+ARCHITECTURE = detect_architecture()
+
+# ============================================================================
+# LAZY LOADING OF DEPENDENCIES (with architecture detection)
 # ============================================================================
 
 @st.cache_resource
 def load_dependencies():
-    """Load all dependencies with caching"""
+    """Load dependencies based on available architecture"""
     from config import APP_TITLE, WELCOME_MESSAGE
     
-    # New Persona Conductor system
-    from conversational_agent import get_persona_conductor, PersonaConductor
-    from guard import persona_validator, PersonaValidator
-    
-    # Legacy systems for backward compatibility
-    from conversation import get_conversation_manager
-    from conversational_agent import get_conversational_agent, ConversationMode
-    
-    return {
+    deps = {
         "APP_TITLE": APP_TITLE,
         "WELCOME_MESSAGE": WELCOME_MESSAGE,
-        "get_persona_conductor": get_persona_conductor,
-        "get_persona_validator": lambda: persona_validator,
-        "get_conversation_manager": get_conversation_manager,
-        "get_conversational_agent": get_conversational_agent,
-        "ConversationMode": ConversationMode,
+        "architecture": ARCHITECTURE,
     }
+    
+    if ARCHITECTURE == "persona_conductor":
+        # New architecture available
+        from conversational_agent import get_persona_conductor, PersonaConductor
+        from guard import persona_validator, PersonaValidator
+        from conversation import get_conversation_manager
+        from conversational_agent import get_conversational_agent, ConversationMode
+        
+        deps.update({
+            "get_persona_conductor": get_persona_conductor,
+            "get_persona_validator": lambda: persona_validator,
+            "get_conversation_manager": get_conversation_manager,
+            "get_conversational_agent": get_conversational_agent,
+            "ConversationMode": ConversationMode,
+        })
+    else:
+        # Legacy architecture
+        from prompts import format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
+        from llm_client import call_base_assistant
+        from guard import evaluate_response
+        from conversation import get_conversation_manager
+        from conversational_agent import get_conversational_agent, ConversationMode
+        
+        deps.update({
+            "format_conversational_prompt": format_conversational_prompt,
+            "ACKNOWLEDGE_GAP_PROMPT": ACKNOWLEDGE_GAP_PROMPT,
+            "call_base_assistant": call_base_assistant,
+            "evaluate_response": evaluate_response,
+            "get_conversation_manager": get_conversation_manager,
+            "get_conversational_agent": get_conversational_agent,
+            "ConversationMode": ConversationMode,
+        })
+    
+    return deps
 
 try:
     deps = load_dependencies()
-    logger.info("All dependencies loaded successfully.")
+    logger.info(f"All dependencies loaded successfully. Architecture: {ARCHITECTURE}")
 except Exception as e:
     logger.error(f"Failed to load dependencies: {e}", exc_info=True)
     st.error(f"Fatal Error: Could not load required modules. Error: {e}")
@@ -65,9 +102,8 @@ st.set_page_config(
 st.title(deps["APP_TITLE"])
 
 # Get singletons
-conductor = deps["get_persona_conductor"]()
-validator = deps["get_persona_validator"]()
 conversation_manager = deps["get_conversation_manager"]()
+conversational_agent = deps["get_conversational_agent"]()
 
 # ============================================================================
 # ASYNC EXECUTION HELPER
@@ -81,7 +117,6 @@ def run_async(coro):
         loop = None
     
     if loop and loop.is_running():
-        # Use thread pool for existing loop
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(asyncio.run, coro)
@@ -90,17 +125,18 @@ def run_async(coro):
         return asyncio.run(coro)
 
 # ============================================================================
-# MAIN QUERY HANDLER - SIMPLIFIED WITH CONDUCTOR
+# PERSONA CONDUCTOR HANDLER (New Architecture)
 # ============================================================================
 
 async def handle_query_with_conductor(query: str) -> Dict[str, Any]:
-    """
-    Simplified query handler using the Persona Conductor architecture
-    """
+    """Handler for new Persona Conductor architecture"""
+    conductor = deps["get_persona_conductor"]()
+    validator = deps["get_persona_validator"]()
+    
     start_time = time.time()
     
     try:
-        # Step 1: Orchestrate response through the Conductor
+        # Step 1: Orchestrate response
         logger.info(f"Orchestrating response for: {query[:50]}...")
         conductor_decision = await conductor.orchestrate_response(query)
         
@@ -115,7 +151,6 @@ async def handle_query_with_conductor(query: str) -> Dict[str, Any]:
                 query=query
             )
             
-            # Use validation result
             is_approved = validation_decision.result.value == "approved"
             final_response = validation_decision.final_response
             validation_info = {
@@ -124,17 +159,15 @@ async def handle_query_with_conductor(query: str) -> Dict[str, Any]:
                 "confidence": validation_decision.confidence
             }
         else:
-            # No validation needed (pure conversational/empathetic)
             is_approved = True
             final_response = conductor_decision.final_response
             validation_info = {"result": "no_validation_needed"}
         
-        # Step 3: Update conversation history if approved
+        # Step 3: Update conversation history
         if is_approved:
             conversation_manager.add_turn("user", query)
             conversation_manager.add_turn("assistant", final_response)
         
-        # Step 4: Prepare response
         total_time = time.time() - start_time
         
         return {
@@ -146,78 +179,169 @@ async def handle_query_with_conductor(query: str) -> Dict[str, Any]:
                 **conductor_decision.debug_info,
                 "validation": validation_info,
                 "latency_ms": int(total_time * 1000),
-                "personas_used": conductor_decision.debug_info.get("composition", {}).get("personas_used", [])
+                "architecture": "persona_conductor"
             }
         }
         
     except Exception as e:
-        logger.error(f"Error handling query: {e}", exc_info=True)
+        logger.error(f"Error in conductor: {e}", exc_info=True)
         return {
             "success": False,
-            "response": "I apologize, but I encountered an error processing your request.",
+            "response": "I apologize, but I encountered an error.",
             "approved": False,
             "strategy": "error",
-            "debug_info": {"error": str(e), "latency_ms": int((time.time() - start_time) * 1000)}
+            "debug_info": {"error": str(e)}
         }
 
 # ============================================================================
-# STREAMING SUPPORT (OPTIONAL)
+# LEGACY HANDLER (Original Architecture)
 # ============================================================================
 
-async def handle_query_streaming(query: str, placeholder):
-    """
-    Streaming version - can be enhanced to stream from personas
-    """
-    # For now, just use regular handling
-    # Future: Implement streaming from Information Navigator
-    result = await handle_query_with_conductor(query)
-    return result
+async def handle_query_legacy(query: str) -> Dict[str, Any]:
+    """Handler for legacy architecture"""
+    start_time = time.time()
+    
+    try:
+        # Get decision from agent
+        agent_decision = conversational_agent.process_query(query)
+        
+        # Get conversation history
+        conversation_history = conversation_manager.get_formatted_history()
+        
+        # Handle different modes
+        if agent_decision.mode == deps["ConversationMode"].SESSION_END:
+            conversation_manager.start_new_conversation()
+            return {
+                "success": True,
+                "response": "Your session has ended. A new one has begun.",
+                "approved": True,
+                "debug_info": agent_decision.debug_info,
+            }
+        
+        if not agent_decision.requires_generation:
+            return {
+                "success": True,
+                "response": deps["WELCOME_MESSAGE"],
+                "approved": True,
+                "debug_info": agent_decision.debug_info,
+            }
+        
+        # Format prompt
+        prompt_for_llm = deps["format_conversational_prompt"](
+            query=query,
+            formatted_context=agent_decision.context_str,
+            conversation_context=conversation_history,
+        )
+        
+        # Generate response
+        draft_response = await deps["call_base_assistant"](prompt_for_llm)
+        
+        if draft_response.startswith("Error:"):
+            return {
+                "success": False,
+                "response": "I'm sorry, there was an issue. Please try again.",
+                "approved": False,
+                "debug_info": {"error": draft_response},
+            }
+        
+        # Guard validation
+        is_approved, final_response_text, guard_reasoning = deps["evaluate_response"](
+            context=agent_decision.context_str,
+            user_question=query,
+            assistant_response=draft_response,
+            conversation_history=conversation_history,
+        )
+        
+        # Update history if approved
+        if is_approved:
+            conversation_manager.add_turn("user", query)
+            conversation_manager.add_turn("assistant", final_response_text)
+        
+        total_time = time.time() - start_time
+        
+        return {
+            "success": True,
+            "response": final_response_text,
+            "approved": is_approved,
+            "debug_info": {
+                **agent_decision.debug_info,
+                "guard_reasoning": guard_reasoning,
+                "latency_ms": int(total_time * 1000),
+                "architecture": "legacy"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in legacy handler: {e}", exc_info=True)
+        return {
+            "success": False,
+            "response": "I apologize, but I encountered an error.",
+            "approved": False,
+            "debug_info": {"error": str(e)}
+        }
+
+# ============================================================================
+# UNIFIED QUERY HANDLER
+# ============================================================================
+
+async def handle_query(query: str) -> Dict[str, Any]:
+    """Route to appropriate handler based on architecture"""
+    if ARCHITECTURE == "persona_conductor":
+        return await handle_query_with_conductor(query)
+    else:
+        return await handle_query_legacy(query)
 
 # ============================================================================
 # SIDEBAR UI
 # ============================================================================
 
 with st.sidebar:
-    st.header("🎭 Persona Orchestra Settings")
+    if ARCHITECTURE == "persona_conductor":
+        st.header("🎭 Persona Orchestra Settings")
+        st.success("✨ New Architecture Active!")
+        
+        debug_mode = st.checkbox("Debug Mode", value=False)
+        show_personas = st.checkbox("Show Persona Breakdown", value=False)
+        show_validation = st.checkbox("Show Validation Details", value=False)
+        
+        if debug_mode:
+            st.info("Persona Conductor: Active\nDynamic Synthesis: Enabled")
+    else:
+        st.header("🔧 Settings")
+        st.warning("Legacy Architecture Active")
+        st.info("New Persona system not yet deployed")
+        
+        debug_mode = st.checkbox("Debug Mode", value=False)
+        show_context = st.checkbox("Show Retrieved Context", value=False)
+        show_personas = False
+        show_validation = False
     
-    # Debug mode
-    debug_mode = st.checkbox("Debug Mode", value=False)
-    
-    # Show persona breakdown
-    show_personas = st.checkbox("Show Persona Breakdown", value=False)
-    
-    # Show validation details
-    show_validation = st.checkbox("Show Validation Details", value=False)
-    
-    # Enable streaming (future feature)
-    enable_streaming = st.checkbox("Enable Streaming (Beta)", value=False, disabled=True)
-    
-    if debug_mode:
-        st.subheader("⚡ Performance")
-        st.info("Persona Conductor: Active\nDynamic Synthesis: Enabled")
-    
-    # Conversation controls
     st.subheader("💬 Conversation")
     if st.button("New Conversation", type="primary"):
         conversation_manager.start_new_conversation()
         st.success("Started new conversation")
         st.rerun()
     
-    # System info
+    # Architecture info
     with st.expander("ℹ️ System Info"):
-        st.markdown("""
-        **Architecture:** Dynamic Persona Synthesis
-        
-        **Personas:**
-        - 🤗 Empathetic Companion
-        - 📚 Information Navigator
-        - 🎭 Bridge Synthesizer
-        
-        **Strategy Selection:**
-        - Intent-based routing
-        - Parallel composition
-        - Smart validation
-        """)
+        if ARCHITECTURE == "persona_conductor":
+            st.markdown("""
+            **Architecture:** Dynamic Persona Synthesis ✨
+            
+            **Personas:**
+            - 🤗 Empathetic Companion
+            - 📚 Information Navigator
+            - 🎭 Bridge Synthesizer
+            """)
+        else:
+            st.markdown("""
+            **Architecture:** Legacy (Generate → Guard)
+            
+            **Components:**
+            - Single LLM generation
+            - Post-generation validation
+            - Heuristic + LLM guard
+            """)
 
 # ============================================================================
 # MAIN CHAT UI
@@ -232,71 +356,53 @@ for turn in conversation_manager.get_turns():
 
 # Handle user input
 if query := st.chat_input("Type your question..."):
-    # Display user message
     st.chat_message("user").write(query)
     
-    # Process with assistant
     with st.chat_message("assistant"):
-        with st.spinner("🎭 Orchestrating response..."):
-            result = run_async(handle_query_with_conductor(query))
+        if ARCHITECTURE == "persona_conductor":
+            spinner_text = "🎭 Orchestrating response..."
+        else:
+            spinner_text = "🤖 Thinking..."
+        
+        with st.spinner(spinner_text):
+            result = run_async(handle_query(query))
         
         if result["success"]:
-            # Display response
             if not result["approved"]:
                 st.warning("⚠️ Response modified for safety")
             
             st.write(result["response"])
             
-            # Show persona breakdown if enabled
-            if show_personas and "personas_used" in result["debug_info"]:
-                personas = result["debug_info"]["personas_used"]
-                if personas:
+            # Show personas (only for new architecture)
+            if show_personas and ARCHITECTURE == "persona_conductor":
+                if "personas_used" in result.get("debug_info", {}):
                     with st.expander("🎭 Personas Used"):
+                        personas = result["debug_info"]["personas_used"]
                         for persona in personas:
                             if persona == "empathetic_companion":
-                                st.write("🤗 **Empathetic Companion** - Provided emotional support")
+                                st.write("🤗 **Empathetic Companion**")
                             elif persona == "information_navigator":
-                                st.write("📚 **Information Navigator** - Retrieved factual information")
+                                st.write("📚 **Information Navigator**")
                             elif persona == "bridge_synthesizer":
-                                st.write("🎭 **Bridge Synthesizer** - Combined components seamlessly")
+                                st.write("🎭 **Bridge Synthesizer**")
             
-            # Show validation details if enabled
-            if show_validation and "validation" in result["debug_info"]:
-                validation = result["debug_info"]["validation"]
-                with st.expander("✅ Validation Details"):
-                    st.json(validation)
+            # Show context (legacy architecture)
+            if ARCHITECTURE == "legacy" and show_context:
+                if "context_retrieved_length" in result.get("debug_info", {}):
+                    with st.expander("📚 Retrieved Context"):
+                        st.write(f"Context length: {result['debug_info']['context_retrieved_length']}")
             
-            # Show debug info if enabled
+            # Debug info
             if debug_mode:
                 with st.expander("🔧 Debug Information"):
-                    # Clean up debug info for display
-                    debug_data = result["debug_info"].copy()
-                    
-                    # Show strategy
-                    st.metric("Strategy", result["strategy"])
-                    
-                    # Show latency
-                    if "latency_ms" in debug_data:
-                        st.metric("Response Time", f"{debug_data['latency_ms']}ms")
-                    
-                    # Show intent analysis
-                    if "intent_analysis" in debug_data:
-                        st.subheader("Intent Analysis")
-                        st.json(debug_data["intent_analysis"])
-                    
-                    # Show full debug data
-                    st.subheader("Full Debug Data")
-                    st.json(debug_data)
+                    if "latency_ms" in result.get("debug_info", {}):
+                        st.metric("Response Time", f"{result['debug_info']['latency_ms']}ms")
+                    st.json(result.get("debug_info", {}))
         else:
             st.error(result["response"])
-            if debug_mode:
-                st.error(f"Error: {result['debug_info'].get('error', 'Unknown error')}")
 
-# ============================================================================
-# FOOTER
-# ============================================================================
-
-if debug_mode:
-    st.markdown("---")
-    st.caption("🎭 Powered by Dynamic Persona Synthesis Architecture")
-    st.caption(f"Response Strategy: Intent → Compose → Validate")
+# Footer
+if ARCHITECTURE == "persona_conductor":
+    st.caption("🎭 Powered by Dynamic Persona Synthesis")
+else:
+    st.caption("🤖 Powered by Legacy Architecture")
