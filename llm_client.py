@@ -1,10 +1,8 @@
-# llm_client.py
 import aiohttp
 import asyncio
 import json
 import logging
 from typing import Dict, Any, Optional
-import hashlib  # kept if you want to add response caching later
 import re
 import weakref
 
@@ -17,34 +15,41 @@ logger = logging.getLogger(__name__)
 # Output cleaning (post-generation)
 # -------------------------------
 
-# One-line “meta” sentences we never want to show users
 _META_LINE_PATTERNS = [
-    r"^\s*note\s*:\s*",                                  # "Note: ..."
-    r"^\s*this (answer|response) (?:is|was)\b",          # "This response is..."
-    r"^\s*i (?:am|’m|\'m)\s+(?:an|a)\s+ai\b",            # "I'm an AI..."
-    r"^\s*as (?:an|a) (?:ai|language model)\b",          # "As an AI..."
-    r"^\s*please (?:ignore|disregard)\b",                # "Please ignore..."
-    r"^\s*for (?:educational|informational) purposes\b", # "For informational purposes..."
+    r"^\s*note\s*:\s*",
+    r"^\s*this (answer|response) (?:is|was)\b",
+    r"^\s*i (?:am|’m|\'m)\s+(?:an|a)\s+ai\b",
+    r"^\s*as (?:an|a) (?:ai|language model)\b",
+    r"^\s*please (?:ignore|disregard)\b",
+    r"^\s*for (?:educational|informational) purposes\b",
     r"^\s*this (?:message|content)\s+(?:complies|adheres|follows)\b",
     r"^\s*i cannot (?:do that|comply)\b",
-    r"^\s*debug\s*:",                                    # "Debug:"
+    r"^\s*debug\s*:",
 ]
 
+# Inline meta sentence killers (mid-paragraph)
+_INLINE_META_SENTENCES = [
+    r"(?:^|\s)(?:this|the)\s+response\b[^.?!]*\b(neutral|neutrality|complies|adheres|follows|meets|is intended)\b[^.?!]*[.?!]",
+    r"(?:^|\s)this\s+answer\b[^.?!]*[.?!]",
+]
+
+def _strip_inline_meta_sentences(text: str) -> str:
+    out = text
+    for pat in _INLINE_META_SENTENCES:
+        out = re.sub(pat, " ", out, flags=re.IGNORECASE)
+    # collapse double spaces created by removals
+    out = re.sub(r"\s{2,}", " ", out)
+    return out.strip()
+
 def clean_model_output(text: str) -> str:
-    """
-    Remove prompt echo, meta/process chatter, OOB markers, duplicated paras,
-    and dangling artifacts like trailing '###' or an unmatched '('.
-    """
     if not text:
         return text or ""
 
-    # Normalize and strip prompt echoes
     text = text.strip()
     for prefix in ["Assistant:", "assistant:", "ASSISTANT:"]:
         if text.startswith(prefix):
             text = text[len(prefix):].lstrip()
 
-    # Cut off at common out-of-band markers the model sometimes emits
     cut_markers = [
         "### End Response", "### End", "Additional Queries and Responses",
         "\nUser:", "\nAssistant:", "\n\nUser:", "\n\nAssistant:"
@@ -55,23 +60,30 @@ def clean_model_output(text: str) -> str:
             text = text[:idx].rstrip()
             break
 
-    # Remove parenthetical labels e.g. (Label: Retrieved information)
     text = re.sub(r"\(\s*(label|source)\s*:[^)]+\)", "", text, flags=re.IGNORECASE)
 
-    # Drop obvious meta/process lines
     lines = [ln for ln in text.splitlines() if ln.strip()]
     cleaned_lines = []
     for ln in lines:
         lower = ln.lower()
         if any(re.match(pat, lower) for pat in _META_LINE_PATTERNS):
             continue
-        # common meta sentence variants
-        if "this response" in lower and any(k in lower for k in ["neutral", "complies", "adheres", "follows", "meets"]):
-            continue
         cleaned_lines.append(ln)
     text = "\n".join(cleaned_lines).strip()
 
-    # Deduplicate obvious repeated paragraph blocks
+    # NEW: remove inline meta sentences even if they aren't on their own line
+    text = _strip_inline_meta_sentences(text)
+
+    # Remove trailing ### or dangling "(" artifacts
+    text = re.sub(r"(?:#+\s*)+$", "", text).rstrip()
+    if text.endswith("("):
+        text = text[:-1].rstrip()
+    if text.count("(") > text.count(")"):
+        last = text.rfind("(")
+        if last != -1:
+            text = text[:last].rstrip()
+
+    # Deduplicate paragraphs (after cleanup)
     paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
     seen = set()
     unique_paras = []
@@ -80,40 +92,51 @@ def clean_model_output(text: str) -> str:
         if key not in seen:
             seen.add(key)
             unique_paras.append(p)
-    text = "\n\n".join(unique_paras).strip()
-
-    # Remove a trailing orphan marker or dangling "(..."
-    text = re.sub(r"(?:#+\s*)+$", "", text).rstrip()  # trailing ### or ####
-    if text.endswith("("):
-        text = text[:-1].rstrip()
-    # If there are more '(' than ')', drop from last unmatched '('
-    if text.count("(") > text.count(")"):
-        last = text.rfind("(")
-        if last != -1:
-            text = text[:last].rstrip()
-
-    return text
+    return "\n\n".join(unique_paras).strip()
 
 
 # -------------------------------
-# Per-event-loop session cache
+# Per-event-loop session + client cache
 # -------------------------------
 
 _sessions_by_loop: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, aiohttp.ClientSession]" = weakref.WeakKeyDictionary()
+_clients_by_loop: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, 'HuggingFaceClient']" = weakref.WeakKeyDictionary()
 
 async def _get_loop_session(headers: Dict[str, str]) -> aiohttp.ClientSession:
-    """
-    Return an aiohttp.ClientSession cached for the current event loop.
-    - Avoids cross-loop reuse (fixes 'Future attached to a different loop').
-    - Reuses keep-alive connections within the same loop for lower latency.
-    """
     loop = asyncio.get_running_loop()
     sess = _sessions_by_loop.get(loop)
     if not sess or sess.closed:
-        connector = aiohttp.TCPConnector(limit=10, limit_per_host=10)  # keep SSL verification enabled
+        connector = aiohttp.TCPConnector(limit=10, limit_per_host=10)
         sess = aiohttp.ClientSession(connector=connector, headers=headers)
         _sessions_by_loop[loop] = sess
     return sess
+
+def reset_hf_client():
+    """Clear cached client and session for the current loop (e.g., after endpoint rotation)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop; clear all caches
+        _clients_by_loop.clear()
+        _sessions_by_loop.clear()
+        return
+    _clients_by_loop.pop(loop, None)
+    sess = _sessions_by_loop.pop(loop, None)
+    if sess and not sess.closed:
+        # Close asynchronously if possible
+        try:
+            asyncio.create_task(sess.close())
+        except RuntimeError:
+            pass
+
+def get_hf_client() -> "HuggingFaceClient":
+    """Return a per-loop cached HuggingFaceClient."""
+    loop = asyncio.get_running_loop()
+    client = _clients_by_loop.get(loop)
+    if client is None:
+        client = HuggingFaceClient()
+        _clients_by_loop[loop] = client
+    return client
 
 
 # -------------------------------
@@ -122,17 +145,15 @@ async def _get_loop_session(headers: Dict[str, str]) -> aiohttp.ClientSession:
 
 class HuggingFaceClient:
     """
-    Minimal, robust client for Hugging Face Inference Endpoints.
-    - Per-event-loop session cache for connection reuse (lower latency).
-    - Parameter fallbacks for 'stop' vs 'stop_sequences' vs none.
+    Robust client for Hugging Face Inference Endpoints.
+    - Per-event-loop session cache for connection reuse.
+    - Parameter fallbacks for 'stop' vs 'stop_sequences' vs none (≤4).
     """
     def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
         if not token:
             raise ValueError("HF_TOKEN is not configured.")
         if not endpoint:
             raise ValueError("HF_INFERENCE_ENDPOINT is not configured.")
-
-        # Normalize endpoint (strip trailing slash)
         endpoint = endpoint.rstrip("/")
         self.token = token
         self.endpoint = endpoint
@@ -140,13 +161,13 @@ class HuggingFaceClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
-        logger.info(f"HuggingFaceClient initialized with endpoint: {endpoint[:60]}...")
+        # Make this DEBUG to reduce log spam
+        logger.debug(f"HuggingFaceClient initialized with endpoint: {endpoint[:60]}...")
 
     async def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
         if parameters is None:
             parameters = MODEL_PARAMS.copy()
 
-        # Ensure we never send >4 stops
         def clamp_stops(p: Dict[str, Any]) -> Dict[str, Any]:
             p = dict(p)
             for k in ("stop", "stop_sequences"):
@@ -156,17 +177,14 @@ class HuggingFaceClient:
 
         variants: list[Dict[str, Any]] = []
 
-        # Variant 1: prefer 'stop' key if present (≤ 4)
         v1 = clamp_stops(parameters)
         variants.append(v1)
 
-        # Variant 2: map stop -> stop_sequences, remove stop
         v2 = clamp_stops(parameters)
         if "stop" in v2:
             v2["stop_sequences"] = v2.pop("stop")
         variants.append(v2)
 
-        # Variant 3: no stops at all
         v3 = dict(parameters)
         for k in ("stop", "stop_sequences"):
             v3.pop(k, None)
@@ -174,12 +192,10 @@ class HuggingFaceClient:
 
         last_error_text = None
         timeout = aiohttp.ClientTimeout(total=60)
-
-        # Use the per-loop session (reused across calls on the same loop)
         session = await _get_loop_session(self.headers)
 
         for i, params in enumerate(variants, start=1):
-            logger.info(f"Sending request to HF endpoint (variant {i}/3)")
+            logger.debug(f"Sending request to HF endpoint (variant {i}/3)")
             payload = {"inputs": prompt, "parameters": params}
 
             try:
@@ -188,13 +204,10 @@ class HuggingFaceClient:
                     text = await response.text()
 
                     if status != 200:
-                        # Log the server's body to aid debugging (e.g., 422 stop-token validation)
                         logger.error(f"HF endpoint returned {status}. Body: {text}")
                         last_error_text = text
-                        # try next variant
                         continue
 
-                    # Expect either [{ "generated_text": "..."}] or raw textual/json content
                     try:
                         result = json.loads(text)
                     except json.JSONDecodeError:
@@ -202,12 +215,10 @@ class HuggingFaceClient:
 
                     if isinstance(result, list) and result and isinstance(result[0], dict) and "generated_text" in result[0]:
                         generated_text = (result[0].get("generated_text") or "")
-                        # Some endpoints echo the prompt; strip if needed
                         if generated_text.startswith(prompt):
                             generated_text = generated_text[len(prompt):].lstrip()
                         return clean_model_output(generated_text)
 
-                    # Fallback: stringify unknown structure
                     return clean_model_output(str(result))
 
             except aiohttp.ClientError as e:
@@ -219,7 +230,6 @@ class HuggingFaceClient:
                 last_error_text = str(e)
                 continue
 
-        # If all variants failed:
         return f"Error: Could not connect to the model service. Last error: {last_error_text or 'unknown'}"
 
 
@@ -227,13 +237,9 @@ class HuggingFaceClient:
 # Convenience wrappers
 # -------------------------------
 
-def _client() -> HuggingFaceClient:
-    # Stateless factory; the per-loop session is cached separately
-    return HuggingFaceClient()
-
 async def call_huggingface(prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
     try:
-        client = _client()
+        client = get_hf_client()
         out = await client.generate_response(prompt, parameters)
         return out
     except ValueError as e:
@@ -250,13 +256,13 @@ async def call_base_assistant(prompt: str) -> str:
         "top_p": 0.9,
         "repetition_penalty": 1.1,
         "max_new_tokens": 300,
-        # Try to stop on role markers / section fences; we cap at 4 internally
         "stop": ["\nUser:", "\nHuman:", "\nAssistant:", "###"]
     })
     raw = await call_huggingface(prompt, base_params)
     return clean_model_output(raw)
 
 async def call_guard_agent(prompt: str) -> str:
+    # NOTE: Retained for compatibility; your guard.py no longer relies on LLM verdicts.
     guard_params = MODEL_PARAMS.copy()
     guard_params.update({
         "temperature": 0.3,

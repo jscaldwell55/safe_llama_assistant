@@ -4,6 +4,7 @@ import streamlit as st
 import logging
 import sys
 import asyncio
+import threading
 
 # Configure logging FIRST before any imports
 logging.basicConfig(
@@ -16,20 +17,22 @@ logger.info("=== Starting Streamlit app initialization ===")
 
 # --- LAZY-LOADING IMPORTS ---
 def get_dependencies():
-    from config import APP_TITLE, WELCOME_MESSAGE
-    # prompts module (renamed from prompt.py)
+    from config import APP_TITLE, WELCOME_MESSAGE, HF_INFERENCE_ENDPOINT
     from prompts import format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
-    # llm client now exposes only call_* helpers (no get_hf_client/reset)
-    from llm_client import call_base_assistant
+    # Client helpers now include get_hf_client/reset_hf_client for endpoint rotation
+    from llm_client import call_base_assistant, get_hf_client, reset_hf_client
     from guard import evaluate_response
     from conversation import get_conversation_manager
     from conversational_agent import get_conversational_agent, ConversationMode
     return {
         "APP_TITLE": APP_TITLE,
         "WELCOME_MESSAGE": WELCOME_MESSAGE,
+        "HF_INFERENCE_ENDPOINT": HF_INFERENCE_ENDPOINT,
         "format_conversational_prompt": format_conversational_prompt,
         "ACKNOWLEDGE_GAP_PROMPT": ACKNOWLEDGE_GAP_PROMPT,
         "call_base_assistant": call_base_assistant,
+        "get_hf_client": get_hf_client,
+        "reset_hf_client": reset_hf_client,
         "evaluate_response": evaluate_response,
         "get_conversation_manager": get_conversation_manager,
         "get_conversational_agent": get_conversational_agent,
@@ -56,22 +59,34 @@ st.title(deps["APP_TITLE"])
 conversation_manager = deps["get_conversation_manager"]()
 conversational_agent = deps["get_conversational_agent"]()
 
-# --- ASYNC HELPER ---
-def run_async(coro):
-    """Run an async coroutine safely from Streamlit's sync context."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+# --- BACKGROUND EVENT LOOP (single, reused) ---
+def _run_loop(loop: asyncio.AbstractEventLoop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
 
-    if loop and loop.is_running():
-        # In case Streamlit already has a loop running, execute in a thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(asyncio.run, coro)
-            return future.result()
-    else:
-        return asyncio.run(coro)
+def _ensure_bg_loop() -> asyncio.AbstractEventLoop:
+    loop = st.session_state.get("_bg_loop")
+    thread = st.session_state.get("_bg_thread")
+    if loop and thread and thread.is_alive():
+        return loop
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=_run_loop, args=(loop,), daemon=True)
+    thread.start()
+    st.session_state["_bg_loop"] = loop
+    st.session_state["_bg_thread"] = thread
+    return loop
+
+def run_async(coro):
+    """Schedule coroutine on the persistent background loop and wait for result."""
+    loop = _ensure_bg_loop()
+    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    return fut.result()
+
+# Optional: warm up the HF client once (no network call, just ensures cache keys exist)
+try:
+    deps["get_hf_client"]()
+except Exception:
+    pass
 
 # --- CORE APPLICATION LOGIC ---
 async def handle_query_async(query: str) -> dict:
@@ -161,6 +176,12 @@ with st.sidebar:
         conversation_manager.start_new_conversation()
         st.success("Started new conversation")
         st.rerun()
+
+    st.subheader("🧠 Model")
+    st.caption(f"Endpoint: {deps['HF_INFERENCE_ENDPOINT'] or '(unset)'}")
+    if st.button("Reload Model Client"):
+        deps["reset_hf_client"]()
+        st.success("Model client reloaded (endpoint/session cache cleared).")
 
 # --- MAIN UI ---
 st.markdown("### 💬 Ask me anything about Lexapro")
