@@ -126,28 +126,16 @@ def run_async(coro):
 async def handle_query_async_parallel(query: str) -> dict:
     """
     Handles user query with PARALLEL processing for improved latency.
-    RAG retrieval happens while we prepare other components.
+    Fixed to avoid Streamlit thread context warnings.
     """
     start_time = time.time()
     
     try:
-        # Start RAG retrieval immediately (non-blocking)
-        agent_task = asyncio.create_task(
-            asyncio.to_thread(conversational_agent.process_query, query)
-        )
+        # Process query synchronously to avoid thread context issues
+        agent_decision = conversational_agent.process_query(query)
         
-        # Check if likely conversational while RAG runs
-        is_likely_conv = _is_likely_conversational(query)
-        
-        # Get conversation history in parallel
-        history_task = asyncio.create_task(
-            asyncio.to_thread(conversation_manager.get_formatted_history)
-        )
-        
-        # Wait for agent decision and history
-        agent_decision, conversation_history = await asyncio.gather(
-            agent_task, history_task
-        )
+        # Get conversation history
+        conversation_history = conversation_manager.get_formatted_history()
         
         logger.info(f"RAG retrieval took {time.time() - start_time:.2f}s")
 
@@ -174,6 +162,9 @@ async def handle_query_async_parallel(query: str) -> dict:
                 "latency": time.time() - start_time,
             }
 
+        # Check if likely conversational
+        is_likely_conv = _is_likely_conversational(query)
+        
         # Optimize prompt based on query type
         if is_likely_conv and not agent_decision.context_str:
             # Skip heavy prompt formatting for simple conversational queries
@@ -204,20 +195,25 @@ async def handle_query_async_parallel(query: str) -> dict:
 
         # Guard validation (optimized with skipping logic)
         guard_start = time.time()
-        is_approved, final_response_text, guard_reasoning = deps["evaluate_response"](
-            context=agent_decision.context_str,
-            user_question=query,
-            assistant_response=draft_response,
-            conversation_history=conversation_history,
-        )
-        logger.info(f"Guard evaluation took {time.time() - guard_start:.2f}s")
-
-        # Add to history if approved (parallel writes)
-        if is_approved:
-            await asyncio.gather(
-                asyncio.to_thread(conversation_manager.add_turn, "user", query),
-                asyncio.to_thread(conversation_manager.add_turn, "assistant", final_response_text)
+        try:
+            is_approved, final_response_text, guard_reasoning = deps["evaluate_response"](
+                context=agent_decision.context_str,
+                user_question=query,
+                assistant_response=draft_response,
+                conversation_history=conversation_history,
             )
+            logger.info(f"Guard evaluation took {time.time() - guard_start:.2f}s")
+        except Exception as e:
+            logger.error(f"Guard evaluation failed: {e}")
+            # If guard fails, default to safety
+            is_approved = False
+            final_response_text = "I apologize, but I cannot provide that information. Please consult with a healthcare professional."
+            guard_reasoning = f"Guard error: {str(e)}"
+
+        # Add to history if approved (sequential to avoid thread issues)
+        if is_approved:
+            conversation_manager.add_turn("user", query)
+            conversation_manager.add_turn("assistant", final_response_text)
 
         total_latency = time.time() - start_time
         logger.info(f"Total query processing took {total_latency:.2f}s")
