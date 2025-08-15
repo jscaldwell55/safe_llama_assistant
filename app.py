@@ -5,7 +5,6 @@ import logging
 import sys
 import asyncio
 
-# Configure logging centrally (libraries should NOT basicConfig)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -14,10 +13,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info("=== Starting Streamlit app initialization ===")
 
-# --- LAZY-LOADING IMPORTS ---
 def get_dependencies():
     from config import APP_TITLE, SYSTEM_MESSAGES
-    from prompt import format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
+    from prompts import format_conversational_prompt, ACKNOWLEDGE_GAP_PROMPT
     from llm_client import call_base_assistant, get_hf_client, reset_hf_client
     from guard import evaluate_response
     from conversation import get_conversation_manager
@@ -46,11 +44,7 @@ except Exception as e:
     st.error(f"Fatal Error: A required module could not be loaded. Please check the logs. Error: {e}")
     st.stop()
 
-st.set_page_config(
-    page_title=deps["APP_TITLE"],
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title=deps["APP_TITLE"], layout="centered", initial_sidebar_state="collapsed")
 st.title(deps["APP_TITLE"])
 
 conversation_manager = deps["get_conversation_manager"]()
@@ -58,12 +52,10 @@ hf_client = deps["get_hf_client"]()
 conversational_agent = deps["get_conversational_agent"]()
 
 def run_async(coro):
-    """Run async functions safely in Streamlit's sync context."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-
     if loop and loop.is_running():
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -72,10 +64,6 @@ def run_async(coro):
         return asyncio.run(coro)
 
 async def handle_query_async(query: str) -> dict:
-    """
-    Robust 'RAG-then-Check' workflow with early no-context handling
-    and graceful model error handling.
-    """
     try:
         agent_decision = conversational_agent.process_query(query)
 
@@ -87,7 +75,6 @@ async def handle_query_async(query: str) -> dict:
             }
 
         if agent_decision.requires_generation:
-            # Early short-circuit: if no retrieved context, don't generate
             if not agent_decision.context_str.strip():
                 final_response_text = deps["SYSTEM_MESSAGES"]["no_context"]
                 is_approved = True
@@ -100,7 +87,7 @@ async def handle_query_async(query: str) -> dict:
                 )
                 draft_response = await deps["call_base_assistant"](prompt_for_llm)
 
-                # If the model call failed, do not call the guard, do not save to history
+                # Short-circuit if model call failed
                 lower = (draft_response or "").lower()
                 if lower.startswith("error:") or lower.startswith("configuration error:"):
                     return {
@@ -118,7 +105,6 @@ async def handle_query_async(query: str) -> dict:
                     conversation_history=conversation_manager.get_formatted_history()
                 )
         else:
-            # Standalone greeting handling
             final_response_text = "Hi! Fire away with a question about our docs."
             is_approved = True
             guard_reasoning = "Not required for direct agent response."
@@ -143,7 +129,6 @@ async def handle_query_async(query: str) -> dict:
             "approved": False, "context_str": "", "debug_info": {"error": str(e)}
         }
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.header("🔧 Settings")
     debug_mode = st.checkbox("Debug Mode", value=False)
@@ -166,7 +151,6 @@ with st.sidebar:
         deps["reset_hf_client"]()
         st.success("Model client reloaded. New endpoint will be used on next message.")
 
-# --- MAIN ---
 st.markdown("### 💬 Ask me anything about our knowledge base")
 
 for turn in conversation_manager.get_turns():
@@ -175,7 +159,6 @@ for turn in conversation_manager.get_turns():
 
 if query := st.chat_input("What would you like to know?"):
     st.chat_message("user").write(query)
-
     with st.chat_message("assistant"):
         with st.spinner("🤖 Thinking..."):
             result = run_async(handle_query_async(query))
