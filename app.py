@@ -201,7 +201,7 @@ with st.sidebar:
 # MAIN CHAT UI
 # ============================================================================
 
-st.markdown("### 💬 Ask me anything about Lexapro")
+st.markdown("### 💬 Ask me anything about Journvax")
 
 # Display chat history
 for turn in conversation_manager.get_turns():

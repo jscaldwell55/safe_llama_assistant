@@ -90,10 +90,10 @@ class PersonaConductor:
         
         # Instant responses
         self.instant_responses = {
-            "hello": "Hello! How can I help you with information about Lexapro today?",
-            "hi": "Hi there! What would you like to know about Lexapro?",
+            "hello": "Hello! How can I help you with information about Journvax today?",
+            "hi": "Hi there! What would you like to know about Journvax?",
             "hey": "Hey! How can I help you?",
-            "thank you": "You're welcome! Is there anything else about Lexapro I can help with?",
+            "thank you": "You're welcome! Is there anything else about Journvax I can help with?",
             "thanks": "You're welcome! Let me know if you need anything else.",
             "goodbye": "Goodbye! Take care!",
             "bye": "Bye! Have a great day!",

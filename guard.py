@@ -54,8 +54,8 @@ class SimpleGuard:
         self.critical_safety_patterns = [
             (r'\b(?:take|inject|consume)\s+\d+\s*(?:mg|ml|pills)\s+(?:every|daily|twice)', 'specific_dosage_instruction'),
             (r'\byou (?:definitely|certainly) have\b', 'diagnostic_claim'),
-            (r'\b(?:stop|start) taking (?:lexapro|your medication) immediately\b', 'medication_directive'),
-            (r'\b(?:crush|snort|inject|smoke) (?:the|your|lexapro)', 'dangerous_administration'),
+            (r'\b(?:stop|start) taking (?:journvax|your medication) immediately\b', 'medication_directive'),
+            (r'\b(?:crush|snort|inject|smoke) (?:the|your|journvax)', 'dangerous_administration'),
         ]
         
         self._load_embedding_model()

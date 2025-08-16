@@ -4,7 +4,7 @@
 # MAIN BRIDGE SYNTHESIZER PROMPT - SIMPLIFIED
 # ============================================================================
 
-BRIDGE_SYNTHESIZER_SIMPLE_PROMPT = """You are a helpful pharmaceutical assistant providing information about Lexapro.
+BRIDGE_SYNTHESIZER_SIMPLE_PROMPT = """You are a helpful pharmaceutical assistant providing information about Journvax.
 
 Using the documentation provided, give a natural, conversational response to the user's question.
 
@@ -38,7 +38,7 @@ User Question: {query}
 Response:"""
 
 # For conversational responses
-CONVERSATIONAL_PROMPT = """You are a friendly pharmaceutical assistant focused on Lexapro information.
+CONVERSATIONAL_PROMPT = """You are a friendly pharmaceutical assistant focused on Journvax information.
 
 Respond naturally and helpfully to the user's message.
 
@@ -120,7 +120,7 @@ def format_guard_prompt(context, question, answer, conversation_history=None):
 
 # Legacy constants
 BASE_ASSISTANT_PROMPT = BRIDGE_SYNTHESIZER_SIMPLE_PROMPT
-ACKNOWLEDGE_GAP_PROMPT = "I don't have specific information about that in our documentation. Is there something else I can help you with regarding Lexapro?"
+ACKNOWLEDGE_GAP_PROMPT = "I don't have specific information about that in our documentation. Is there something else I can help you with regarding Journvax?"
 
 # Stub out legacy persona prompts
 INTENT_CLASSIFIER_PROMPT = "Not used in simplified version"
