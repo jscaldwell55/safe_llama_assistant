@@ -1,4 +1,4 @@
-# conversational_agent.py - A10G Optimized Persona Conductor
+# conversational_agent.py - Complete Version with All Improvements
 
 import logging
 import re
@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
 import hashlib
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +20,10 @@ logger = logging.getLogger(__name__)
 
 class PerformanceTimer:
     """Context manager for timing operations"""
-    def __init__(self, operation_name: str):
+    def __init__(self, operation_name: str, log_slow_threshold_ms: int = 5000):
         self.operation_name = operation_name
         self.start_time = None
+        self.log_slow_threshold_ms = log_slow_threshold_ms
     
     def __enter__(self):
         self.start_time = time.time()
@@ -29,46 +31,101 @@ class PerformanceTimer:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         elapsed_ms = int((time.time() - self.start_time) * 1000)
-        logger.info(f"[PERF] {self.operation_name}: {elapsed_ms}ms")
+        
+        if elapsed_ms > self.log_slow_threshold_ms:
+            logger.warning(f"[PERF] SLOW {self.operation_name}: {elapsed_ms}ms")
+        else:
+            logger.info(f"[PERF] {self.operation_name}: {elapsed_ms}ms")
+        
+        self.elapsed_ms = elapsed_ms
 
 # ============================================================================
-# RESPONSE CACHE
+# ENHANCED RESPONSE CACHE
 # ============================================================================
 
 class ResponseCache:
-    """LRU cache for common responses"""
-    def __init__(self, max_size: int = 100):
+    """LRU cache for common responses with TTL support"""
+    def __init__(self, max_size: int = 100, ttl_seconds: int = 3600):
         self.cache = {}
         self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
         self.access_order = []
+        self.cache_stats = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "expirations": 0
+        }
     
     def get_cache_key(self, query: str, context: str = "") -> str:
         """Generate cache key from query and context"""
-        combined = f"{query}:{context[:100]}"  # Use first 100 chars of context
+        # Normalize query for better cache hits
+        normalized_query = query.lower().strip()
+        normalized_query = re.sub(r'\s+', ' ', normalized_query)
+        normalized_query = re.sub(r'[^\w\s]', '', normalized_query)
+        
+        combined = f"{normalized_query}:{context[:100]}"
         return hashlib.md5(combined.encode()).hexdigest()
     
     def get(self, key: str) -> Optional[str]:
-        """Get cached response"""
+        """Get cached response with TTL check"""
         if key in self.cache:
+            entry = self.cache[key]
+            
+            # Check TTL
+            if datetime.now() - entry["timestamp"] > timedelta(seconds=self.ttl_seconds):
+                # Expired
+                del self.cache[key]
+                self.access_order.remove(key)
+                self.cache_stats["expirations"] += 1
+                self.cache_stats["misses"] += 1
+                logger.info(f"[CACHE] Expired key: {key[:8]}...")
+                return None
+            
             # Move to end (most recently used)
             self.access_order.remove(key)
             self.access_order.append(key)
-            logger.info(f"[CACHE] Hit for key: {key[:8]}...")
-            return self.cache[key]
+            self.cache_stats["hits"] += 1
+            logger.info(f"[CACHE] Hit for key: {key[:8]}... (hits: {self.cache_stats['hits']})")
+            return entry["value"]
+        
+        self.cache_stats["misses"] += 1
         return None
     
     def put(self, key: str, value: str):
-        """Store response in cache"""
+        """Store response in cache with timestamp"""
         if key in self.cache:
             self.access_order.remove(key)
         elif len(self.cache) >= self.max_size:
             # Remove least recently used
             lru_key = self.access_order.pop(0)
             del self.cache[lru_key]
+            self.cache_stats["evictions"] += 1
+            logger.info(f"[CACHE] Evicted LRU key: {lru_key[:8]}...")
         
-        self.cache[key] = value
+        self.cache[key] = {
+            "value": value,
+            "timestamp": datetime.now()
+        }
         self.access_order.append(key)
-        logger.info(f"[CACHE] Stored key: {key[:8]}...")
+        logger.info(f"[CACHE] Stored key: {key[:8]}... (size: {len(self.cache)})")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics"""
+        total_requests = self.cache_stats["hits"] + self.cache_stats["misses"]
+        hit_rate = (self.cache_stats["hits"] / max(1, total_requests)) * 100
+        
+        return {
+            **self.cache_stats,
+            "size": len(self.cache),
+            "hit_rate": hit_rate
+        }
+    
+    def clear(self):
+        """Clear the cache"""
+        self.cache.clear()
+        self.access_order.clear()
+        logger.info("[CACHE] Cleared all entries")
 
 # ============================================================================
 # INTENT CLASSIFICATION
@@ -89,6 +146,7 @@ class ResponseStrategy(Enum):
     CONVERSATIONAL = "conversational"
     CACHED = "cached"
     SESSION_END = "session_end"
+    ERROR_RECOVERY = "error_recovery"
 
 @dataclass
 class IntentAnalysis:
@@ -125,7 +183,7 @@ class ConductorDecision:
 
 class PersonaConductor:
     """
-    A10G-optimized Conductor with caching, parallel processing, and performance monitoring
+    Enhanced Conductor with better error handling and performance monitoring
     """
     
     def __init__(self):
@@ -134,16 +192,26 @@ class PersonaConductor:
         self._conversation_manager = None
         
         # Initialize caches
-        self.response_cache = ResponseCache(max_size=100)
+        from config import ENABLE_RESPONSE_CACHE, CACHE_TTL_SECONDS, MAX_CACHE_SIZE
+        
+        self.response_cache = ResponseCache(
+            max_size=MAX_CACHE_SIZE,
+            ttl_seconds=CACHE_TTL_SECONDS
+        ) if ENABLE_RESPONSE_CACHE else None
+        
         self.intent_cache = {}  # Simple intent cache
         
         # Pre-compiled patterns for fast intent detection
         self.greeting_patterns = re.compile(
-            r'^(hi|hello|hey|good morning|good afternoon|good evening)[\s!?]*$',
+            r'^(hi|hello|hey|good morning|good afternoon|good evening|greetings)[\s!?.,]*$',
             re.IGNORECASE
         )
         self.thanks_patterns = re.compile(
-            r'^(thank|thanks|thank you|thx|ty)[\s!?]*',
+            r'^(thank|thanks|thank you|thx|ty|appreciate)[\s!?.,]*',
+            re.IGNORECASE
+        )
+        self.goodbye_patterns = re.compile(
+            r'^(bye|goodbye|see you|farewell|take care)[\s!?.,]*$',
             re.IGNORECASE
         )
         
@@ -156,7 +224,15 @@ class PersonaConductor:
             "thanks": "You're welcome! Let me know if you need anything else.",
             "goodbye": "Goodbye! Take care!",
             "bye": "Bye! Have a great day!",
+            "ok": "Alright! Is there anything specific you'd like to know?",
+            "yes": "I understand. What would you like to know more about?",
+            "no": "I understand. Is there anything else I can help you with?",
         }
+        
+        # Performance tracking
+        self.request_count = 0
+        self.error_count = 0
+        self.total_latency = 0
     
     def _get_llm_client(self):
         """Lazy load LLM client"""
@@ -185,11 +261,13 @@ class PersonaConductor:
         """
         # Check intent cache first
         query_lower = query.lower().strip()
-        if query_lower in self.intent_cache:
-            logger.info("[CACHE] Intent cache hit")
-            return self.intent_cache[query_lower]
+        cache_key = hashlib.md5(query_lower.encode()).hexdigest()[:16]
         
-        with PerformanceTimer("intent_analysis"):
+        if cache_key in self.intent_cache:
+            logger.info("[CACHE] Intent cache hit")
+            return self.intent_cache[cache_key]
+        
+        with PerformanceTimer("intent_analysis", log_slow_threshold_ms=2000):
             # Fast path for common patterns
             if self.greeting_patterns.match(query):
                 intent = IntentAnalysis(
@@ -197,7 +275,7 @@ class PersonaConductor:
                     strategy=ResponseStrategy.CONVERSATIONAL,
                     confidence=1.0
                 )
-                self.intent_cache[query_lower] = intent
+                self.intent_cache[cache_key] = intent
                 return intent
             
             if self.thanks_patterns.match(query):
@@ -206,7 +284,16 @@ class PersonaConductor:
                     strategy=ResponseStrategy.CONVERSATIONAL,
                     confidence=1.0
                 )
-                self.intent_cache[query_lower] = intent
+                self.intent_cache[cache_key] = intent
+                return intent
+            
+            if self.goodbye_patterns.match(query):
+                intent = IntentAnalysis(
+                    primary_intent=UserIntent.CONVERSATIONAL,
+                    strategy=ResponseStrategy.CONVERSATIONAL,
+                    confidence=1.0
+                )
+                self.intent_cache[cache_key] = intent
                 return intent
             
             # Use LLM for complex intent analysis
@@ -215,17 +302,21 @@ class PersonaConductor:
             
             try:
                 prompt = format_intent_classification_prompt(query)
-                llm_client = self._get_llm_client()
                 
                 # Use optimized parameters for intent classification
                 from llm_client import call_huggingface
                 response = await call_huggingface(prompt, INTENT_CLASSIFIER_PARAMS)
                 
+                # Check for errors
+                if response.startswith("Error:"):
+                    logger.warning(f"Intent classification failed: {response}")
+                    return self._heuristic_intent_analysis(query)
+                
                 intent = self._parse_intent_response(response)
                 intent.strategy = self._determine_strategy(intent)
                 
                 # Cache the result
-                self.intent_cache[query_lower] = intent
+                self.intent_cache[cache_key] = intent
                 return intent
                 
             except Exception as e:
@@ -233,14 +324,21 @@ class PersonaConductor:
                 return self._heuristic_intent_analysis(query)
     
     def _parse_intent_response(self, response: str) -> IntentAnalysis:
-        """Parse LLM intent response"""
+        """Parse LLM intent response with error handling"""
         try:
+            # Try to find JSON in response
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
                 
+                # Parse intent with validation
                 primary = UserIntent(data.get("primary_intent", "conversational").lower())
-                secondary = [UserIntent(i.lower()) for i in data.get("secondary_intents", [])]
+                secondary = []
+                for intent_str in data.get("secondary_intents", []):
+                    try:
+                        secondary.append(UserIntent(intent_str.lower()))
+                    except ValueError:
+                        continue
                 
                 return IntentAnalysis(
                     primary_intent=primary,
@@ -254,34 +352,50 @@ class PersonaConductor:
         except Exception as e:
             logger.warning(f"Failed to parse intent JSON: {e}")
         
+        # Fallback to heuristic analysis
         return self._heuristic_intent_analysis(response)
     
     def _heuristic_intent_analysis(self, query: str) -> IntentAnalysis:
         """Fast heuristic-based intent analysis"""
         q_lower = query.lower()
         
-        # Pre-compiled patterns for speed
+        # Initialize indicators
         emotional_indicators = []
         info_indicators = []
         
         # Check emotional content
-        if re.search(r'\b(worried|scared|anxious|depressed|sad|afraid|struggling)\b', q_lower):
-            emotional_indicators.append("emotional")
+        emotional_words = ['worried', 'scared', 'anxious', 'depressed', 'sad', 'afraid', 
+                          'struggling', 'nervous', 'stressed', 'overwhelmed', 'concern']
+        for word in emotional_words:
+            if word in q_lower:
+                emotional_indicators.append(word)
         
         # Check informational content
-        if re.search(r'\b(what|how|when|why|side effect|dosage|interaction)\b', q_lower):
-            info_indicators.append("informational")
+        info_patterns = [
+            (r'\b(what|how|when|why|where|who)\b', 'question'),
+            (r'\b(side effect|adverse|reaction)\b', 'side_effects'),
+            (r'\b(dosage|dose|mg|milligram)\b', 'dosage'),
+            (r'\b(interaction|interact)\b', 'interactions'),
+            (r'\b(tell me|explain|describe)\b', 'information_request'),
+        ]
+        
+        for pattern, topic in info_patterns:
+            if re.search(pattern, q_lower):
+                info_indicators.append(topic)
         
         # Determine intent
-        if emotional_indicators and info_indicators:
+        has_emotion = len(emotional_indicators) > 0
+        has_info = len(info_indicators) > 0 or '?' in query
+        
+        if has_emotion and has_info:
             primary = UserIntent.MIXED
             needs_empathy = True
             needs_facts = True
-        elif emotional_indicators:
+        elif has_emotion:
             primary = UserIntent.EMOTIONAL
             needs_empathy = True
             needs_facts = False
-        elif info_indicators or '?' in query:
+        elif has_info:
             primary = UserIntent.INFORMATIONAL
             needs_empathy = False
             needs_facts = True
@@ -317,35 +431,41 @@ class PersonaConductor:
         context: str = ""
     ) -> CompositionComponents:
         """
-        Optimized response composition with parallel processing
+        Optimized response composition with error handling
         """
         components = CompositionComponents()
         components.timing = {}
         
-        with PerformanceTimer(f"compose_{intent.strategy.value}"):
-            if intent.strategy == ResponseStrategy.SYNTHESIZED:
-                # Parallel composition for mixed intents
-                components = await self._synthesized_composition_parallel(query, intent, context)
-                
-            elif intent.strategy == ResponseStrategy.PURE_EMPATHY:
-                # Empathetic companion only
-                start = time.time()
-                components.empathy_component = await self._get_empathetic_response(query, intent)
-                components.synthesized_response = components.empathy_component
-                components.timing["empathy_ms"] = int((time.time() - start) * 1000)
-                
-            elif intent.strategy == ResponseStrategy.PURE_FACTS:
-                # Information navigator only
-                start = time.time()
-                components.facts_component = await self._get_factual_response(query, context)
-                components.synthesized_response = components.facts_component
-                components.timing["facts_ms"] = int((time.time() - start) * 1000)
-                
-            else:  # CONVERSATIONAL
-                # Light conversational response
-                start = time.time()
-                components.synthesized_response = await self._get_conversational_response(query)
-                components.timing["conversational_ms"] = int((time.time() - start) * 1000)
+        with PerformanceTimer(f"compose_{intent.strategy.value}") as timer:
+            try:
+                if intent.strategy == ResponseStrategy.SYNTHESIZED:
+                    # Parallel composition for mixed intents
+                    components = await self._synthesized_composition_parallel(query, intent, context)
+                    
+                elif intent.strategy == ResponseStrategy.PURE_EMPATHY:
+                    # Empathetic companion only
+                    start = time.time()
+                    components.empathy_component = await self._get_empathetic_response(query, intent)
+                    components.synthesized_response = components.empathy_component
+                    components.timing["empathy_ms"] = int((time.time() - start) * 1000)
+                    
+                elif intent.strategy == ResponseStrategy.PURE_FACTS:
+                    # Information navigator only
+                    start = time.time()
+                    components.facts_component = await self._get_factual_response(query, context)
+                    components.synthesized_response = components.facts_component
+                    components.timing["facts_ms"] = int((time.time() - start) * 1000)
+                    
+                else:  # CONVERSATIONAL
+                    # Light conversational response
+                    start = time.time()
+                    components.synthesized_response = await self._get_conversational_response(query)
+                    components.timing["conversational_ms"] = int((time.time() - start) * 1000)
+                    
+            except Exception as e:
+                logger.error(f"Error composing response: {e}")
+                components.synthesized_response = "I apologize, but I'm having trouble generating a response. Please try again."
+                intent.strategy = ResponseStrategy.ERROR_RECOVERY
         
         components.metadata = {
             "strategy": intent.strategy.value,
@@ -362,7 +482,7 @@ class PersonaConductor:
         context: str
     ) -> CompositionComponents:
         """
-        Parallel composition for A10G optimization
+        Parallel composition with timeout and error handling
         """
         from prompts import (
             format_empathetic_prompt,
@@ -373,13 +493,14 @@ class PersonaConductor:
             EMPATHETIC_COMPANION_PARAMS,
             INFORMATION_NAVIGATOR_PARAMS,
             BRIDGE_SYNTHESIZER_PARAMS,
-            ENABLE_PARALLEL_PERSONAS
+            ENABLE_PARALLEL_PERSONAS,
+            PARALLEL_TIMEOUT_SECONDS
         )
         
         components = CompositionComponents()
         
         if ENABLE_PARALLEL_PERSONAS:
-            # TRUE PARALLEL execution on A10G
+            # TRUE PARALLEL execution
             start_parallel = time.time()
             
             empathy_task = asyncio.create_task(
@@ -392,14 +513,29 @@ class PersonaConductor:
             # Wait for both with timeout
             try:
                 empathy_component, facts_component = await asyncio.wait_for(
-                    asyncio.gather(empathy_task, facts_task),
-                    timeout=10.0  # 10 second timeout
+                    asyncio.gather(empathy_task, facts_task, return_exceptions=True),
+                    timeout=PARALLEL_TIMEOUT_SECONDS
                 )
+                
+                # Handle exceptions in results
+                if isinstance(empathy_component, Exception):
+                    logger.error(f"Empathy generation failed: {empathy_component}")
+                    empathy_component = "I understand your concern."
+                
+                if isinstance(facts_component, Exception):
+                    logger.error(f"Facts generation failed: {facts_component}")
+                    facts_component = "Please consult the documentation for more information."
+                
                 components.timing["parallel_ms"] = int((time.time() - start_parallel) * 1000)
+                
             except asyncio.TimeoutError:
-                logger.error("Parallel composition timed out")
+                logger.error(f"Parallel composition timed out after {PARALLEL_TIMEOUT_SECONDS}s")
                 empathy_component = "I understand your concern."
-                facts_component = "Please consult the documentation."
+                facts_component = "Please consult the documentation for more information."
+                
+                # Cancel remaining tasks
+                empathy_task.cancel()
+                facts_task.cancel()
         else:
             # Sequential fallback
             empathy_component = await self._get_empathetic_response_optimized(query, intent)
@@ -407,13 +543,26 @@ class PersonaConductor:
         
         # Synthesis step
         start_synthesis = time.time()
-        synthesis_prompt = format_synthesizer_prompt(
-            empathy_component=empathy_component,
-            facts_component=facts_component
-        )
         
-        from llm_client import call_huggingface
-        synthesized = await call_huggingface(synthesis_prompt, BRIDGE_SYNTHESIZER_PARAMS)
+        try:
+            synthesis_prompt = format_synthesizer_prompt(
+                empathy_component=empathy_component,
+                facts_component=facts_component
+            )
+            
+            from llm_client import call_huggingface
+            synthesized = await call_huggingface(synthesis_prompt, BRIDGE_SYNTHESIZER_PARAMS)
+            
+            # Check for error
+            if synthesized.startswith("Error:"):
+                # Fallback to simple concatenation
+                synthesized = f"{empathy_component} {facts_component}".strip()
+                
+        except Exception as e:
+            logger.error(f"Synthesis failed: {e}")
+            # Fallback to simple concatenation
+            synthesized = f"{empathy_component} {facts_component}".strip()
+        
         components.timing["synthesis_ms"] = int((time.time() - start_synthesis) * 1000)
         
         components.empathy_component = empathy_component
@@ -423,31 +572,49 @@ class PersonaConductor:
         return components
     
     async def _get_empathetic_response_optimized(self, query: str, intent: IntentAnalysis) -> str:
-        """Optimized empathetic response generation"""
-        from prompts import format_empathetic_prompt
-        from config import EMPATHETIC_COMPANION_PARAMS
-        from llm_client import call_huggingface
-        
-        emotional_context = f"User expression: {query}"
-        if intent.emotional_indicators:
-            emotional_context += f"\nDetected emotions: {', '.join(intent.emotional_indicators)}"
-        
-        prompt = format_empathetic_prompt(emotional_context)
-        response = await call_huggingface(prompt, EMPATHETIC_COMPANION_PARAMS)
-        return response.strip()
+        """Optimized empathetic response generation with error handling"""
+        try:
+            from prompts import format_empathetic_prompt
+            from config import EMPATHETIC_COMPANION_PARAMS
+            from llm_client import call_huggingface_with_retry
+            
+            emotional_context = f"User expression: {query}"
+            if intent.emotional_indicators:
+                emotional_context += f"\nDetected emotions: {', '.join(intent.emotional_indicators)}"
+            
+            prompt = format_empathetic_prompt(emotional_context)
+            response = await call_huggingface_with_retry(prompt, EMPATHETIC_COMPANION_PARAMS)
+            
+            if response.startswith("Error:"):
+                return "I understand this is important to you."
+            
+            return response.strip()
+            
+        except Exception as e:
+            logger.error(f"Empathetic response failed: {e}")
+            return "I understand this is important to you."
     
     async def _get_factual_response_optimized(self, query: str, context: str) -> str:
-        """Optimized factual response generation"""
-        from prompts import format_navigator_prompt
-        from config import INFORMATION_NAVIGATOR_PARAMS
-        from llm_client import call_huggingface
-        
-        if not context or not context.strip():
-            return "No relevant information found in documentation."
-        
-        prompt = format_navigator_prompt(query, context)
-        response = await call_huggingface(prompt, INFORMATION_NAVIGATOR_PARAMS)
-        return response.strip()
+        """Optimized factual response generation with error handling"""
+        try:
+            from prompts import format_navigator_prompt
+            from config import INFORMATION_NAVIGATOR_PARAMS
+            from llm_client import call_huggingface_with_retry
+            
+            if not context or not context.strip():
+                return "No relevant information found in documentation."
+            
+            prompt = format_navigator_prompt(query, context)
+            response = await call_huggingface_with_retry(prompt, INFORMATION_NAVIGATOR_PARAMS)
+            
+            if response.startswith("Error:"):
+                return "Information is available in the documentation."
+            
+            return response.strip()
+            
+        except Exception as e:
+            logger.error(f"Factual response failed: {e}")
+            return "Please refer to the documentation for this information."
     
     async def _get_empathetic_response(self, query: str, intent: IntentAnalysis) -> str:
         """Standard empathetic response"""
@@ -458,51 +625,72 @@ class PersonaConductor:
         return await self._get_factual_response_optimized(query, context)
     
     async def _get_conversational_response(self, query: str) -> str:
-        """Fast conversational response"""
+        """Fast conversational response with fallback"""
         # Check for instant responses
         query_lower = query.lower().strip()
         if query_lower in self.instant_responses:
             return self.instant_responses[query_lower]
         
-        # Generate simple response
-        prompt = f"User: {query}\nAssistant:"
-        from config import MODEL_PARAMS
-        params = MODEL_PARAMS.copy()
-        params["max_new_tokens"] = 50  # Very short for conversational
-        
-        from llm_client import call_huggingface
-        response = await call_huggingface(prompt, params)
-        return response.strip()
+        try:
+            # Generate simple response
+            prompt = f"User: {query}\nAssistant:"
+            from config import MODEL_PARAMS
+            params = MODEL_PARAMS.copy()
+            params["max_new_tokens"] = 50  # Very short for conversational
+            
+            from llm_client import call_huggingface
+            response = await call_huggingface(prompt, params)
+            
+            if response.startswith("Error:"):
+                return "I'm here to help. What would you like to know?"
+            
+            return response.strip()
+            
+        except Exception as e:
+            logger.error(f"Conversational response failed: {e}")
+            return "I'm here to help. What would you like to know?"
     
     async def orchestrate_response(self, query: str) -> ConductorDecision:
         """
-        Main orchestration with comprehensive performance tracking
+        Main orchestration with comprehensive error handling and monitoring
         """
         start_time = time.time()
+        self.request_count += 1
         
         try:
             # Check response cache first
-            cache_key = self.response_cache.get_cache_key(query)
-            cached_response = self.response_cache.get(cache_key)
-            if cached_response:
-                return ConductorDecision(
-                    final_response=cached_response,
-                    requires_validation=False,
-                    strategy_used=ResponseStrategy.CACHED,
-                    total_latency_ms=int((time.time() - start_time) * 1000),
-                    debug_info={"cache_hit": True}
-                )
+            if self.response_cache:
+                cache_key = self.response_cache.get_cache_key(query)
+                cached_response = self.response_cache.get(cache_key)
+                if cached_response:
+                    total_time = int((time.time() - start_time) * 1000)
+                    return ConductorDecision(
+                        final_response=cached_response,
+                        requires_validation=False,
+                        strategy_used=ResponseStrategy.CACHED,
+                        total_latency_ms=total_time,
+                        debug_info={
+                            "cache_hit": True,
+                            "cache_stats": self.response_cache.get_stats()
+                        }
+                    )
             
             # Check for instant responses
             query_lower = query.lower().strip()
             if query_lower in self.instant_responses:
                 response = self.instant_responses[query_lower]
-                self.response_cache.put(cache_key, response)
+                
+                # Cache it
+                if self.response_cache:
+                    cache_key = self.response_cache.get_cache_key(query)
+                    self.response_cache.put(cache_key, response)
+                
+                total_time = int((time.time() - start_time) * 1000)
                 return ConductorDecision(
                     final_response=response,
                     requires_validation=False,
                     strategy_used=ResponseStrategy.CONVERSATIONAL,
-                    total_latency_ms=int((time.time() - start_time) * 1000),
+                    total_latency_ms=total_time,
                     debug_info={"instant_response": True}
                 )
             
@@ -511,13 +699,17 @@ class PersonaConductor:
             intent = await self.analyze_intent(query)
             intent_time = int((time.time() - intent_start) * 1000)
             
-            # Step 2: Retrieve context if needed (with caching)
+            # Step 2: Retrieve context if needed
             context = ""
             rag_time = 0
             if intent.needs_facts:
                 rag_start = time.time()
-                retriever = self._get_retriever()
-                context = retriever(query)
+                try:
+                    retriever = self._get_retriever()
+                    context = retriever(query)
+                except Exception as e:
+                    logger.error(f"RAG retrieval failed: {e}")
+                    context = ""
                 rag_time = int((time.time() - rag_start) * 1000)
             
             # Step 3: Compose response
@@ -526,11 +718,13 @@ class PersonaConductor:
             compose_time = int((time.time() - compose_start) * 1000)
             
             # Cache successful responses
-            if components.synthesized_response:
+            if self.response_cache and components.synthesized_response and not components.synthesized_response.startswith("Error"):
+                cache_key = self.response_cache.get_cache_key(query, context)
                 self.response_cache.put(cache_key, components.synthesized_response)
             
             # Build decision with detailed timing
             total_time = int((time.time() - start_time) * 1000)
+            self.total_latency += total_time
             
             decision = ConductorDecision(
                 final_response=components.synthesized_response,
@@ -553,8 +747,12 @@ class PersonaConductor:
                         "total_ms": total_time,
                         **components.timing
                     },
-                    "cache_key": cache_key[:8],
-                    "context_length": len(context)
+                    "context_length": len(context),
+                    "performance_stats": {
+                        "request_count": self.request_count,
+                        "error_count": self.error_count,
+                        "avg_latency": self.total_latency / max(1, self.request_count)
+                    }
                 }
             )
             
@@ -566,13 +764,20 @@ class PersonaConductor:
             return decision
             
         except Exception as e:
+            self.error_count += 1
             logger.error(f"Orchestration failed: {e}", exc_info=True)
+            
+            total_time = int((time.time() - start_time) * 1000)
+            
             return ConductorDecision(
                 final_response="I apologize, but I'm having trouble processing your request. Please try again.",
                 requires_validation=False,
-                strategy_used=ResponseStrategy.CONVERSATIONAL,
-                total_latency_ms=int((time.time() - start_time) * 1000),
-                debug_info={"error": str(e)}
+                strategy_used=ResponseStrategy.ERROR_RECOVERY,
+                total_latency_ms=total_time,
+                debug_info={
+                    "error": str(e),
+                    "error_count": self.error_count
+                }
             )
 
 # ============================================================================
@@ -602,24 +807,47 @@ class ConversationalAgent:
         return self.conductor.greeting_patterns.match(query) is not None
     
     def process_query(self, query: str) -> AgentDecision:
+        """Synchronous wrapper for async conductor"""
         import asyncio
         
         try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        decision = loop.run_until_complete(
-            self.conductor.orchestrate_response(query)
-        )
-        
-        return AgentDecision(
-            mode=ConversationMode.GENERAL,
-            requires_generation=True,
-            context_str=decision.context_used,
-            debug_info=decision.debug_info
-        )
+            # Get or create event loop
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # Run async method
+            if loop.is_running():
+                # We're already in an async context
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        asyncio.run,
+                        self.conductor.orchestrate_response(query)
+                    )
+                    decision = future.result()
+            else:
+                decision = loop.run_until_complete(
+                    self.conductor.orchestrate_response(query)
+                )
+            
+            return AgentDecision(
+                mode=ConversationMode.GENERAL,
+                requires_generation=True,
+                context_str=decision.context_used,
+                debug_info=decision.debug_info
+            )
+            
+        except Exception as e:
+            logger.error(f"Legacy adapter error: {e}")
+            return AgentDecision(
+                mode=ConversationMode.GENERAL,
+                requires_generation=True,
+                context_str="",
+                debug_info={"error": str(e)}
+            )
 
 # ============================================================================
 # SINGLETON MANAGEMENT
@@ -629,13 +857,17 @@ _conductor_instance: Optional[PersonaConductor] = None
 _agent_instance: Optional[ConversationalAgent] = None
 
 def get_persona_conductor() -> PersonaConductor:
+    """Get singleton PersonaConductor instance"""
     global _conductor_instance
     if _conductor_instance is None:
         _conductor_instance = PersonaConductor()
+        logger.info("Created PersonaConductor singleton")
     return _conductor_instance
 
 def get_conversational_agent() -> ConversationalAgent:
+    """Get singleton ConversationalAgent instance"""
     global _agent_instance
     if _agent_instance is None:
         _agent_instance = ConversationalAgent()
+        logger.info("Created ConversationalAgent singleton")
     return _agent_instance

@@ -1,4 +1,4 @@
-# app.py - Safe Migration Version with Feature Detection
+# app.py - Complete Version with All Improvements
 
 import os
 import streamlit as st
@@ -6,7 +6,9 @@ import logging
 import sys
 import asyncio
 import time
+import atexit
 from typing import Dict, Any, Optional
+from datetime import datetime
 
 # Configure logging FIRST
 logging.basicConfig(
@@ -33,7 +35,70 @@ def detect_architecture():
 ARCHITECTURE = detect_architecture()
 
 # ============================================================================
-# LAZY LOADING OF DEPENDENCIES (with architecture detection)
+# PERFORMANCE MONITORING
+# ============================================================================
+
+class PerformanceMonitor:
+    """Track and display performance metrics"""
+    def __init__(self):
+        self.metrics = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "total_latency": 0,
+            "cache_hits": 0,
+            "slow_requests": 0,
+        }
+        self.request_history = []
+        self.max_history = 100
+    
+    def record_request(self, success: bool, latency_ms: int, cached: bool = False):
+        """Record a request's performance"""
+        self.metrics["total_requests"] += 1
+        
+        if success:
+            self.metrics["successful_requests"] += 1
+        else:
+            self.metrics["failed_requests"] += 1
+        
+        self.metrics["total_latency"] += latency_ms
+        
+        if cached:
+            self.metrics["cache_hits"] += 1
+        
+        if latency_ms > 5000:  # Slow request threshold
+            self.metrics["slow_requests"] += 1
+        
+        # Keep history
+        self.request_history.append({
+            "timestamp": datetime.now(),
+            "success": success,
+            "latency_ms": latency_ms,
+            "cached": cached
+        })
+        
+        # Trim history
+        if len(self.request_history) > self.max_history:
+            self.request_history = self.request_history[-self.max_history:]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get current statistics"""
+        total = max(1, self.metrics["total_requests"])
+        
+        return {
+            "total_requests": self.metrics["total_requests"],
+            "success_rate": (self.metrics["successful_requests"] / total) * 100,
+            "avg_latency_ms": self.metrics["total_latency"] / total,
+            "cache_hit_rate": (self.metrics["cache_hits"] / total) * 100,
+            "slow_request_rate": (self.metrics["slow_requests"] / total) * 100,
+        }
+
+# Initialize performance monitor
+if "performance_monitor" not in st.session_state:
+    st.session_state.performance_monitor = PerformanceMonitor()
+
+# ============================================================================
+# LAZY LOADING OF DEPENDENCIES
 # ============================================================================
 
 @st.cache_resource
@@ -81,8 +146,44 @@ def load_dependencies():
     
     return deps
 
+# ============================================================================
+# CLEANUP REGISTRATION
+# ============================================================================
+
+def register_cleanup():
+    """Register cleanup handlers for graceful shutdown"""
+    async def cleanup_resources():
+        """Async cleanup of resources"""
+        try:
+            from llm_client import cleanup
+            await cleanup()
+            logger.info("Resources cleaned up successfully")
+        except Exception as e:
+            logger.error(f"Cleanup failed: {e}")
+    
+    def sync_cleanup():
+        """Synchronous wrapper for cleanup"""
+        try:
+            # Try to get the running loop
+            try:
+                loop = asyncio.get_running_loop()
+                # Schedule cleanup as a task
+                loop.create_task(cleanup_resources())
+            except RuntimeError:
+                # No running loop, create one
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(cleanup_resources())
+        except Exception as e:
+            logger.error(f"Sync cleanup failed: {e}")
+    
+    atexit.register(sync_cleanup)
+    logger.info("Cleanup handlers registered")
+
+# Load dependencies and register cleanup
 try:
     deps = load_dependencies()
+    register_cleanup()
     logger.info(f"All dependencies loaded successfully. Architecture: {ARCHITECTURE}")
 except Exception as e:
     logger.error(f"Failed to load dependencies: {e}", exc_info=True)
@@ -112,33 +213,67 @@ conversational_agent = deps["get_conversational_agent"]()
 def run_async(coro):
     """Run an async coroutine from Streamlit's sync context"""
     try:
+        # Try to get existing loop
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        # No loop running, need to handle differently
         loop = None
     
     if loop and loop.is_running():
+        # We're in an async context, use thread pool
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(asyncio.run, coro)
             return future.result()
     else:
+        # We can run directly
         return asyncio.run(coro)
+
+# ============================================================================
+# ERROR HANDLING WRAPPER
+# ============================================================================
+
+async def safe_execute(coro, fallback_response: str = "I apologize, but I encountered an error. Please try again."):
+    """Execute a coroutine with error handling"""
+    try:
+        return await coro
+    except asyncio.CancelledError:
+        logger.warning("Request was cancelled")
+        return {
+            "success": False,
+            "response": "Request was cancelled.",
+            "approved": False,
+            "debug_info": {"error": "CancelledError"}
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error in safe_execute: {e}", exc_info=True)
+        return {
+            "success": False,
+            "response": fallback_response,
+            "approved": False,
+            "debug_info": {"error": str(e)}
+        }
 
 # ============================================================================
 # PERSONA CONDUCTOR HANDLER (New Architecture)
 # ============================================================================
 
 async def handle_query_with_conductor(query: str) -> Dict[str, Any]:
-    """Handler for new Persona Conductor architecture"""
+    """Handler for new Persona Conductor architecture with improved error handling"""
     conductor = deps["get_persona_conductor"]()
     validator = deps["get_persona_validator"]()
     
     start_time = time.time()
+    cached = False
     
     try:
         # Step 1: Orchestrate response
         logger.info(f"Orchestrating response for: {query[:50]}...")
         conductor_decision = await conductor.orchestrate_response(query)
+        
+        # Check if response was cached
+        if conductor_decision.strategy_used.value == "cached":
+            cached = True
         
         # Step 2: Validate if needed
         if conductor_decision.requires_validation:
@@ -169,6 +304,14 @@ async def handle_query_with_conductor(query: str) -> Dict[str, Any]:
             conversation_manager.add_turn("assistant", final_response)
         
         total_time = time.time() - start_time
+        latency_ms = int(total_time * 1000)
+        
+        # Record performance
+        st.session_state.performance_monitor.record_request(
+            success=True,
+            latency_ms=latency_ms,
+            cached=cached
+        )
         
         return {
             "success": True,
@@ -178,19 +321,28 @@ async def handle_query_with_conductor(query: str) -> Dict[str, Any]:
             "debug_info": {
                 **conductor_decision.debug_info,
                 "validation": validation_info,
-                "latency_ms": int(total_time * 1000),
-                "architecture": "persona_conductor"
+                "latency_ms": latency_ms,
+                "architecture": "persona_conductor",
+                "cached": cached
             }
         }
         
     except Exception as e:
         logger.error(f"Error in conductor: {e}", exc_info=True)
+        
+        # Record failure
+        latency_ms = int((time.time() - start_time) * 1000)
+        st.session_state.performance_monitor.record_request(
+            success=False,
+            latency_ms=latency_ms
+        )
+        
         return {
             "success": False,
-            "response": "I apologize, but I encountered an error.",
+            "response": "I apologize, but I encountered an error processing your request. Please try again.",
             "approved": False,
             "strategy": "error",
-            "debug_info": {"error": str(e)}
+            "debug_info": {"error": str(e), "latency_ms": latency_ms}
         }
 
 # ============================================================================
@@ -198,7 +350,7 @@ async def handle_query_with_conductor(query: str) -> Dict[str, Any]:
 # ============================================================================
 
 async def handle_query_legacy(query: str) -> Dict[str, Any]:
-    """Handler for legacy architecture"""
+    """Handler for legacy architecture with improved error handling"""
     start_time = time.time()
     
     try:
@@ -237,11 +389,18 @@ async def handle_query_legacy(query: str) -> Dict[str, Any]:
         draft_response = await deps["call_base_assistant"](prompt_for_llm)
         
         if draft_response.startswith("Error:"):
+            # Record failure
+            latency_ms = int((time.time() - start_time) * 1000)
+            st.session_state.performance_monitor.record_request(
+                success=False,
+                latency_ms=latency_ms
+            )
+            
             return {
                 "success": False,
-                "response": "I'm sorry, there was an issue. Please try again.",
+                "response": "I'm sorry, there was an issue generating a response. Please try again.",
                 "approved": False,
-                "debug_info": {"error": draft_response},
+                "debug_info": {"error": draft_response, "latency_ms": latency_ms},
             }
         
         # Guard validation
@@ -258,6 +417,13 @@ async def handle_query_legacy(query: str) -> Dict[str, Any]:
             conversation_manager.add_turn("assistant", final_response_text)
         
         total_time = time.time() - start_time
+        latency_ms = int(total_time * 1000)
+        
+        # Record performance
+        st.session_state.performance_monitor.record_request(
+            success=True,
+            latency_ms=latency_ms
+        )
         
         return {
             "success": True,
@@ -266,18 +432,26 @@ async def handle_query_legacy(query: str) -> Dict[str, Any]:
             "debug_info": {
                 **agent_decision.debug_info,
                 "guard_reasoning": guard_reasoning,
-                "latency_ms": int(total_time * 1000),
+                "latency_ms": latency_ms,
                 "architecture": "legacy"
             }
         }
         
     except Exception as e:
         logger.error(f"Error in legacy handler: {e}", exc_info=True)
+        
+        # Record failure
+        latency_ms = int((time.time() - start_time) * 1000)
+        st.session_state.performance_monitor.record_request(
+            success=False,
+            latency_ms=latency_ms
+        )
+        
         return {
             "success": False,
-            "response": "I apologize, but I encountered an error.",
+            "response": "I apologize, but I encountered an error. Please try again.",
             "approved": False,
-            "debug_info": {"error": str(e)}
+            "debug_info": {"error": str(e), "latency_ms": latency_ms}
         }
 
 # ============================================================================
@@ -287,51 +461,75 @@ async def handle_query_legacy(query: str) -> Dict[str, Any]:
 async def handle_query(query: str) -> Dict[str, Any]:
     """Route to appropriate handler based on architecture"""
     if ARCHITECTURE == "persona_conductor":
-        return await handle_query_with_conductor(query)
+        return await safe_execute(handle_query_with_conductor(query))
     else:
-        return await handle_query_legacy(query)
+        return await safe_execute(handle_query_legacy(query))
 
 # ============================================================================
 # SIDEBAR UI
 # ============================================================================
 
 with st.sidebar:
+    st.header("⚙️ Settings & Monitoring")
+    
+    # Architecture Info
     if ARCHITECTURE == "persona_conductor":
-        st.header("🎭 Persona Orchestra Settings")
-        st.success("✨ New Architecture Active!")
+        st.success("✨ Persona Orchestra Active")
         
         debug_mode = st.checkbox("Debug Mode", value=False)
         show_personas = st.checkbox("Show Persona Breakdown", value=False)
         show_validation = st.checkbox("Show Validation Details", value=False)
+        show_performance = st.checkbox("Show Performance Metrics", value=True)
         
-        if debug_mode:
-            st.info("Persona Conductor: Active\nDynamic Synthesis: Enabled")
     else:
-        st.header("🔧 Settings")
-        st.warning("Legacy Architecture Active")
-        st.info("New Persona system not yet deployed")
+        st.warning("⚠️ Legacy Architecture Active")
+        st.info("Persona system not yet deployed")
         
         debug_mode = st.checkbox("Debug Mode", value=False)
         show_context = st.checkbox("Show Retrieved Context", value=False)
+        show_performance = st.checkbox("Show Performance Metrics", value=True)
         show_personas = False
         show_validation = False
     
+    # Performance Metrics
+    if show_performance:
+        st.subheader("📊 Performance Metrics")
+        stats = st.session_state.performance_monitor.get_stats()
+        
+        if stats["total_requests"] > 0:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Success Rate", f"{stats['success_rate']:.1f}%")
+                st.metric("Cache Hits", f"{stats['cache_hit_rate']:.1f}%")
+            with col2:
+                st.metric("Avg Latency", f"{stats['avg_latency_ms']:.0f}ms")
+                st.metric("Slow Requests", f"{stats['slow_request_rate']:.1f}%")
+        else:
+            st.info("No requests yet")
+    
+    # Conversation Management
     st.subheader("💬 Conversation")
-    if st.button("New Conversation", type="primary"):
+    if st.button("🔄 New Conversation", type="primary"):
         conversation_manager.start_new_conversation()
         st.success("Started new conversation")
         st.rerun()
     
-    # Architecture info
+    # System Info
     with st.expander("ℹ️ System Info"):
         if ARCHITECTURE == "persona_conductor":
             st.markdown("""
             **Architecture:** Dynamic Persona Synthesis ✨
             
-            **Personas:**
+            **Active Personas:**
             - 🤗 Empathetic Companion
             - 📚 Information Navigator
             - 🎭 Bridge Synthesizer
+            
+            **Features:**
+            - Response caching
+            - Parallel processing
+            - Request batching
+            - Retry logic
             """)
         else:
             st.markdown("""
@@ -342,6 +540,26 @@ with st.sidebar:
             - Post-generation validation
             - Heuristic + LLM guard
             """)
+    
+    # Troubleshooting
+    with st.expander("🔧 Troubleshooting"):
+        st.markdown("""
+        **Common Issues:**
+        
+        **Slow responses?**
+        - Check if caching is enabled
+        - Verify A10G endpoint is responsive
+        - Consider reducing token limits
+        
+        **Errors occurring?**
+        - Check HF_TOKEN is valid
+        - Verify endpoint URL is correct
+        - Look at debug logs for details
+        
+        **Session issues?**
+        - Try starting a new conversation
+        - Refresh the page if needed
+        """)
 
 # ============================================================================
 # MAIN CHAT UI
@@ -356,53 +574,92 @@ for turn in conversation_manager.get_turns():
 
 # Handle user input
 if query := st.chat_input("Type your question..."):
+    # Display user message
     st.chat_message("user").write(query)
     
+    # Process assistant response
     with st.chat_message("assistant"):
+        # Choose spinner text based on architecture
         if ARCHITECTURE == "persona_conductor":
             spinner_text = "🎭 Orchestrating response..."
         else:
             spinner_text = "🤖 Thinking..."
         
+        # Process query with spinner
         with st.spinner(spinner_text):
             result = run_async(handle_query(query))
         
+        # Handle result
         if result["success"]:
-            if not result["approved"]:
+            # Show warning if response was modified
+            if not result.get("approved", True):
                 st.warning("⚠️ Response modified for safety")
             
+            # Display response
             st.write(result["response"])
             
-            # Show personas (only for new architecture)
+            # Show latency if available
+            if "latency_ms" in result.get("debug_info", {}):
+                latency = result["debug_info"]["latency_ms"]
+                if latency > 5000:
+                    st.caption(f"⏱️ Response time: {latency/1000:.1f}s (slower than usual)")
+                elif result.get("debug_info", {}).get("cached"):
+                    st.caption(f"⚡ Cached response ({latency}ms)")
+            
+            # Show personas breakdown (new architecture only)
             if show_personas and ARCHITECTURE == "persona_conductor":
-                if "personas_used" in result.get("debug_info", {}):
-                    with st.expander("🎭 Personas Used"):
-                        personas = result["debug_info"]["personas_used"]
-                        for persona in personas:
-                            if persona == "empathetic_companion":
-                                st.write("🤗 **Empathetic Companion**")
-                            elif persona == "information_navigator":
-                                st.write("📚 **Information Navigator**")
-                            elif persona == "bridge_synthesizer":
-                                st.write("🎭 **Bridge Synthesizer**")
+                if "strategy" in result:
+                    with st.expander("🎭 Response Strategy"):
+                        strategy = result["strategy"]
+                        st.write(f"**Strategy:** {strategy}")
+                        
+                        if strategy == "synthesized":
+                            st.write("Used all three personas:")
+                            st.write("- 🤗 Empathetic Companion")
+                            st.write("- 📚 Information Navigator")
+                            st.write("- 🎭 Bridge Synthesizer")
+                        elif strategy == "pure_empathy":
+                            st.write("- 🤗 Empathetic Companion only")
+                        elif strategy == "pure_facts":
+                            st.write("- 📚 Information Navigator only")
+                        elif strategy == "conversational":
+                            st.write("- 💬 Light conversational response")
+                        elif strategy == "cached":
+                            st.write("- ⚡ Retrieved from cache")
             
-            # Show context (legacy architecture)
-            if ARCHITECTURE == "legacy" and show_context:
-                if "context_retrieved_length" in result.get("debug_info", {}):
-                    with st.expander("📚 Retrieved Context"):
-                        st.write(f"Context length: {result['debug_info']['context_retrieved_length']}")
+            # Show validation details
+            if show_validation and "validation" in result.get("debug_info", {}):
+                with st.expander("🛡️ Validation Details"):
+                    val = result["debug_info"]["validation"]
+                    st.write(f"**Result:** {val.get('result', 'unknown')}")
+                    if "confidence" in val:
+                        st.write(f"**Confidence:** {val['confidence']:.2f}")
+                    if "reasoning" in val:
+                        st.write(f"**Reasoning:** {val['reasoning']}")
             
-            # Debug info
+            # Show debug info
             if debug_mode:
                 with st.expander("🔧 Debug Information"):
-                    if "latency_ms" in result.get("debug_info", {}):
-                        st.metric("Response Time", f"{result['debug_info']['latency_ms']}ms")
+                    # Show performance timing
+                    if "timing" in result.get("debug_info", {}):
+                        st.write("**Performance Breakdown:**")
+                        timing = result["debug_info"]["timing"]
+                        for key, value in timing.items():
+                            st.write(f"- {key}: {value}ms")
+                    
+                    # Show full debug info
                     st.json(result.get("debug_info", {}))
         else:
+            # Handle error
             st.error(result["response"])
+            
+            if debug_mode and "debug_info" in result:
+                with st.expander("🔧 Error Details"):
+                    st.json(result["debug_info"])
 
 # Footer
+st.divider()
 if ARCHITECTURE == "persona_conductor":
-    st.caption("🎭 Powered by Dynamic Persona Synthesis")
+    st.caption("🎭 Powered by Dynamic Persona Synthesis • A10G Optimized")
 else:
-    st.caption("🤖 Powered by Legacy Architecture")
+    st.caption("🤖 Powered by Legacy Architecture • Consider upgrading to Persona system")
