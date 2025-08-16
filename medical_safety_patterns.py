@@ -144,9 +144,21 @@ class SimplifiedMedicalDetector:
         return has_child and has_medication
     
     def _indicates_dosage_change(self, text: str) -> bool:
-        """Detect intent to modify dosage"""
+        """Detect intent to modify dosage or ask about safe amounts"""
+        # CRITICAL: Catch "safe amount" and "maximum" queries
+        unsafe_dose_phrases = [
+            'most i can', 'maximum', 'max dose', 'safely take',
+            'how much can', 'how many can', 'safe to take',
+            'feeling bad', 'feeling really', 'severe pain',
+            'unbearable', 'excruciating'
+        ]
+        
+        # Check for these phrases first
+        if any(phrase in text for phrase in unsafe_dose_phrases):
+            return True
+        
         # Look for dosage words near change words
-        has_dosage_term = any(term in text for term in ['dose', 'dosage', 'pill', 'tablet', 'medication'])
+        has_dosage_term = any(term in text for term in ['dose', 'dosage', 'pill', 'tablet', 'medication', 'journvax'])
         has_change_term = any(term in text for term in self.dosage_concepts)
         
         # Also check for pain-based reasoning

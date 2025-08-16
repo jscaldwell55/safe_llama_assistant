@@ -24,13 +24,18 @@ class ComplianceViolation(Enum):
     NONE = "none"
 
 # ============================================================================
-# PRE-APPROVED TEMPLATES (No hedging, deterministic)
+# PRE-APPROVED TEMPLATES (No hedging, deterministic, NO medical details)
 # ============================================================================
 
 APPROVED_REFUSAL_TEMPLATES = {
     "dosing_advice": (
         "I cannot provide dosing advice. "
-        "Take Journvax exactly as prescribed by your healthcare provider."
+        "Contact your healthcare provider immediately for guidance."
+    ),
+    
+    "maximum_dose": (
+        "I cannot advise on maximum doses or safe amounts. "
+        "Contact your healthcare provider immediately for guidance."
     ),
     
     "prescription_sharing": (
@@ -39,23 +44,27 @@ APPROVED_REFUSAL_TEMPLATES = {
     ),
     
     "pediatric_without_rx": (
-        "I cannot provide pediatric dosing information without a prescription. "
-        "Consult a pediatrician for appropriate medical care."
+        "I cannot provide pediatric dosing information. "
+        "Consult a pediatrician immediately."
     ),
     
     "illegal_violent": (
-        "I cannot and will not provide information about illegal or harmful activities. "
-        "Please seek appropriate resources for your needs."
+        "I cannot provide information about illegal or harmful activities."
     ),
     
     "sexual_content": (
         "I cannot create or discuss inappropriate content. "
-        "I'm here to provide pharmaceutical information about Journvax."
+        "I provide pharmaceutical information about Journvax."
     ),
     
     "medical_advice": (
         "I cannot provide medical advice. "
-        "Consult your healthcare provider for medical decisions."
+        "Contact your healthcare provider."
+    ),
+    
+    "self_medication": (
+        "I cannot advise on self-medication or changing your dose. "
+        "Contact your healthcare provider immediately."
     ),
     
     "off_topic": (
@@ -108,32 +117,59 @@ class ComplianceValidator:
             "dosage", "administration", "interaction"
         ]
     
-    def validate_refusal(self, response: str, refusal_type: str) -> Tuple[bool, str]:
+    def validate_response(self, response: str, query: str) -> Tuple[bool, str, str]:
         """
-        Validate that a refusal response is compliant.
-        Returns: (is_compliant, corrected_response)
+        Check if a generated response contains unsafe medical advice or dosing info.
+        Returns: (is_safe, issue_description, safe_alternative)
         """
         response_lower = response.lower()
+        query_lower = query.lower()
         
-        # Check for hedging in refusal
-        for hedge in self.hedging_phrases:
-            if hedge in response_lower:
-                # Replace with approved template
-                approved = APPROVED_REFUSAL_TEMPLATES.get(
-                    refusal_type, 
-                    APPROVED_REFUSAL_TEMPLATES["medical_advice"]
-                )
-                return False, approved
+        # CRITICAL: Check for ANY dosing information in response to unsafe queries
+        unsafe_query_indicators = [
+            'how much', 'maximum', 'safely take', 'double dose', 
+            'extra', 'more than', 'increase', 'feeling bad', 'severe pain'
+        ]
         
-        # Ensure refusal is clear and starts appropriately
-        if not response_lower.startswith(("i cannot", "i will not", "i do not")):
-            approved = APPROVED_REFUSAL_TEMPLATES.get(
-                refusal_type,
-                APPROVED_REFUSAL_TEMPLATES["medical_advice"]
-            )
-            return False, approved
+        is_unsafe_query = any(indicator in query_lower for indicator in unsafe_query_indicators)
         
-        return True, response
+        if is_unsafe_query:
+            # Check if response contains ANY medical details
+            medical_details = [
+                '100mg', '100 mg', 'starting dose', 'recommended dose',
+                'empty stomach', 'swallow whole', 'before eating', 'after eating',
+                'tablet', 'chewing', 'crushing', 'side effect'
+            ]
+            
+            contains_medical = any(detail in response_lower for detail in medical_details)
+            
+            if contains_medical:
+                # Response is mixing refusal with medical content - NOT compliant
+                return False, "Contains medical details in response to unsafe query", APPROVED_REFUSAL_TEMPLATES["maximum_dose"]
+        
+        # Check for "we should" language (prescriptive)
+        if re.search(r'\bwe should\b', response_lower):
+            return False, "Contains prescriptive language", APPROVED_REFUSAL_TEMPLATES["dosing_advice"]
+        
+        # Check for specific mg amounts
+        if re.search(r'\b\d+\s*mg\b', response_lower):
+            # Unless it's clearly labeled as "according to the label" or similar
+            if not re.search(r'(according to|per the|as stated in) (the )?(label|guide|documentation)', response_lower):
+                return False, "Contains specific dosing amounts", APPROVED_REFUSAL_TEMPLATES["dosing_advice"]
+        
+        # Check for administration instructions mixed with refusals
+        admin_instructions = [
+            'empty stomach', 'with food', 'without food',
+            'swallow whole', 'do not crush', 'do not chew',
+            'before eating', 'after eating', 'with water'
+        ]
+        
+        if any(instruction in response_lower for instruction in admin_instructions):
+            # Check if this is in response to a dosing/safety question
+            if is_unsafe_query:
+                return False, "Contains administration instructions for unsafe query", APPROVED_REFUSAL_TEMPLATES["dosing_advice"]
+        
+        return True, "", ""
     
     def validate_medical_content(self, response: str, query: str) -> Tuple[bool, str]:
         """
