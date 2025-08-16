@@ -1,4 +1,4 @@
-# llm_client.py - Complete Version with All Fixes
+# llm_client.py - Final Version with Event Loop & Output Cleaning Fixes
 
 import aiohttp
 import asyncio
@@ -31,6 +31,23 @@ RETRY_DELAY_BASE = 1.0  # Base delay in seconds
 RETRY_DELAY_MAX = 10.0  # Maximum delay in seconds
 
 # ============================================================================
+# EVENT LOOP MANAGEMENT FOR STREAMLIT
+# ============================================================================
+
+def get_or_create_event_loop():
+    """Get the current event loop or create a new one if needed"""
+    try:
+        loop = asyncio.get_running_loop()
+        if loop.is_closed():
+            raise RuntimeError("Event loop is closed")
+        return loop
+    except RuntimeError:
+        # Create new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
+# ============================================================================
 # REQUEST BATCHING FOR A10G EFFICIENCY
 # ============================================================================
 
@@ -58,7 +75,8 @@ class RequestBatcher:
         if self._closed:
             raise RuntimeError("RequestBatcher is closed")
             
-        future = asyncio.Future()
+        loop = get_or_create_event_loop()
+        future = loop.create_future()
         request = BatchRequest(prompt, parameters, future, time.time())
         
         async with self.batch_lock:
@@ -131,7 +149,7 @@ class RequestBatcher:
                 result = await client.generate_response(request.prompt, request.parameters)
                 
                 # Check if result is an error
-                if result.startswith("Error:") and attempt < MAX_RETRIES - 1:
+                if result.startswith("Error:") and "Event loop" not in result and attempt < MAX_RETRIES - 1:
                     raise Exception(result)
                     
                 return result
@@ -139,6 +157,11 @@ class RequestBatcher:
             except Exception as e:
                 last_error = e
                 request.retry_count = attempt + 1
+                
+                # If it's an event loop error, recreate the client
+                if "Event loop" in str(e) or "Session is closed" in str(e):
+                    logger.warning("Event loop/session issue detected, resetting client")
+                    await reset_singleton_client()
                 
                 if attempt < MAX_RETRIES - 1:
                     delay = min(RETRY_DELAY_BASE * (2 ** attempt), RETRY_DELAY_MAX)
@@ -168,109 +191,106 @@ class RequestBatcher:
 request_batcher = RequestBatcher() if ENABLE_REQUEST_BATCHING else None
 
 # ============================================================================
-# ENHANCED OUTPUT CLEANING
+# ENHANCED OUTPUT CLEANING - FIXED FOR PROPER FORMATTING
 # ============================================================================
 
 def clean_model_output(text: str) -> str:
     """
-    Enhanced cleaning for A10G responses with chain-of-thought removal
+    Enhanced cleaning for A10G responses - removes extraction artifacts and formats naturally
     """
     if not text:
         return ""
     
+    original_text = text  # Keep original for debugging
+    
+    # Remove extraction format artifacts FIRST
+    text = re.sub(r'\*\*Extracted Information:\*\*\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^Extracted Information:\s*', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'^\*\*.*?Information.*?:\*\*\s*', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    
     # Remove role markers
     text = text.strip()
-    for prefix in ["Assistant:", "assistant:", "ASSISTANT:", "Bot:", "AI:", "Model:", "Response:"]:
+    for prefix in ["Assistant:", "assistant:", "ASSISTANT:", "Bot:", "AI:", "Model:", "Response:", "Navigator:", "Information Navigator:"]:
         if text.startswith(prefix):
             text = text[len(prefix):].lstrip()
     
+    # Convert bullet points to natural text
+    has_bullets = '•' in text or re.search(r'^\s*[-*]\s+', text, re.MULTILINE)
+    
+    if has_bullets:
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            # Skip empty lines
+            if not line:
+                continue
+            # Remove bullet markers
+            line = re.sub(r'^[•\-\*]\s*', '', line)
+            # Skip headers
+            if line and not line.endswith(':'):
+                # Ensure line ends with period if it doesn't have punctuation
+                if line and line[-1] not in '.!?':
+                    line += '.'
+                cleaned_lines.append(line)
+        
+        # Join facts with better flow
+        if cleaned_lines:
+            # Group related facts
+            result = []
+            for i, line in enumerate(cleaned_lines):
+                if i == 0:
+                    result.append(line)
+                elif 'mg' in line.lower() or 'tablet' in line.lower() or 'dose' in line.lower():
+                    # Group dosage information
+                    result.append(f" {line}")
+                else:
+                    result.append(f" {line}")
+            
+            text = ''.join(result)
+    
     # Remove chain-of-thought patterns
     cot_patterns = [
-        # Step patterns
         r"^\*\*Step \d+:.*?\*\*\s*",
         r"^Step \d+:.*?\n",
-        r"^\d+\.\s*\*\*.*?\*\*\s*",
-        
-        # Thinking patterns
         r"^Let me.*?:\s*",
         r"^I need to.*?:\s*",
-        r"^First,.*?Second,.*?Finally,\s*",
-        r"^Thinking step by step.*?\n",
-        r"^Let's think about this.*?\n",
-        
-        # Final answer patterns
-        r"^(?:The )?[Ff]inal (?:answer|response) is:\s*",
-        r"^Here'?s? (?:my|the) response:\s*",
-        r"^My (?:response|answer):\s*",
         r"^Based on the (?:context|documentation):\s*",
-        
-        # Meta-commentary
-        r"\*\*.*?acknowledge.*?\*\*\s*",
-        r"\*\*.*?express.*?\*\*\s*",
-        r"^\[.*?\]\s*",  # Remove bracketed meta text
+        r"^According to the documentation:\s*",
+        r"^From the documentation:\s*",
+        r"^The documentation states:\s*",
+        r"^Here's what I found:\s*",
+        r"^Here is the information:\s*",
+        r"^\*\*.*?acknowledge.*?\*\*\s*",
+        r"^\[.*?\]\s*",
         r"^Note:.*?\n",
-        r"^Important:.*?\n",
-        r"^Remember:.*?\n",
     ]
     
     for pattern in cot_patterns:
         text = re.sub(pattern, "", text, flags=re.MULTILINE | re.IGNORECASE)
     
-    # Extract content after "final answer" markers
-    final_markers = [
-        "The final answer is:",
-        "Final response:",
-        "Final answer:",
-        "Here's my response:",
-        "My response is:",
-        "The answer is:",
-    ]
+    # Clean up formatting artifacts
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Remove bold markdown
+    text = re.sub(r'__(.*?)__', r'\1', text)  # Remove underline markdown
+    text = re.sub(r'(?<!\*)\*(?!\*)(.*?)\*', r'\1', text)  # Remove single asterisk italics
     
-    for marker in final_markers:
-        if marker.lower() in text.lower():
-            parts = re.split(re.escape(marker), text, flags=re.IGNORECASE)
-            if len(parts) > 1:
-                text = parts[-1].strip()
-                break
+    # Fix spacing issues
+    text = re.sub(r'\n\s*\n', ' ', text)  # Multiple newlines to space
+    text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single
+    text = text.strip()
     
-    # Handle special separators
-    if "×" in text:
-        parts = text.split("×")
-        for part in reversed(parts):
-            cleaned = part.strip()
-            if cleaned and not any(
-                keyword in cleaned.lower() 
-                for keyword in ["step", "acknowledge", "express", "should", "need to", "let me", "first"]
-            ):
-                text = cleaned
-                break
-    
-    # Remove duplicate sentences
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    seen = set()
-    unique = []
-    for sent in sentences:
-        sent_clean = sent.strip().lower()
-        if sent_clean and sent_clean not in seen:
-            seen.add(sent_clean)
-            unique.append(sent.strip())
-    
-    if len(unique) < len(sentences):
-        text = ' '.join(unique)
-    
-    # Clean up artifacts
-    text = re.sub(r"(?:#+\s*)+$", "", text).rstrip()
-    text = re.sub(r"\(\s*(?:label|source|note)\s*:[^)]+\)", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\[\s*(?:label|source|note)\s*:[^\]]+\]", "", text, flags=re.IGNORECASE)
-    
-    # Remove excess whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
+    # Ensure natural flow
+    # Fix common issues like "base. The" -> "base. The"
+    text = re.sub(r'([a-z])\.\s*([A-Z])', r'\1. \2', text)
     
     # Ensure complete sentence
     if text and text[-1] not in '.!?':
-        match = re.search(r'.*[.!?]', text)
-        if match:
-            text = match.group()
+        text += '.'
+    
+    # Log if significant cleaning happened
+    if len(original_text) - len(text) > 50:
+        logger.debug(f"Significant cleaning: {len(original_text)} -> {len(text)} chars")
     
     return text.strip()
 
@@ -280,7 +300,7 @@ def clean_model_output(text: str) -> str:
 
 class HuggingFaceClient:
     """
-    A10G-optimized client with proper session management and retry logic
+    A10G-optimized client with proper session and event loop management
     """
     
     def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
@@ -302,6 +322,7 @@ class HuggingFaceClient:
         self.session = None
         self.session_lock = asyncio.Lock()
         self._closed = False
+        self._loop = None  # Track the loop the session was created with
         
         # Performance metrics
         self.request_count = 0
@@ -311,35 +332,45 @@ class HuggingFaceClient:
         logger.info(f"HuggingFaceClient initialized for A10G: {endpoint[:60]}...")
     
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create the session with proper locking"""
+        """Get or create the session with proper event loop handling"""
         if self._closed:
             raise RuntimeError("HuggingFaceClient is closed")
-            
+        
+        current_loop = get_or_create_event_loop()
+        
         async with self.session_lock:
-            if self.session is None or self.session.closed:
-                # Connection pool configuration for A10G
+            # Check if we need a new session (loop changed or session closed)
+            if (self.session is None or 
+                self.session.closed or 
+                self._loop != current_loop or
+                (self._loop and self._loop.is_closed())):
+                
+                # Close old session if it exists
+                if self.session and not self.session.closed:
+                    try:
+                        await self.session.close()
+                    except Exception as e:
+                        logger.warning(f"Error closing old session: {e}")
+                
+                # Create new connector for this loop
                 connector = aiohttp.TCPConnector(
-                    limit=10,  # Total connection pool limit
-                    limit_per_host=5,  # Per-host limit
-                    ttl_dns_cache=300,  # DNS cache timeout
+                    limit=10,
+                    limit_per_host=5,
+                    ttl_dns_cache=300,
                     enable_cleanup_closed=True,
-                    force_close=False,  # Keep connections alive
-                    keepalive_timeout=30,  # Keep connections alive for 30s
+                    force_close=False,
+                    keepalive_timeout=30,
+                    loop=current_loop  # Explicitly set the loop
                 )
                 
-                timeout = aiohttp.ClientTimeout(
-                    total=None,  # No total timeout (handled per-request)
-                    connect=5,  # Connection timeout
-                    sock_connect=5,  # Socket connection timeout
-                    sock_read=None  # No socket read timeout (handled per-request)
-                )
-                
+                # Create new session with current loop
                 self.session = aiohttp.ClientSession(
                     headers=self.headers,
                     connector=connector,
-                    timeout=timeout
+                    loop=current_loop  # Explicitly set the loop
                 )
-                logger.info("Created new aiohttp session")
+                self._loop = current_loop
+                logger.info("Created new aiohttp session with current event loop")
             
             return self.session
     
@@ -349,16 +380,30 @@ class HuggingFaceClient:
         
         async with self.session_lock:
             if self.session and not self.session.closed:
-                await self.session.close()
+                try:
+                    await self.session.close()
+                    await asyncio.sleep(0.1)  # Give it time to close properly
+                except Exception as e:
+                    logger.warning(f"Error during session close: {e}")
                 self.session = None
-                logger.info(f"Closed aiohttp session. Stats: {self.request_count} requests, {self.error_count} errors, avg latency: {self.total_latency/max(1, self.request_count):.0f}ms")
+                self._loop = None
+                logger.info(f"Closed aiohttp session. Stats: {self.request_count} requests, {self.error_count} errors")
+    
+    async def reset(self):
+        """Reset the client by closing and allowing recreation of session"""
+        logger.info("Resetting HuggingFaceClient")
+        await self.close()
+        self._closed = False
+        self._loop = None
+        self.session = None
     
     async def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
         """
-        Optimized generation for A10G with retry logic
+        Optimized generation for A10G with better error handling
         """
         if self._closed:
-            return "Error: Client is closed"
+            # Try to reset if closed
+            await self.reset()
             
         if parameters is None:
             parameters = MODEL_PARAMS.copy()
@@ -368,24 +413,30 @@ class HuggingFaceClient:
         
         # Request-specific timeout
         timeout = aiohttp.ClientTimeout(
-            total=30,  # Total request timeout
-            sock_read=25  # Socket read timeout
+            total=30,
+            sock_read=25
         )
         
-        # Get the shared session
         try:
+            # Get the session (will create new one if needed)
             session = await self._get_session()
         except Exception as e:
             logger.error(f"Failed to get session: {e}")
             self.error_count += 1
-            return f"Error: Failed to initialize connection"
+            # Try to reset and get session again
+            await self.reset()
+            try:
+                session = await self._get_session()
+            except Exception as e2:
+                logger.error(f"Failed to get session after reset: {e2}")
+                return "Error: Failed to initialize connection"
         
         payload = {
             "inputs": prompt,
             "parameters": parameters,
             "options": {
-                "use_cache": True,  # Enable KV cache on A10G
-                "wait_for_model": False  # Don't wait if model needs loading
+                "use_cache": True,
+                "wait_for_model": False
             }
         }
         
@@ -408,10 +459,9 @@ class HuggingFaceClient:
                     logger.error(f"HF endpoint returned {status}: {text[:200]}")
                     self.error_count += 1
                     
-                    # Handle specific error codes
-                    if status == 429:  # Rate limit
+                    if status == 429:
                         return "Error: Rate limit exceeded. Please wait a moment."
-                    elif status == 500:  # Server error
+                    elif status == 500:
                         return "Error: Server error. Please try again."
                     else:
                         return f"Error: Service returned status {status}"
@@ -420,11 +470,10 @@ class HuggingFaceClient:
                 try:
                     result = json.loads(text)
                 except json.JSONDecodeError:
-                    # Sometimes the response is plain text
                     cleaned = clean_model_output(text)
                     if cleaned:
                         return cleaned
-                    logger.warning("Failed to parse JSON response, text was empty after cleaning")
+                    logger.warning("Failed to parse JSON response")
                     return "Error: Invalid response format"
                 
                 # Extract generated text
@@ -434,7 +483,6 @@ class HuggingFaceClient:
                 elif isinstance(result, dict):
                     generated = result.get("generated_text", "")
                     if not generated:
-                        # Try alternative field names
                         generated = result.get("text", "") or result.get("output", "")
                 else:
                     generated = str(result)
@@ -465,103 +513,20 @@ class HuggingFaceClient:
         except aiohttp.ClientError as e:
             logger.error(f"Client error: {e}")
             self.error_count += 1
+            # Reset on connection errors
+            if "Cannot connect" in str(e) or "Connection reset" in str(e):
+                await self.reset()
             return f"Error: Connection failed - {str(e)[:100]}"
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                logger.error("Event loop was closed, resetting client")
+                await self.reset()
+                return "Error: Event loop issue. Please try again."
+            raise
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             self.error_count += 1
             return "Error: An unexpected error occurred."
-    
-    async def stream_response(
-        self,
-        prompt: str,
-        parameters: Optional[Dict[str, Any]] = None
-    ) -> AsyncGenerator[str, None]:
-        """
-        Streaming for A10G - better perceived latency
-        """
-        if self._closed:
-            yield "Error: Client is closed"
-            return
-            
-        if parameters is None:
-            parameters = MODEL_PARAMS.copy()
-        
-        parameters["stream"] = True
-        parameters["return_full_text"] = False
-        
-        timeout = aiohttp.ClientTimeout(total=60, sock_read=30)
-        
-        try:
-            session = await self._get_session()
-        except Exception as e:
-            logger.error(f"Failed to get session for streaming: {e}")
-            yield "Error: Failed to initialize streaming"
-            return
-        
-        payload = {
-            "inputs": prompt,
-            "parameters": parameters,
-            "stream": True,
-            "options": {"use_cache": True}
-        }
-        
-        try:
-            async with session.post(
-                self.endpoint,
-                json=payload,
-                timeout=timeout
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"Streaming failed with status {response.status}: {error_text[:200]}")
-                    yield f"Error: Streaming not available (status {response.status})"
-                    return
-                
-                buffer = ""
-                async for chunk in response.content.iter_chunked(1024):
-                    if not chunk:
-                        continue
-                    
-                    try:
-                        text = chunk.decode('utf-8')
-                        buffer += text
-                        
-                        # Process complete lines
-                        while '\n' in buffer:
-                            line, buffer = buffer.split('\n', 1)
-                            line = line.strip()
-                            
-                            if not line or line.startswith(':'):
-                                continue
-                            
-                            if line.startswith('data: '):
-                                line = line[6:]
-                            
-                            if line == '[DONE]':
-                                return
-                            
-                            try:
-                                data = json.loads(line)
-                                token = (
-                                    data.get('token', {}).get('text', '') or
-                                    data.get('generated_text', '') or
-                                    data.get('text', '')
-                                )
-                                
-                                if token:
-                                    yield clean_model_output(token)
-                            except json.JSONDecodeError:
-                                continue
-                                
-                    except UnicodeDecodeError:
-                        continue
-                        
-        except asyncio.TimeoutError:
-            logger.error("Streaming timed out")
-            yield "Error: Streaming timed out"
-        except Exception as e:
-            logger.error(f"Streaming error: {e}")
-            yield f"Error: Streaming failed - {str(e)[:100]}"
 
 # ============================================================================
 # SINGLETON CLIENT MANAGEMENT
@@ -574,10 +539,27 @@ async def get_singleton_client() -> HuggingFaceClient:
     """Get or create singleton client instance with proper locking"""
     global _client_instance
     
+    try:
+        async with _client_lock:
+            if _client_instance is None or _client_instance._closed:
+                _client_instance = HuggingFaceClient()
+            return _client_instance
+    except RuntimeError as e:
+        if "Event loop" in str(e):
+            # Create with new event loop
+            loop = get_or_create_event_loop()
+            async with _client_lock:
+                _client_instance = HuggingFaceClient()
+                return _client_instance
+        raise
+
+async def reset_singleton_client():
+    """Reset the singleton client"""
+    global _client_instance
+    
     async with _client_lock:
-        if _client_instance is None or _client_instance._closed:
-            _client_instance = HuggingFaceClient()
-        return _client_instance
+        if _client_instance:
+            await _client_instance.reset()
 
 # ============================================================================
 # CLEANUP HANDLER
@@ -591,13 +573,19 @@ async def cleanup():
     
     # Close the batcher
     if request_batcher:
-        await request_batcher.close()
-        logger.info("Closed request batcher")
+        try:
+            await request_batcher.close()
+            logger.info("Closed request batcher")
+        except Exception as e:
+            logger.warning(f"Error closing batcher: {e}")
     
     # Close the client
     if _client_instance:
-        await _client_instance.close()
-        _client_instance = None
+        try:
+            await _client_instance.close()
+            _client_instance = None
+        except Exception as e:
+            logger.warning(f"Error closing client: {e}")
     
     logger.info("Cleanup completed")
 
@@ -618,13 +606,19 @@ async def call_huggingface_with_retry(
             result = await call_huggingface(prompt, parameters)
             
             # Check if result is an error and retry if needed
-            if result.startswith("Error:") and "timed out" in result.lower() and attempt < max_retries - 1:
-                raise Exception(result)
+            if result.startswith("Error:") and "Event loop" in result and attempt < max_retries - 1:
+                logger.warning("Event loop error detected, resetting client")
+                await reset_singleton_client()
+                await asyncio.sleep(0.5)
+                continue
             
             return result
             
         except Exception as e:
             last_error = e
+            if "Event loop" in str(e):
+                await reset_singleton_client()
+            
             if attempt < max_retries - 1:
                 delay = min(RETRY_DELAY_BASE * (2 ** attempt), RETRY_DELAY_MAX)
                 logger.warning(f"Retry {attempt + 1}/{max_retries} after {delay}s: {str(e)[:100]}")
@@ -644,15 +638,27 @@ async def call_huggingface(
         if request_batcher and ENABLE_REQUEST_BATCHING and not request_batcher._closed:
             if parameters is None or parameters.get("max_new_tokens", 0) <= 100:
                 # Use batching for small requests
-                return await request_batcher.add_request(prompt, parameters or MODEL_PARAMS)
+                try:
+                    return await request_batcher.add_request(prompt, parameters or MODEL_PARAMS)
+                except RuntimeError as e:
+                    if "Event loop" in str(e):
+                        logger.warning("Batching failed due to event loop issue, falling back to direct call")
+                    else:
+                        raise
         
-        # Direct call for large requests or when batching disabled
+        # Direct call for large requests or when batching disabled/failed
         client = await get_singleton_client()
         return await client.generate_response(prompt, parameters)
         
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         return f"Error: Configuration issue - {str(e)[:100]}"
+    except RuntimeError as e:
+        if "Event loop" in str(e):
+            logger.error("Event loop issue in call_huggingface")
+            await reset_singleton_client()
+            return "Error: Event loop issue. Please try again."
+        raise
     except Exception as e:
         logger.error(f"Unexpected error in call_huggingface: {e}", exc_info=True)
         return "Error: An unexpected error occurred."
@@ -686,13 +692,9 @@ async def stream_base_assistant(prompt: str) -> AsyncGenerator[str, None]:
     
     try:
         client = await get_singleton_client()
-        async for chunk in client.stream_response(prompt, base_params):
-            if chunk.startswith("Error:"):
-                # Fall back to regular generation
-                result = await call_base_assistant(prompt)
-                yield result
-                return
-            yield chunk
+        # For now, fall back to non-streaming due to event loop issues
+        result = await client.generate_response(prompt, base_params)
+        yield result
     except Exception as e:
         logger.error(f"Streaming error: {e}")
         result = await call_base_assistant(prompt)

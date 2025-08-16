@@ -1,4 +1,4 @@
-# conversational_agent.py - Complete Version with All Improvements
+# conversational_agent.py - Complete Final Version with All Fixes
 
 import logging
 import re
@@ -183,7 +183,7 @@ class ConductorDecision:
 
 class PersonaConductor:
     """
-    Enhanced Conductor with better error handling and performance monitoring
+    Enhanced Conductor with better intent detection and error handling
     """
     
     def __init__(self):
@@ -207,11 +207,17 @@ class PersonaConductor:
             re.IGNORECASE
         )
         self.thanks_patterns = re.compile(
-            r'^(thank|thanks|thank you|thx|ty|appreciate)[\s!?.,]*',
+            r'^(thank|thanks|thank you|thx|ty|appreciate)[\s!?.,]*$',
             re.IGNORECASE
         )
         self.goodbye_patterns = re.compile(
             r'^(bye|goodbye|see you|farewell|take care)[\s!?.,]*$',
+            re.IGNORECASE
+        )
+        
+        # Simple affirmation/negation patterns
+        self.simple_response_patterns = re.compile(
+            r'^(yes|no|ok|okay|sure|maybe|perhaps)[\s!?.,]*$',
             re.IGNORECASE
         )
         
@@ -224,9 +230,6 @@ class PersonaConductor:
             "thanks": "You're welcome! Let me know if you need anything else.",
             "goodbye": "Goodbye! Take care!",
             "bye": "Bye! Have a great day!",
-            "ok": "Alright! Is there anything specific you'd like to know?",
-            "yes": "I understand. What would you like to know more about?",
-            "no": "I understand. Is there anything else I can help you with?",
         }
         
         # Performance tracking
@@ -257,7 +260,7 @@ class PersonaConductor:
     
     async def analyze_intent(self, query: str) -> IntentAnalysis:
         """
-        Optimized intent analysis with caching and fast paths
+        Optimized intent analysis with better detection patterns
         """
         # Check intent cache first
         query_lower = query.lower().strip()
@@ -292,6 +295,18 @@ class PersonaConductor:
                     primary_intent=UserIntent.CONVERSATIONAL,
                     strategy=ResponseStrategy.CONVERSATIONAL,
                     confidence=1.0
+                )
+                self.intent_cache[cache_key] = intent
+                return intent
+            
+            # For simple yes/no/ok responses, check context
+            if self.simple_response_patterns.match(query):
+                # These should be informational if they're likely following up on a question
+                intent = IntentAnalysis(
+                    primary_intent=UserIntent.INFORMATIONAL,
+                    needs_facts=True,
+                    strategy=ResponseStrategy.PURE_FACTS,
+                    confidence=0.7
                 )
                 self.intent_cache[cache_key] = intent
                 return intent
@@ -332,7 +347,7 @@ class PersonaConductor:
                 data = json.loads(json_match.group())
                 
                 # Parse intent with validation
-                primary = UserIntent(data.get("primary_intent", "conversational").lower())
+                primary = UserIntent(data.get("primary_intent", "informational").lower())
                 secondary = []
                 for intent_str in data.get("secondary_intents", []):
                     try:
@@ -356,8 +371,8 @@ class PersonaConductor:
         return self._heuristic_intent_analysis(response)
     
     def _heuristic_intent_analysis(self, query: str) -> IntentAnalysis:
-        """Fast heuristic-based intent analysis"""
-        q_lower = query.lower()
+        """Fast heuristic-based intent analysis with better patterns"""
+        q_lower = query.lower().strip()
         
         # Initialize indicators
         emotional_indicators = []
@@ -365,29 +380,56 @@ class PersonaConductor:
         
         # Check emotional content
         emotional_words = ['worried', 'scared', 'anxious', 'depressed', 'sad', 'afraid', 
-                          'struggling', 'nervous', 'stressed', 'overwhelmed', 'concern']
+                          'struggling', 'nervous', 'stressed', 'overwhelmed', 'concern',
+                          'fear', 'panic', 'upset', 'frightened', 'terrified']
         for word in emotional_words:
             if word in q_lower:
                 emotional_indicators.append(word)
         
-        # Check informational content
+        # Check informational content - IMPROVED PATTERNS
         info_patterns = [
-            (r'\b(what|how|when|why|where|who)\b', 'question'),
-            (r'\b(side effect|adverse|reaction)\b', 'side_effects'),
-            (r'\b(dosage|dose|mg|milligram)\b', 'dosage'),
-            (r'\b(interaction|interact)\b', 'interactions'),
-            (r'\b(tell me|explain|describe)\b', 'information_request'),
+            (r'\b(what|how|when|why|where|who|which|whose)\b', 'question'),
+            (r'\b(side effect|adverse|reaction|effects)\b', 'side_effects'),
+            (r'\b(dosage|dose|mg|milligram|how much|amount)\b', 'dosage'),
+            (r'\b(interaction|interact|mixing|combine|together)\b', 'interactions'),
+            (r'\b(tell me|explain|describe|information|info|about|detail)\b', 'information_request'),
+            (r'\b(ingredient|contain|composition|made of|consists|active|inactive)\b', 'ingredients'),
+            (r'\b(work|mechanism|function|operate|action)\b', 'mechanism'),
+            (r'\b(use|usage|indication|prescribed for|treat|treatment|therapy)\b', 'usage'),
+            (r'\b(warning|caution|danger|risk|safety)\b', 'warnings'),
+            (r'\b(contraindication|avoid|should not|must not)\b', 'contraindications'),
         ]
         
         for pattern, topic in info_patterns:
             if re.search(pattern, q_lower):
                 info_indicators.append(topic)
         
+        # Special cases for very short queries
+        word_count = len(q_lower.split())
+        
+        # Very short queries about specific topics should be informational
+        if word_count <= 5:
+            short_info_keywords = ['effect', 'effects', 'ingredient', 'ingredients', 'contain', 
+                                  'active', 'dose', 'dosage', 'interaction', 'warning',
+                                  'work', 'mechanism', 'use', 'usage', 'side', 'lexapro']
+            for keyword in short_info_keywords:
+                if keyword in q_lower:
+                    info_indicators.append('direct_info_request')
+                    break
+        
+        # Check for question marks
+        has_question = '?' in query
+        
         # Determine intent
         has_emotion = len(emotional_indicators) > 0
-        has_info = len(info_indicators) > 0 or '?' in query
+        has_info = len(info_indicators) > 0 or has_question
         
-        if has_emotion and has_info:
+        # Bias toward informational for unclear cases
+        if not has_emotion and (has_info or word_count <= 6):
+            primary = UserIntent.INFORMATIONAL
+            needs_empathy = False
+            needs_facts = True
+        elif has_emotion and has_info:
             primary = UserIntent.MIXED
             needs_empathy = True
             needs_facts = True
@@ -400,9 +442,20 @@ class PersonaConductor:
             needs_empathy = False
             needs_facts = True
         else:
-            primary = UserIntent.CONVERSATIONAL
-            needs_empathy = False
-            needs_facts = False
+            # Only mark as conversational if it's truly conversational
+            conversational_words = ['hello', 'hi', 'hey', 'thanks', 'thank', 'bye', 
+                                   'goodbye', 'good morning', 'good afternoon', 'good evening']
+            is_conversational = any(word in q_lower for word in conversational_words)
+            
+            if is_conversational:
+                primary = UserIntent.CONVERSATIONAL
+                needs_empathy = False
+                needs_facts = False
+            else:
+                # Default to informational for unclear cases
+                primary = UserIntent.INFORMATIONAL
+                needs_empathy = False
+                needs_facts = True
         
         return IntentAnalysis(
             primary_intent=primary,
@@ -602,7 +655,7 @@ class PersonaConductor:
             from llm_client import call_huggingface_with_retry
             
             if not context or not context.strip():
-                return "No relevant information found in documentation."
+                return "I don't have specific information about that in the documentation."
             
             prompt = format_navigator_prompt(query, context)
             response = await call_huggingface_with_retry(prompt, INFORMATION_NAVIGATOR_PARAMS)
@@ -633,7 +686,7 @@ class PersonaConductor:
         
         try:
             # Generate simple response
-            prompt = f"User: {query}\nAssistant:"
+            prompt = f"User: {query}\nAssistant: I can help you with information about Lexapro. "
             from config import MODEL_PARAMS
             params = MODEL_PARAMS.copy()
             params["max_new_tokens"] = 50  # Very short for conversational
@@ -642,13 +695,13 @@ class PersonaConductor:
             response = await call_huggingface(prompt, params)
             
             if response.startswith("Error:"):
-                return "I'm here to help. What would you like to know?"
+                return "I'm here to help with information about Lexapro. What would you like to know?"
             
             return response.strip()
             
         except Exception as e:
             logger.error(f"Conversational response failed: {e}")
-            return "I'm here to help. What would you like to know?"
+            return "I'm here to help with information about Lexapro. What would you like to know?"
     
     async def orchestrate_response(self, query: str) -> ConductorDecision:
         """
@@ -739,6 +792,7 @@ class PersonaConductor:
                         "confidence": intent.confidence,
                         "needs_empathy": intent.needs_empathy,
                         "needs_facts": intent.needs_facts,
+                        "info_topics": intent.information_topics,
                     },
                     "timing": {
                         "intent_ms": intent_time,
@@ -800,11 +854,6 @@ class ConversationalAgent:
     
     def __init__(self):
         self.conductor = PersonaConductor()
-        self.greeting_words = {"hi", "hello", "hey"}
-        self.greeting_phrases = {"good morning", "good afternoon", "good evening"}
-    
-    def _is_greeting(self, query: str) -> bool:
-        return self.conductor.greeting_patterns.match(query) is not None
     
     def process_query(self, query: str) -> AgentDecision:
         """Synchronous wrapper for async conductor"""

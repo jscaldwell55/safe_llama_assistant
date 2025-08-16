@@ -111,7 +111,7 @@ ENABLE_PARALLEL_PERSONAS = True  # Run personas in parallel when possible
 PARALLEL_TIMEOUT_SECONDS = 10  # Max wait for parallel operations
 
 # Request Batching (for A10G efficiency)
-ENABLE_REQUEST_BATCHING = True
+ENABLE_REQUEST_BATCHING = False
 BATCH_TIMEOUT_MS = 50  # Wait up to 50ms to batch requests
 MAX_BATCH_SIZE = 4  # A10G can handle 4 concurrent requests efficiently
 
