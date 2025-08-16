@@ -68,12 +68,62 @@ def clean_model_output(text: str) -> str:
         "\nHuman:", 
         "Human:",
         "\n\nQuestion:",
-        "Natural Response:"  # Also remove if model generates another response
+        "Natural Response:",  # Also remove if model generates another response
+        # ADD THESE NEW MARKERS TO CATCH "Note:" and similar
+        "\nNote:",
+        "Note:",
+        "\n--",
+        "--.",
+        "Response:",
+        "\nResponse:",
+        "IMPORTANT:",
+        "\nIMPORTANT:",
+        "Remember:",
+        "\nRemember:",
+        "This response",
+        "\nThis response"
     ]
+    
+    # Find the earliest occurrence of any marker
+    earliest_pos = len(text)
     for marker in user_markers:
-        if marker in text:
-            text = text.split(marker)[0].strip()
-            break  # Stop after finding the first marker
+        pos = text.find(marker)
+        if pos != -1 and pos < earliest_pos:
+            earliest_pos = pos
+    
+    # Cut off at the earliest marker found
+    if earliest_pos < len(text):
+        text = text[:earliest_pos].strip()
+    
+    # Additional cleanup for sentences that start with meta-commentary
+    # Split into sentences and filter out meta-commentary
+    sentences = text.split('. ')
+    cleaned_sentences = []
+    
+    meta_patterns = [
+        "This response follows",
+        "This response provides",
+        "I've provided",
+        "I'm providing",
+        "As requested",
+        "Following the",
+        "According to the rules",
+        "Per the guidelines"
+    ]
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        # Skip sentences that are meta-commentary about the response
+        if any(sentence.startswith(pattern) for pattern in meta_patterns):
+            continue
+        if sentence:
+            cleaned_sentences.append(sentence)
+    
+    if cleaned_sentences:
+        text = '. '.join(cleaned_sentences)
+        # Ensure the last sentence ends with proper punctuation
+        if text and text[-1] not in '.!?':
+            text += '.'
     
     # Remove extraction format artifacts
     text = re.sub(r'\*\*Extracted Information:\*\*\s*', '', text, flags=re.IGNORECASE)
