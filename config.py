@@ -123,7 +123,7 @@ APP_TITLE = "Pharma Enterprise Assistant"
 WELCOME_MESSAGE = "Hello! How can I help you today?"
 
 DEFAULT_FALLBACK_MESSAGE = (
-    "I don't have that information in our knowledge base. "
+    "I don't have any information on that."
     "Could you rephrase your question or ask about something else?"
 )
 
