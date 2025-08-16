@@ -95,6 +95,15 @@ class SimplifiedMedicalDetector:
                 True
             )
         
+        # Check for administration queries (NEW - high priority)
+        if self._indicates_administration_query(query_lower):
+            return MedicalSafetyResult(
+                MedicalRequestType.MEDICAL_ADVICE,
+                0.95,
+                "Administration guidance request",
+                is_emergency
+            )
+        
         # Check for child medication (high priority)
         if self._involves_child_medication(query_lower):
             return MedicalSafetyResult(
@@ -168,6 +177,19 @@ class SimplifiedMedicalDetector:
         missed_dose_confusion = 'missed' in text and any(term in text for term in ['double', 'two', 'extra'])
         
         return (has_dosage_term and has_change_term) or has_pain_reason or missed_dose_confusion
+    
+    def _indicates_administration_query(self, text: str) -> bool:
+        """Detect questions about when/how to take medication"""
+        admin_indicators = [
+            'when should i take', 'when to take', 'should i take',
+            'can i take', 'take it now', 'take today',
+            'with food', 'without food', 'empty stomach',
+            'before eating', 'after eating', 'with meal',
+            'grapefruit', 'juice', 'alcohol', 'coffee',
+            'regular schedule', 'missed dose', 'forgot to take'
+        ]
+        
+        return any(indicator in text for indicator in admin_indicators)
     
     def _indicates_prescription_misuse(self, text: str) -> bool:
         """Detect prescription sharing or use without Rx"""

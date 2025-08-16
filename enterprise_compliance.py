@@ -98,6 +98,22 @@ class ComplianceValidator:
             "you might want to", "you could consider"
         ]
         
+        # Risk minimization phrases that should NEVER appear
+        self.risk_minimization = [
+            "don't worry", "no need to worry", "it's fine",
+            "should be okay", "nothing to worry about",
+            "err on the side of caution", "better safe than sorry"
+        ]
+        
+        # Unsanctioned guidance phrases
+        self.unsanctioned_guidance = [
+            "have a light meal", "consider having", "try eating",
+            "stick to your schedule", "regular schedule",
+            "unless otherwise advised", "before taking",
+            "after taking", "with food", "without food",
+            "empty stomach", "grapefruit", "juice"
+        ]
+        
         # Ungrounded comparison indicators
         self.comparison_phrases = [
             "compared to", "versus", "better than", "worse than",
@@ -179,6 +195,21 @@ class ComplianceValidator:
         response_lower = response.lower()
         query_lower = query.lower()
         violations = []
+        
+        # Check for risk minimization
+        for phrase in self.risk_minimization:
+            if phrase in response_lower:
+                return False, "I cannot provide administration guidance. Contact your healthcare provider immediately."
+        
+        # Check for unsanctioned guidance
+        for phrase in self.unsanctioned_guidance:
+            if phrase in response_lower:
+                return False, "I cannot provide administration guidance. Contact your healthcare provider immediately."
+        
+        # Check for hedging
+        for hedge in self.hedging_phrases:
+            if hedge in response_lower:
+                return False, "I cannot provide medical advice. Contact your healthcare provider."
         
         # Check for ungrounded comparisons/numbers
         for phrase in self.comparison_phrases:
