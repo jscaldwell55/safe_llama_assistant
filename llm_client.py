@@ -91,9 +91,34 @@ def clean_model_output(text: str) -> str:
         if pos != -1 and pos < earliest_pos:
             earliest_pos = pos
     
-    # Cut off at the earliest marker found
+    # Cut off at the earliest marker found, but ensure we end at a sentence boundary
     if earliest_pos < len(text):
-        text = text[:earliest_pos].strip()
+        text = text[:earliest_pos]
+        
+        # Find the last complete sentence before the cutoff
+        # Look for the last period, exclamation, or question mark
+        last_sentence_end = -1
+        for i in range(len(text) - 1, -1, -1):
+            if text[i] in '.!?':
+                # Make sure it's not an abbreviation (check for capital letter after)
+                if i == len(text) - 1 or (i < len(text) - 1 and (text[i+1].isspace() or text[i+1] in '"\')')):
+                    last_sentence_end = i + 1
+                    break
+        
+        # If we found a sentence boundary, cut there
+        if last_sentence_end > 0:
+            text = text[:last_sentence_end].strip()
+        else:
+            # If no sentence boundary found, at least try to avoid cutting mid-word
+            # Find the last space before the cutoff
+            last_space = text.rfind(' ')
+            if last_space > 0:
+                text = text[:last_space].strip()
+                # Add a period if the text doesn't end with punctuation
+                if text and text[-1] not in '.!?':
+                    text += '.'
+            else:
+                text = text.strip()
     
     # Additional cleanup for sentences that start with meta-commentary
     # Split into sentences and filter out meta-commentary
