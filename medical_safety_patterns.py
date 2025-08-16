@@ -1,228 +1,298 @@
-# medical_safety_patterns.py - Medical Safety Detection Patterns
+# medical_safety_patterns.py - Simplified Semantic Version
 
 """
-Enterprise-grade medical safety patterns for detecting and refusing unsafe medical requests.
-This module should be integrated into the guard system.
+Simplified medical safety detection using semantic categories rather than exhaustive patterns.
+Focuses on core unsafe behaviors rather than specific phrases.
 """
 
 import re
-from typing import Tuple, Optional, List
+import logging
+from typing import Tuple, Optional, List, Dict
 from enum import Enum
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# DATA CLASSES
+# ============================================================================
 
 class MedicalRequestType(Enum):
-    """Types of medical requests that need special handling"""
-    DOSAGE_CHANGE = "dosage_change"
-    SELF_DIAGNOSIS = "self_diagnosis"
-    MEDICATION_MIXING = "medication_mixing"
-    OFF_LABEL_USE = "off_label_use"
-    EMERGENCY_SITUATION = "emergency_situation"
-    CHILD_MEDICATION = "child_medication"
-    PREGNANCY_RELATED = "pregnancy_related"
-    DISCONTINUATION = "discontinuation"
+    """Core categories of unsafe medical requests"""
+    DOSAGE_MODIFICATION = "dosage_modification"  # Any change to prescribed dosing
+    PRESCRIPTION_MISUSE = "prescription_misuse"  # Sharing, no Rx, etc.
+    MEDICAL_ADVICE = "medical_advice"  # Diagnosis, treatment decisions
+    EMERGENCY = "emergency"  # Severe symptoms needing immediate care
     NONE = "none"
 
-class MedicalSafetyDetector:
-    """Detects unsafe medical requests with high precision"""
+@dataclass
+class MedicalSafetyResult:
+    """Result of medical safety check"""
+    request_type: MedicalRequestType
+    confidence: float
+    reasoning: str
+    is_emergency: bool = False
+
+# ============================================================================
+# MAIN DETECTOR CLASS
+# ============================================================================
+
+class SimplifiedMedicalDetector:
+    """
+    Semantic detection of unsafe medical requests.
+    Uses concept-based detection rather than exhaustive pattern matching.
+    """
     
     def __init__(self):
-        # Patterns that indicate dosage change requests
-        self.dosage_patterns = [
-            (r'\b(?:can|should|could)\s+(?:i|she|he|they|my \w+)\s+(?:take|have|use)\s+(?:double|triple|extra|more|additional|another)', 
-             'dosage_increase_request'),
-            (r'\b(?:increase|decrease|change|adjust|modify)\s+(?:the\s+)?(?:dose|dosage|amount)',
-             'dosage_modification'),
-            (r'\btake\s+(?:two|three|multiple|several)\s+(?:doses|tablets|pills)',
-             'multiple_dose_request'),
-            (r'\b(?:safe|okay|alright)\s+to\s+(?:take|have)\s+(?:more|extra|double)',
-             'safety_check_overdose'),
-            (r'\bin\s+(?:a lot of|severe|extreme)\s+pain.*(?:dose|medication|pill)',
-             'pain_based_dosage'),
-            (r'\bmissed\s+(?:a\s+)?dose.*(?:double|two|extra)',
-             'missed_dose_confusion'),
-        ]
+        # Core concept indicators (not exhaustive lists)
+        self.dosage_concepts = ['double', 'extra', 'more', 'increase', 'decrease', 'change', 'adjust', 'modify']
+        self.sharing_concepts = ['share', 'sharing', 'borrow', 'lend', 'split', 'give', 'take someone else']
+        self.prescription_concepts = ['without prescription', 'no prescription', 'not prescribed', "doesn't have prescription"]
+        self.emergency_concepts = ['severe pain', 'emergency', 'urgent', 'immediately', 'right now', 'unbearable', 'excruciating']
+        self.child_concepts = ['child', 'kid', 'baby', 'infant', 'toddler', 'pediatric', 'my son', 'my daughter']
         
-        # Patterns for self-diagnosis
-        self.diagnosis_patterns = [
-            (r'\b(?:do|does)\s+(?:i|she|he|they)\s+have\s+',
-             'diagnosis_query'),
-            (r'\b(?:is|could)\s+(?:this|it)\s+(?:be\s+)?(?:cancer|diabetes|infection)',
-             'serious_condition_query'),
-            (r'\bsymptoms?\s+(?:mean|indicate|suggest)',
-             'symptom_interpretation'),
-        ]
-        
-        # Emergency indicators
-        self.emergency_patterns = [
-            (r'\b(?:severe|extreme|unbearable|excruciating)\s+pain',
-             'severe_pain'),
-            (r'\b(?:emergency|urgent|immediately|right now)',
-             'urgency_indicator'),
-            (r'\b(?:overdose|too much|too many)',
-             'overdose_concern'),
-        ]
-        
-        # Response templates for different situations
-        self.safety_responses = {
-            MedicalRequestType.DOSAGE_CHANGE: (
+        # Single, clear response for each category
+        self.responses = {
+            MedicalRequestType.DOSAGE_MODIFICATION: (
                 "I cannot recommend changing medication dosage. "
-                "Journvax should only be taken exactly as prescribed by your doctor. "
-                "Taking more than the prescribed amount could be unsafe. "
-                "Please contact your healthcare provider immediately for guidance on managing pain."
+                "Please take Journvax exactly as prescribed by your doctor. "
+                "Contact your healthcare provider for any dosage questions."
             ),
-            MedicalRequestType.EMERGENCY_SITUATION: (
-                "I cannot provide medical advice for what may be an emergency situation. "
-                "If you're experiencing severe pain or concerning symptoms, "
-                "please contact your healthcare provider immediately or seek emergency medical care."
+            MedicalRequestType.PRESCRIPTION_MISUSE: (
+                "I cannot recommend using prescription medication without a valid prescription "
+                "or sharing medications between people. Each person needs their own prescription "
+                "from a healthcare provider. Please consult a doctor for proper medical evaluation."
             ),
-            MedicalRequestType.CHILD_MEDICATION: (
-                "I cannot provide dosing advice for children. "
-                "Pediatric medication requires specific medical supervision. "
-                "Please consult with a pediatrician or healthcare provider immediately."
+            MedicalRequestType.MEDICAL_ADVICE: (
+                "I cannot provide medical advice or diagnosis. "
+                "Please consult with your healthcare provider for medical decisions."
             ),
-            MedicalRequestType.SELF_DIAGNOSIS: (
-                "I cannot diagnose medical conditions or interpret symptoms. "
-                "Please consult with a healthcare professional who can properly evaluate your situation."
-            ),
-            MedicalRequestType.MEDICATION_MIXING: (
-                "I cannot advise on combining medications. "
-                "Drug interactions can be dangerous. "
-                "Please consult your doctor or pharmacist about all medications you're taking."
+            MedicalRequestType.EMERGENCY: (
+                "If you're experiencing severe symptoms, please contact your healthcare provider "
+                "immediately or seek emergency medical care."
             ),
         }
+        
+        logger.info("SimplifiedMedicalDetector initialized")
     
-    def detect_medical_request(self, query: str) -> Tuple[MedicalRequestType, str, bool]:
+    def detect_unsafe_request(self, query: str) -> MedicalSafetyResult:
         """
-        Detect unsafe medical requests in queries
-        Returns: (request_type, pattern_matched, is_emergency)
+        Detect unsafe medical requests using semantic understanding.
+        Returns: MedicalSafetyResult with details
         """
-        query_lower = query.lower()
-        is_emergency = False
+        if not query:
+            return MedicalSafetyResult(MedicalRequestType.NONE, 0.0, "Empty query", False)
         
-        # Check for emergency indicators first
-        for pattern, name in self.emergency_patterns:
-            if re.search(pattern, query_lower):
-                is_emergency = True
-                break
+        query_lower = query.lower().strip()
         
-        # Check dosage change requests (highest priority)
-        for pattern, name in self.dosage_patterns:
-            if re.search(pattern, query_lower):
-                return MedicalRequestType.DOSAGE_CHANGE, name, is_emergency
-        
-        # Check for child medication
-        if re.search(r'\b(?:child|kid|baby|infant|toddler|pediatric)', query_lower):
-            if re.search(r'\b(?:dose|dosage|give|take|medication)', query_lower):
-                return MedicalRequestType.CHILD_MEDICATION, 'pediatric_dosing', is_emergency
-        
-        # Check diagnosis requests
-        for pattern, name in self.diagnosis_patterns:
-            if re.search(pattern, query_lower):
-                return MedicalRequestType.SELF_DIAGNOSIS, name, is_emergency
-        
-        # Check medication mixing
-        if re.search(r'\b(?:mix|combine|take\s+with|interact)', query_lower):
-            if re.search(r'\b(?:medication|drug|alcohol|supplement)', query_lower):
-                return MedicalRequestType.MEDICATION_MIXING, 'drug_interaction', is_emergency
-        
-        # If emergency but no specific medical request
+        # Check for emergency first (highest priority)
+        is_emergency = self._contains_concepts(query_lower, self.emergency_concepts)
         if is_emergency:
-            return MedicalRequestType.EMERGENCY_SITUATION, 'emergency_detected', True
+            return MedicalSafetyResult(
+                MedicalRequestType.EMERGENCY, 
+                0.95, 
+                "Emergency indicators detected",
+                True
+            )
         
-        return MedicalRequestType.NONE, '', False
+        # Check for child medication (high priority)
+        if self._involves_child_medication(query_lower):
+            return MedicalSafetyResult(
+                MedicalRequestType.MEDICAL_ADVICE,
+                0.95,
+                "Pediatric medication requires medical supervision",
+                is_emergency
+            )
+        
+        # Check for dosage modification intent
+        if self._indicates_dosage_change(query_lower):
+            return MedicalSafetyResult(
+                MedicalRequestType.DOSAGE_MODIFICATION,
+                0.90,
+                "Dosage modification request detected",
+                is_emergency
+            )
+        
+        # Check for prescription misuse
+        if self._indicates_prescription_misuse(query_lower):
+            return MedicalSafetyResult(
+                MedicalRequestType.PRESCRIPTION_MISUSE,
+                0.90,
+                "Prescription misuse indicators detected",
+                is_emergency
+            )
+        
+        # Check for medical advice seeking
+        if self._seeks_medical_advice(query_lower):
+            return MedicalSafetyResult(
+                MedicalRequestType.MEDICAL_ADVICE,
+                0.85,
+                "Medical advice request detected",
+                is_emergency
+            )
+        
+        return MedicalSafetyResult(MedicalRequestType.NONE, 0.0, "No unsafe patterns detected", False)
+    
+    def _contains_concepts(self, text: str, concepts: List[str]) -> bool:
+        """Check if text contains any of the concept indicators"""
+        return any(concept in text for concept in concepts)
+    
+    def _involves_child_medication(self, text: str) -> bool:
+        """Check if query involves medication for children"""
+        has_child = any(term in text for term in self.child_concepts)
+        has_medication = any(term in text for term in ['dose', 'dosage', 'medication', 'journvax', 'give', 'take'])
+        return has_child and has_medication
+    
+    def _indicates_dosage_change(self, text: str) -> bool:
+        """Detect intent to modify dosage"""
+        # Look for dosage words near change words
+        has_dosage_term = any(term in text for term in ['dose', 'dosage', 'pill', 'tablet', 'medication'])
+        has_change_term = any(term in text for term in self.dosage_concepts)
+        
+        # Also check for pain-based reasoning
+        has_pain_reason = 'pain' in text and any(term in text for term in ['more', 'extra', 'double', 'additional'])
+        
+        # Check for missed dose confusion (people asking to double up)
+        missed_dose_confusion = 'missed' in text and any(term in text for term in ['double', 'two', 'extra'])
+        
+        return (has_dosage_term and has_change_term) or has_pain_reason or missed_dose_confusion
+    
+    def _indicates_prescription_misuse(self, text: str) -> bool:
+        """Detect prescription sharing or use without Rx"""
+        # Sharing indicators
+        if any(term in text for term in self.sharing_concepts):
+            return True
+        
+        # No prescription indicators
+        if 'prescription' in text or 'rx' in text.lower():
+            negatives = ['without', 'no', "doesn't have", "hasn't got", 'until', 'before']
+            return any(neg in text for neg in negatives)
+        
+        # Other misuse patterns
+        misuse_phrases = ['not prescribed', 'someone else', 'my friend', 'leftover', 'extra pills']
+        return any(phrase in text for phrase in misuse_phrases)
+    
+    def _seeks_medical_advice(self, text: str) -> bool:
+        """Detect requests for medical advice vs information"""
+        # Diagnosis seeking
+        if re.search(r'\b(do|does|could|might) (i|he|she|they|my \w+) have\b', text):
+            return True
+        
+        # Treatment decisions
+        if re.search(r'\b(should|can|is it safe|is it okay|safe to|okay to) (i|we|he|she)', text):
+            medical_terms = ['take', 'stop', 'start', 'mix', 'combine', 'use']
+            return any(term in text for term in medical_terms)
+        
+        # Symptom interpretation
+        if re.search(r'(symptom|side effect|reaction).*(mean|indicate|serious|dangerous|normal)', text):
+            return True
+        
+        # Self-treatment
+        return bool(re.search(r'(what|how) (can|should) i (do|take) for', text))
+    
+    def validate_response(self, response: str, query: str) -> Tuple[bool, str, str]:
+        """
+        Validate that response doesn't contain unsafe advice.
+        Returns: (is_safe, issue_description, corrected_response_if_unsafe)
+        """
+        if not response:
+            return True, "", response
+        
+        response_lower = response.lower()
+        query_result = self.detect_unsafe_request(query)
+        
+        # If query was unsafe, ensure response doesn't provide the requested info
+        if query_result.request_type != MedicalRequestType.NONE:
+            # Check for problematic approval patterns
+            approval_patterns = [
+                'you can', 'you could', 'you might', 'it should be',
+                'generally recommended', 'typically', 'usually',
+                'it\'s fine', 'it\'s okay', 'no problem'
+            ]
+            
+            # Check if response seems to be giving advice rather than refusing
+            for pattern in approval_patterns:
+                if pattern in response_lower:
+                    logger.warning(f"Response contains approval pattern '{pattern}' for unsafe request")
+                    return False, f"Implicit approval detected: {pattern}", self.responses[query_result.request_type]
+        
+        # Check for specific unsafe content regardless of query
+        unsafe_patterns = [
+            (r'\btake \d+ (tablet|pill|dose)', MedicalRequestType.DOSAGE_MODIFICATION, "Specific dosage instruction"),
+            (r'\b(stop|start) taking\b', MedicalRequestType.MEDICAL_ADVICE, "Medication change advice"),
+            (r'\byou (have|might have|probably have|likely have) \w+ (condition|disease|disorder)', 
+             MedicalRequestType.MEDICAL_ADVICE, "Diagnostic statement"),
+            (r'\b(increase|decrease|change) (your|the) (dose|dosage)', 
+             MedicalRequestType.DOSAGE_MODIFICATION, "Dosage modification advice"),
+        ]
+        
+        for pattern, request_type, description in unsafe_patterns:
+            if re.search(pattern, response_lower):
+                logger.warning(f"Response contains unsafe pattern: {description}")
+                return False, description, self.responses[request_type]
+        
+        return True, "", response
     
     def get_safe_response(self, request_type: MedicalRequestType, is_emergency: bool = False) -> str:
-        """Get appropriate safety response for the request type"""
-        response = self.safety_responses.get(
-            request_type,
+        """Get appropriate safe response for request type"""
+        base_response = self.responses.get(
+            request_type, 
             "I cannot provide medical advice. Please consult with your healthcare provider."
         )
         
         # Add emergency suffix if needed
-        if is_emergency and request_type != MedicalRequestType.EMERGENCY_SITUATION:
-            response += " If this is an emergency, please seek immediate medical attention."
+        if is_emergency and request_type != MedicalRequestType.EMERGENCY:
+            base_response += " If this is an emergency, please seek immediate medical attention."
         
-        return response
-    
-    def check_response_safety(self, response: str, query: str) -> Tuple[bool, str, str]:
-        """
-        Check if a generated response contains unsafe medical advice
-        Returns: (is_safe, issue_description, safe_alternative)
-        """
-        response_lower = response.lower()
-        
-        # Check for specific dosage recommendations
-        if re.search(r'\btake\s+(?:two|three|\d+)\s+(?:tablet|pill|dose)', response_lower):
-            if 'missed' not in query.lower():  # Missed dose is different context
-                return False, "Contains specific dosage advice", self.safety_responses[MedicalRequestType.DOSAGE_CHANGE]
-        
-        # Check for diagnostic statements
-        if re.search(r'\byou\s+(?:have|might have|probably have|likely have)', response_lower):
-            if re.search(r'\b(?:condition|disease|disorder|syndrome)', response_lower):
-                return False, "Contains diagnostic statement", self.safety_responses[MedicalRequestType.SELF_DIAGNOSIS]
-        
-        # Check for medication change advice
-        if re.search(r'\b(?:stop|start|change|increase|decrease)\s+(?:taking|your|the)\s+(?:medication|dose)', response_lower):
-            return False, "Contains medication change advice", self.safety_responses[MedicalRequestType.DOSAGE_CHANGE]
-        
-        return True, "", ""
+        return base_response
 
 # ============================================================================
-# INTEGRATION WITH GUARD SYSTEM
+# FACTORY FUNCTION
 # ============================================================================
 
-def enhance_guard_with_medical_safety(guard_instance):
+def create_medical_safety_guard() -> SimplifiedMedicalDetector:
+    """Factory function to create medical safety detector"""
+    return SimplifiedMedicalDetector()
+
+# ============================================================================
+# STANDALONE VALIDATION FUNCTION
+# ============================================================================
+
+def check_medical_safety(query: str) -> Tuple[bool, str]:
     """
-    Enhance existing guard with medical safety detection
-    This should be called in guard.py initialization
+    Standalone function to check if a query is medically safe.
+    Returns: (is_safe, response_if_unsafe)
     """
-    detector = MedicalSafetyDetector()
+    detector = SimplifiedMedicalDetector()
+    result = detector.detect_unsafe_request(query)
     
-    # Store original validate_query method
-    original_validate_query = guard_instance.validate_query
+    if result.request_type != MedicalRequestType.NONE and result.confidence > 0.8:
+        return False, detector.get_safe_response(result.request_type, result.is_emergency)
     
-    async def enhanced_validate_query(query: str):
-        # First check medical safety
-        request_type, pattern, is_emergency = detector.detect_medical_request(query)
-        
-        if request_type != MedicalRequestType.NONE:
-            from guard import ValidationDecision, ValidationResult, ThreatType
-            
-            return ValidationDecision(
-                result=ValidationResult.REDIRECT,
-                final_response=detector.get_safe_response(request_type, is_emergency),
-                reasoning=f"Medical safety: {request_type.value} - {pattern}",
-                confidence=0.95,
-                threat_type=ThreatType.UNSAFE_MEDICAL,
-                should_log=True
-            )
-        
-        # Then run original validation
-        return await original_validate_query(query)
+    return True, ""
+
+# ============================================================================
+# TESTING
+# ============================================================================
+
+if __name__ == "__main__":
+    # Test the detector with various queries
+    test_queries = [
+        "Can my wife and I share our journvax until she gets her own prescription?",
+        "Can I take double dose if I'm in severe pain?",
+        "What are the side effects of Journvax?",  # Safe query
+        "My child needs medication, what dose should I give?",
+        "I missed a dose, should I take two?",
+        "Tell me about Journvax usage",  # Safe query
+    ]
     
-    # Store original validate_response method  
-    original_validate_response = guard_instance.validate_response
+    detector = create_medical_safety_guard()
     
-    async def enhanced_validate_response(response: str, context: str = "", query: str = "", **kwargs):
-        # Check response for medical safety issues
-        is_safe, issue, safe_alternative = detector.check_response_safety(response, query)
-        
-        if not is_safe:
-            from guard import ValidationDecision, ValidationResult, ThreatType
-            
-            return ValidationDecision(
-                result=ValidationResult.REJECTED,
-                final_response=safe_alternative,
-                reasoning=f"Response safety: {issue}",
-                confidence=0.95,
-                threat_type=ThreatType.UNSAFE_MEDICAL
-            )
-        
-        # Run original validation
-        return await original_validate_response(response, context, query, **kwargs)
-    
-    # Replace methods
-    guard_instance.validate_query = enhanced_validate_query
-    guard_instance.validate_response = enhanced_validate_response
-    guard_instance.medical_detector = detector
-    
-    return guard_instance
+    for query in test_queries:
+        result = detector.detect_unsafe_request(query)
+        print(f"\nQuery: {query}")
+        print(f"Result: {result.request_type.value}")
+        print(f"Confidence: {result.confidence:.2f}")
+        print(f"Emergency: {result.is_emergency}")
+        if result.request_type != MedicalRequestType.NONE:
+            print(f"Response: {detector.get_safe_response(result.request_type, result.is_emergency)[:100]}...")
