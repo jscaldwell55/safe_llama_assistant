@@ -85,6 +85,7 @@ BRIDGE_SYNTHESIZER_PARAMS = {
     "top_p": 0.9,
     "repetition_penalty": 1.1,
     "return_full_text": False,
+    "stop": ["\nUser Question:", "\nUser:", "\nHuman:", "\nAssistant:", "User Question:", "###"],
 }
 
 # Guard Agent - FAST & PRECISE

@@ -21,7 +21,7 @@ Available Documentation:
 
 User Question: {query}
 
-Natural Response:"""
+Response:"""
 
 # ============================================================================
 # ALTERNATIVE PROMPTS FOR DIFFERENT SCENARIOS

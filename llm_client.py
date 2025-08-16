@@ -57,6 +57,24 @@ def clean_model_output(text: str) -> str:
     
     original_text = text
     
+    # CRITICAL FIX: Remove everything after "User Question:" or similar markers
+    # This stops the model from generating multiple question/response pairs
+    user_markers = [
+        "User Question:", 
+        "\nUser Question:", 
+        "User:", 
+        "\nUser:", 
+        "\nUser ", 
+        "\nHuman:", 
+        "Human:",
+        "\n\nQuestion:",
+        "Natural Response:"  # Also remove if model generates another response
+    ]
+    for marker in user_markers:
+        if marker in text:
+            text = text.split(marker)[0].strip()
+            break  # Stop after finding the first marker
+    
     # Remove extraction format artifacts
     text = re.sub(r'\*\*Extracted Information:\*\*\s*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'^Extracted Information:\s*', '', text, flags=re.IGNORECASE | re.MULTILINE)
