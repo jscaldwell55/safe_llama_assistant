@@ -62,6 +62,8 @@ class EnhancedGuard:
         self.use_llm = USE_LLM_GUARD
         self.embedding_model = None
         self.medical_detector = None  # Will be initialized below
+        self.off_topic_handler = None  # Will be initialized below
+        self.compliance_validator = None  # Will be initialized below
         
         # Enhanced threat patterns
         self.threat_patterns = {
@@ -104,6 +106,8 @@ class EnhancedGuard:
         
         self._load_embedding_model()
         self._initialize_medical_safety()
+        self._initialize_off_topic_handler()
+        self._initialize_compliance_validator()
     
     def _load_embedding_model(self):
         """Load embedding model for similarity check"""
@@ -152,8 +156,74 @@ class EnhancedGuard:
                     "Please contact your healthcare provider for guidance."
                 )
         
-        self.medical_detector = InlineMedicalDetector()
-        logger.info("Inline medical detector created")
+    def _initialize_off_topic_handler(self):
+        """Initialize off-topic request handler"""
+        try:
+            from off_topic_handler import OffTopicHandler
+            self.off_topic_handler = OffTopicHandler()
+            logger.info("Off-topic handler initialized")
+        except ImportError:
+            # Create inline handler if module not found
+            self._create_inline_off_topic_handler()
+    
+    def _create_inline_off_topic_handler(self):
+        """Create inline off-topic handler if module not found"""
+        class InlineOffTopicHandler:
+            def generate_response(self, query):
+                query_lower = query.lower()
+                
+                # Handle bedtime story requests
+                if 'bedtime' in query_lower and 'story' in query_lower:
+                    return (
+                        "I'm not able to tell bedtime stories, but I can share some tips for "
+                        "creating a calming bedtime routine. Many parents find that keeping "
+                        "a consistent schedule — like reading a favorite book, dimming the lights, "
+                        "or playing gentle music — helps children settle down more easily."
+                    )
+                
+                # Handle other creative requests
+                if any(word in query_lower for word in ['story', 'poem', 'song', 'write me']):
+                    return (
+                        "I'm specifically designed to provide information about Journvax, "
+                        "so I'm not able to create creative content. Is there anything about "
+                        "Journvax I can help you with?"
+                    )
+                
+                return None
+        
+        self.off_topic_handler = InlineOffTopicHandler()
+        logger.info("Inline off-topic handler created")
+    
+    def _initialize_compliance_validator(self):
+        """Initialize compliance validator"""
+        try:
+            from enterprise_compliance import ComplianceValidator
+            self.compliance_validator = ComplianceValidator()
+            logger.info("Compliance validator initialized")
+        except ImportError:
+            # Create inline validator if module not found
+            self._create_inline_compliance_validator()
+    
+    def _create_inline_compliance_validator(self):
+        """Create inline compliance validator"""
+        class InlineComplianceValidator:
+            def enforce_compliance(self, response, query, is_refusal=False):
+                # Basic compliance - remove hedging from refusals
+                if is_refusal:
+                    hedges = ["maybe", "perhaps", "might", "generally", "typically"]
+                    for hedge in hedges:
+                        response = response.replace(hedge, "")
+                    response = response.replace("  ", " ").strip()
+                
+                # Add disclaimer for medical content
+                if any(word in response.lower() for word in ["side effect", "symptom", "dosage"]):
+                    if "not a complete list" not in response:
+                        response += " This is not a complete list. See the Medication Guide for full information."
+                
+                return response
+        
+        self.compliance_validator = InlineComplianceValidator()
+        logger.info("Inline compliance validator created")
     
     def detect_query_threats(self, query: str) -> Tuple[ThreatType, str]:
         """
@@ -266,6 +336,20 @@ class EnhancedGuard:
                     should_log=True
                 )
         
+        # Check for off-topic but harmless requests (before threat detection)
+        if self.off_topic_handler:
+            off_topic_response = self.off_topic_handler.generate_response(query)
+            if off_topic_response:
+                logger.info("Off-topic request handled gracefully")
+                return ValidationDecision(
+                    result=ValidationResult.REDIRECT,
+                    final_response=off_topic_response,
+                    reasoning="Off-topic request",
+                    confidence=0.95,
+                    threat_type=ThreatType.OFF_TOPIC,
+                    should_log=False  # Don't log harmless off-topic
+                )
+        
         # Then detect other threats
         threat_type, pattern_name = self.detect_query_threats(query)
         
@@ -290,7 +374,7 @@ class EnhancedGuard:
         **kwargs
     ) -> ValidationDecision:
         """
-        Validate response AFTER generation
+        Validate response AFTER generation with compliance enforcement
         """
         if not self.enabled:
             return ValidationDecision(
@@ -305,9 +389,19 @@ class EnhancedGuard:
             threat_type, _ = self.detect_query_threats(query)
             if threat_type != ThreatType.NONE:
                 # Should have been caught earlier, but block anyway
+                # Use approved templates for refusals
+                if self.compliance_validator:
+                    final_response = self.compliance_validator.enforce_compliance(
+                        self.threat_responses[threat_type],
+                        query,
+                        is_refusal=True
+                    )
+                else:
+                    final_response = self.threat_responses[threat_type]
+                
                 return ValidationDecision(
                     result=ValidationResult.REDIRECT,
-                    final_response=self.threat_responses[threat_type],
+                    final_response=final_response,
                     reasoning=f"Late detection of {threat_type.value}",
                     confidence=0.9,
                     threat_type=threat_type,
@@ -317,9 +411,19 @@ class EnhancedGuard:
             # Check response safety
             is_safe, safety_reason = self.check_response_safety(response)
             if not is_safe:
+                safe_response = "I cannot provide that information as it may be unsafe. Please consult with a healthcare professional for medical advice."
+                
+                # Enforce compliance on the safe response
+                if self.compliance_validator:
+                    safe_response = self.compliance_validator.enforce_compliance(
+                        safe_response,
+                        query,
+                        is_refusal=True
+                    )
+                
                 return ValidationDecision(
                     result=ValidationResult.REJECTED,
-                    final_response="I cannot provide that information as it may be unsafe. Please consult with a healthcare professional for medical advice.",
+                    final_response=safe_response,
                     reasoning=f"Response safety check failed: {safety_reason}",
                     confidence=0.95
                 )
@@ -335,9 +439,19 @@ class EnhancedGuard:
             ]
             
             if any(indicator in response_lower for indicator in off_topic_indicators):
+                final_response = "I don't have specific information about that in the Journvax documentation. Could you please ask something specific about Journvax?"
+                
+                # Enforce compliance
+                if self.compliance_validator:
+                    final_response = self.compliance_validator.enforce_compliance(
+                        final_response,
+                        query,
+                        is_refusal=False
+                    )
+                
                 return ValidationDecision(
                     result=ValidationResult.APPROVED,
-                    final_response="I don't have specific information about that in the Journvax documentation. Could you please ask something specific about Journvax?",
+                    final_response=final_response,
                     reasoning="Off-topic response detected",
                     confidence=0.9,
                     threat_type=ThreatType.OFF_TOPIC
@@ -349,20 +463,41 @@ class EnhancedGuard:
                 
                 if grounding_score < 0.2:  # Very poor grounding
                     logger.warning(f"Poor grounding: {grounding_score:.2f}")
+                    final_response = "I don't have sufficient information to answer that question accurately. Please ask about specific aspects of Journvax that I can help with."
+                    
+                    # Enforce compliance
+                    if self.compliance_validator:
+                        final_response = self.compliance_validator.enforce_compliance(
+                            final_response,
+                            query,
+                            is_refusal=False
+                        )
+                    
                     return ValidationDecision(
                         result=ValidationResult.APPROVED,
-                        final_response="I don't have sufficient information to answer that question accurately. Please ask about specific aspects of Journvax that I can help with.",
+                        final_response=final_response,
                         reasoning=f"Poor grounding score: {grounding_score:.2f}",
                         confidence=0.7
                     )
             
-            # Enhance response with transparency
-            enhanced_response = self.enhance_response_transparency(response, context)
+            # COMPLIANCE ENFORCEMENT - Apply to all approved responses
+            if self.compliance_validator:
+                # Determine if this is a refusal based on content
+                is_refusal = response_lower.startswith(("i cannot", "i will not", "i do not"))
+                
+                # Enforce compliance rules
+                enhanced_response = self.compliance_validator.enforce_compliance(
+                    response,
+                    query,
+                    is_refusal=is_refusal
+                )
+            else:
+                enhanced_response = self.enhance_response_transparency(response, context)
             
             return ValidationDecision(
                 result=ValidationResult.APPROVED,
                 final_response=enhanced_response,
-                reasoning="Passed all safety checks",
+                reasoning="Passed all safety and compliance checks",
                 confidence=0.85
             )
             
