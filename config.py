@@ -135,17 +135,3 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 LOG_SLOW_REQUESTS_THRESHOLD_MS = 5000  # Log requests over 5s
 
-# ============================================================================
-# REMOVED CONFIGURATIONS (No longer needed)
-# ============================================================================
-
-# REMOVED: Multiple persona parameters (INTENT_CLASSIFIER_PARAMS, EMPATHETIC_COMPANION_PARAMS, etc.)
-# REMOVED: Parallel personas settings (ENABLE_PARALLEL_PERSONAS, PARALLEL_TIMEOUT_SECONDS)
-# REMOVED: Complex guard settings (SKIP_GUARD_PATTERNS, ENABLE_FAST_GUARD, etc.)
-# REMOVED: Streaming settings (not implemented)
-# REMOVED: RAG caching (not implemented)
-# REMOVED: Conversation caching (not implemented)
-# REMOVED: System messages (not used)
-# REMOVED: Latency targets (not used)
-# REMOVED: Debug settings (moved to UI)
-# REMOVED: Cache TTL (not implemented in simplified cache)

@@ -1,11 +1,11 @@
-# conversational_agent.py - Simplified Version with Bridge Synthesizer Only
+# conversational_agent.py - Enhanced Version with Early Query Validation
 
 import logging
 import re
 import json
 import asyncio
 import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
@@ -13,14 +13,15 @@ import hashlib
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# SIMPLE CACHE
+# ENHANCED CACHE WITH DEDUPLICATION
 # ============================================================================
 
-class SimpleCache:
-    """Simple response cache"""
+class EnhancedCache:
+    """Enhanced cache with response deduplication"""
     def __init__(self, max_size: int = 100):
         self.cache = {}
         self.max_size = max_size
+        self.fact_cache = {}  # Cache for individual facts to avoid repetition
     
     def get_key(self, query: str, context: str = "") -> str:
         """Generate cache key"""
@@ -37,20 +38,81 @@ class SimpleCache:
     def put(self, key: str, value: str):
         """Store response"""
         if len(self.cache) >= self.max_size:
-            # Remove oldest
             first_key = next(iter(self.cache))
             del self.cache[first_key]
         self.cache[key] = value
         logger.info(f"[CACHE] Stored key: {key[:8]}...")
+    
+    def store_facts(self, topic: str, facts: List[str]):
+        """Store extracted facts to avoid repetition"""
+        self.fact_cache[topic.lower()] = facts
+    
+    def get_facts(self, topic: str) -> Optional[List[str]]:
+        """Get previously extracted facts"""
+        return self.fact_cache.get(topic.lower())
 
 # ============================================================================
-# ENUMS AND DATA CLASSES
+# RESPONSE DEDUPLICATOR
+# ============================================================================
+
+class ResponseDeduplicator:
+    """Ensures consistent, non-repetitive responses"""
+    
+    def __init__(self):
+        self.mentioned_facts = set()
+        self.response_history = []
+    
+    def deduplicate_facts(self, response: str, topic: str) -> str:
+        """Remove already-mentioned facts from response"""
+        # Extract facts from response
+        sentences = response.split('. ')
+        unique_sentences = []
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            # Create fact signature
+            fact_sig = self._get_fact_signature(sentence)
+            
+            if fact_sig not in self.mentioned_facts:
+                self.mentioned_facts.add(fact_sig)
+                unique_sentences.append(sentence)
+            else:
+                logger.debug(f"Skipping duplicate fact: {sentence[:50]}...")
+        
+        if unique_sentences:
+            result = '. '.join(unique_sentences)
+            if result and result[-1] not in '.!?':
+                result += '.'
+            return result
+        
+        return "I've already provided that information. Is there something else about Journvax you'd like to know?"
+    
+    def _get_fact_signature(self, sentence: str) -> str:
+        """Generate a signature for a fact to detect duplicates"""
+        # Normalize the sentence
+        normalized = sentence.lower().strip()
+        # Remove common variations
+        normalized = re.sub(r'\b(including|such as|like|for example)\b', '', normalized)
+        normalized = re.sub(r'\s+', ' ', normalized)
+        return hashlib.md5(normalized.encode()).hexdigest()[:16]
+    
+    def reset(self):
+        """Reset deduplication state"""
+        self.mentioned_facts.clear()
+        self.response_history.clear()
+
+# ============================================================================
+# ENHANCED PERSONA CONDUCTOR
 # ============================================================================
 
 class ResponseStrategy(Enum):
     SYNTHESIZED = "synthesized"
     CONVERSATIONAL = "conversational"
     CACHED = "cached"
+    BLOCKED = "blocked"  # New: for dangerous queries
     ERROR = "error"
 
 @dataclass
@@ -61,24 +123,28 @@ class ConductorDecision:
     context_used: str = ""
     debug_info: Dict[str, Any] = field(default_factory=dict)
     total_latency_ms: int = 0
+    was_blocked: bool = False  # New: track if query was blocked
 
-# ============================================================================
-# SIMPLIFIED PERSONA CONDUCTOR
-# ============================================================================
-
-class PersonaConductor:
+class EnhancedPersonaConductor:
     """
-    Simplified Conductor using only Bridge Synthesizer
+    Enhanced Conductor with:
+    1. Early query validation
+    2. Response deduplication
+    3. Better fact consistency
+    4. Improved transparency
     """
     
     def __init__(self):
         self._retriever = None
+        self.deduplicator = ResponseDeduplicator()
         
-        # Simple cache
         from config import ENABLE_RESPONSE_CACHE, MAX_CACHE_SIZE
-        self.cache = SimpleCache(max_size=MAX_CACHE_SIZE) if ENABLE_RESPONSE_CACHE else None
+        self.cache = EnhancedCache(max_size=MAX_CACHE_SIZE) if ENABLE_RESPONSE_CACHE else None
         
-        # Pre-compiled patterns for instant responses
+        # Guard for early detection
+        self._guard = None
+        
+        # Quick response patterns
         self.greeting_patterns = re.compile(
             r'^(hi|hello|hey|good morning|good afternoon|good evening)[\s!?.,]*$',
             re.IGNORECASE
@@ -88,7 +154,6 @@ class PersonaConductor:
             re.IGNORECASE
         )
         
-        # Instant responses
         self.instant_responses = {
             "hello": "Hello! How can I help you with information about Journvax today?",
             "hi": "Hi there! What would you like to know about Journvax?",
@@ -98,6 +163,13 @@ class PersonaConductor:
             "goodbye": "Goodbye! Take care!",
             "bye": "Bye! Have a great day!",
         }
+    
+    def _get_guard(self):
+        """Lazy load guard"""
+        if self._guard is None:
+            from guard import enhanced_guard
+            self._guard = enhanced_guard
+        return self._guard
     
     def _get_retriever(self):
         """Lazy load RAG retriever"""
@@ -110,34 +182,35 @@ class PersonaConductor:
         """Determine if we need to retrieve context"""
         query_lower = query.lower()
         
-        # Skip retrieval for pure greetings/thanks
         if self.greeting_patterns.match(query) or self.thanks_patterns.match(query):
             return False
         
-        # Skip for very short affirmations
         if query_lower in ["yes", "no", "ok", "okay", "sure"]:
             return False
         
-        # Retrieve for everything else (questions, requests, etc.)
         return True
     
     async def generate_synthesized_response(self, query: str, context: str) -> str:
-        """
-        Generate response using Bridge Synthesizer approach
-        """
-        from prompts import BRIDGE_SYNTHESIZER_SIMPLE_PROMPT
+        """Generate response with better prompting"""
+        from prompts import ENHANCED_BRIDGE_PROMPT
         from config import BRIDGE_SYNTHESIZER_PARAMS
         from llm_client import call_huggingface_with_retry
         
-        # Format the prompt
+        # Build enhanced prompt
         if context and context.strip():
-            prompt = BRIDGE_SYNTHESIZER_SIMPLE_PROMPT.replace("{query}", query)
-            prompt = prompt.replace("{context}", context)
+            prompt = ENHANCED_BRIDGE_PROMPT.format(
+                query=query,
+                context=context
+            )
         else:
-            # No context version
-            prompt = f"""You are a helpful pharmaceutical assistant. Provide a natural, conversational response.
+            prompt = f"""You are a helpful pharmaceutical assistant specializing in Journvax information.
 
 User Question: {query}
+
+Since no specific documentation is available for this query, provide a helpful response that:
+1. Acknowledges the limitation
+2. Offers to help with other Journvax-related questions
+3. Suggests what types of information you CAN provide
 
 Response:"""
         
@@ -147,6 +220,10 @@ Response:"""
             if response.startswith("Error:"):
                 return "I apologize, but I'm having trouble generating a response. Please try again."
             
+            # Deduplicate facts if about common topics
+            if any(topic in query.lower() for topic in ['side effect', 'dosage', 'usage', 'interaction']):
+                response = self.deduplicator.deduplicate_facts(response, query)
+            
             return response.strip()
             
         except Exception as e:
@@ -154,13 +231,31 @@ Response:"""
             return "I apologize, but I encountered an error. Please try again."
     
     async def orchestrate_response(self, query: str) -> ConductorDecision:
-        """
-        Main orchestration - simplified version
-        """
+        """Enhanced orchestration with early query validation"""
         start_time = time.time()
         
         try:
-            # Check cache first
+            # STEP 1: Early query validation (NEW)
+            guard = self._get_guard()
+            query_validation = await guard.validate_query(query)
+            
+            if query_validation is not None:
+                # Query was flagged as dangerous/inappropriate
+                logger.warning(f"Query blocked: {query_validation.threat_type.value}")
+                
+                return ConductorDecision(
+                    final_response=query_validation.final_response,
+                    requires_validation=False,  # Already validated
+                    strategy_used=ResponseStrategy.BLOCKED,
+                    total_latency_ms=int((time.time() - start_time) * 1000),
+                    was_blocked=True,
+                    debug_info={
+                        "blocked_reason": query_validation.reasoning,
+                        "threat_type": query_validation.threat_type.value
+                    }
+                )
+            
+            # STEP 2: Check cache
             if self.cache:
                 cache_key = self.cache.get_key(query)
                 cached_response = self.cache.get(cache_key)
@@ -173,7 +268,7 @@ Response:"""
                         debug_info={"cache_hit": True}
                     )
             
-            # Check for instant responses
+            # STEP 3: Check instant responses
             query_lower = query.lower().strip()
             if query_lower in self.instant_responses:
                 response = self.instant_responses[query_lower]
@@ -190,7 +285,7 @@ Response:"""
                     debug_info={"instant_response": True}
                 )
             
-            # Step 1: Retrieve context if needed
+            # STEP 4: Retrieve context if needed
             context = ""
             rag_time = 0
             if self.should_retrieve_context(query):
@@ -204,22 +299,21 @@ Response:"""
                     context = ""
                 rag_time = int((time.time() - rag_start) * 1000)
             
-            # Step 2: Generate synthesized response
+            # STEP 5: Generate response
             gen_start = time.time()
             response = await self.generate_synthesized_response(query, context)
             gen_time = int((time.time() - gen_start) * 1000)
             
-            # Cache successful responses
+            # STEP 6: Cache successful responses
             if self.cache and response and not response.startswith("Error"):
                 cache_key = self.cache.get_key(query, context)
                 self.cache.put(cache_key, response)
             
-            # Build decision
             total_time = int((time.time() - start_time) * 1000)
             
             return ConductorDecision(
                 final_response=response,
-                requires_validation=bool(context),  # Only validate if we used context
+                requires_validation=True,  # Always validate synthesized responses
                 strategy_used=ResponseStrategy.SYNTHESIZED,
                 context_used=context,
                 total_latency_ms=total_time,
@@ -244,10 +338,39 @@ Response:"""
                 total_latency_ms=int((time.time() - start_time) * 1000),
                 debug_info={"error": str(e)}
             )
+    
+    def reset_conversation(self):
+        """Reset conversation state"""
+        self.deduplicator.reset()
+        logger.info("Conversation state reset")
+
+
+
+# ============================================================================
+# SINGLETON MANAGEMENT
+# ============================================================================
+
+_conductor_instance: Optional[EnhancedPersonaConductor] = None
+
+def get_persona_conductor() -> EnhancedPersonaConductor:
+    """Get singleton PersonaConductor instance"""
+    global _conductor_instance
+    if _conductor_instance is None:
+        _conductor_instance = EnhancedPersonaConductor()
+        logger.info("Created enhanced PersonaConductor singleton")
+    return _conductor_instance
+
+def reset_conductor():
+    """Reset the conductor state"""
+    global _conductor_instance
+    if _conductor_instance:
+        _conductor_instance.reset_conversation()
 
 # ============================================================================
 # LEGACY COMPATIBILITY
 # ============================================================================
+
+PersonaConductor = EnhancedPersonaConductor  # Alias for compatibility
 
 class ConversationMode(Enum):
     GENERAL = "general"
@@ -261,26 +384,21 @@ class AgentDecision:
     debug_info: Dict[str, Any] = field(default_factory=dict)
 
 class ConversationalAgent:
-    """Legacy adapter for backward compatibility"""
-    
+    """Legacy adapter"""
     def __init__(self):
-        self.conductor = PersonaConductor()
+        self.conductor = get_persona_conductor()
     
     def process_query(self, query: str) -> AgentDecision:
-        """Synchronous wrapper for async conductor"""
         import asyncio
         
         try:
-            # Get or create event loop
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             
-            # Run async method
             if loop.is_running():
-                # We're already in an async context
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(
@@ -309,45 +427,10 @@ class ConversationalAgent:
                 debug_info={"error": str(e)}
             )
 
-# ============================================================================
-# SINGLETON MANAGEMENT
-# ============================================================================
-
-_conductor_instance: Optional[PersonaConductor] = None
 _agent_instance: Optional[ConversationalAgent] = None
 
-def get_persona_conductor() -> PersonaConductor:
-    """Get singleton PersonaConductor instance"""
-    global _conductor_instance
-    if _conductor_instance is None:
-        _conductor_instance = PersonaConductor()
-        logger.info("Created simplified PersonaConductor singleton")
-    return _conductor_instance
-
 def get_conversational_agent() -> ConversationalAgent:
-    """Get singleton ConversationalAgent instance"""
     global _agent_instance
     if _agent_instance is None:
         _agent_instance = ConversationalAgent()
-        logger.info("Created ConversationalAgent singleton")
     return _agent_instance
-
-# ============================================================================
-# SIMPLIFIED INTENT CLASSES (for compatibility)
-# ============================================================================
-
-class UserIntent(Enum):
-    INFORMATIONAL = "informational"
-    CONVERSATIONAL = "conversational"
-
-@dataclass
-class IntentAnalysis:
-    primary_intent: UserIntent = UserIntent.INFORMATIONAL
-    needs_facts: bool = True
-    strategy: ResponseStrategy = ResponseStrategy.SYNTHESIZED
-    confidence: float = 0.8
-
-@dataclass
-class CompositionComponents:
-    synthesized_response: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)

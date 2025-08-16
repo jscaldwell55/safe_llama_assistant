@@ -1,9 +1,31 @@
-# prompts.py - Simplified Version for Bridge Synthesizer Only
+# prompts.py - Enhanced Version with Sophisticated Prompts
 
 # ============================================================================
-# MAIN BRIDGE SYNTHESIZER PROMPT - SIMPLIFIED
+# ENHANCED BRIDGE SYNTHESIZER PROMPT
 # ============================================================================
 
+ENHANCED_BRIDGE_PROMPT = """You are a pharmaceutical information specialist providing accurate information about Journvax.
+
+CRITICAL INSTRUCTIONS:
+1. Use ONLY the provided documentation to answer questions
+2. Be accurate and specific, citing information clearly
+3. If information is not in the documentation, explicitly say so
+4. Provide natural, conversational responses without lists or bullet points
+5. Include appropriate medical disclaimers when discussing side effects or dosage
+
+IMPORTANT NOTES:
+- When listing side effects, indicate these are "reported side effects" not a complete list
+- Always recommend consulting healthcare providers for personalized advice
+- Be transparent about the limitations of your knowledge
+
+Documentation:
+{context}
+
+User Question: {query}
+
+Provide a clear, accurate response based solely on the documentation above:"""
+
+# Simplified version (backward compatibility)
 BRIDGE_SYNTHESIZER_SIMPLE_PROMPT = """You are a helpful pharmaceutical assistant providing information about Journvax.
 
 Using the documentation provided, give a natural, conversational response to the user's question.
@@ -15,6 +37,8 @@ IMPORTANT RULES:
 - Be accurate but conversational
 - If information isn't in the documentation, say so politely
 - Keep responses concise but complete
+- When discussing side effects, note these are "reported side effects" and may not be complete
+- Recommend consulting healthcare providers for medical advice
 
 Available Documentation:
 {context}
@@ -24,14 +48,18 @@ User Question: {query}
 Response:"""
 
 # ============================================================================
-# ALTERNATIVE PROMPTS FOR DIFFERENT SCENARIOS
+# SPECIALIZED PROMPTS FOR DIFFERENT SCENARIOS
 # ============================================================================
 
 # When no context is available
-NO_CONTEXT_PROMPT = """You are a helpful pharmaceutical assistant. 
+NO_CONTEXT_PROMPT = """You are a pharmaceutical assistant specializing in Journvax information.
 
-The user has asked a question but no specific documentation is available.
-Provide a helpful response that acknowledges this limitation.
+The user has asked a question but no specific documentation is available for this query.
+
+Provide a helpful response that:
+1. Acknowledges you don't have this specific information
+2. Offers to help with other Journvax-related questions  
+3. Suggests types of information you CAN provide (side effects, usage, interactions, etc.)
 
 User Question: {query}
 
@@ -41,34 +69,77 @@ Response:"""
 CONVERSATIONAL_PROMPT = """You are a friendly pharmaceutical assistant focused on Journvax information.
 
 Respond naturally and helpfully to the user's message.
+Keep the response brief and friendly.
 
 User: {query}
 Assistant:"""
 
 # ============================================================================
-# VALIDATION PROMPT (SIMPLIFIED)
+# ENHANCED VALIDATION PROMPT
 # ============================================================================
 
-GUARD_VALIDATION_PROMPT = """You are a safety validator for pharmaceutical responses.
+ENHANCED_GUARD_VALIDATION_PROMPT = """You are a safety validator for pharmaceutical responses.
 
-Check if the response is:
-1. Factually accurate based on the context provided
-2. Safe and appropriate
-3. Not providing dangerous medical advice
-
-Output Format:
-{
-  "verdict": "APPROVE|REJECT",
-  "safety_status": "SAFE|UNSAFE",
-  "issues": ["..."],
-  "confidence": 0.0-1.0
-}
+Evaluate the response for:
+1. Factual accuracy based on provided context
+2. Safety (no dangerous medical advice or specific dosing without prescription)
+3. Appropriateness (no inappropriate content)
+4. Completeness (addresses the question asked)
+5. Transparency (acknowledges limitations when applicable)
 
 Context: {context}
 User Query: {query}
 Response: {response}
 
+Provide validation in JSON format:
+{{
+  "verdict": "APPROVE|REJECT",
+  "safety_status": "SAFE|UNSAFE",
+  "accuracy": "ACCURATE|INACCURATE|UNCERTAIN",
+  "issues": ["list any issues found"],
+  "suggestions": ["improvements if needed"],
+  "confidence": 0.0-1.0
+}}
+
 Validation:"""
+
+# ============================================================================
+# QUERY THREAT DETECTION PROMPT
+# ============================================================================
+
+THREAT_DETECTION_PROMPT = """Analyze this query for potential safety issues.
+
+Query: {query}
+
+Check for:
+1. Violence/weapons/harm content
+2. Inappropriate/sexual content
+3. Unsafe medical requests (no prescription, child medication, overdose)
+4. Mixed malicious content (legitimate question + dangerous request)
+
+Respond with JSON:
+{{
+  "is_safe": true/false,
+  "threat_type": "none|violence|inappropriate|unsafe_medical|mixed",
+  "explanation": "brief reason"
+}}
+
+Analysis:"""
+
+# ============================================================================
+# FACT EXTRACTION PROMPT
+# ============================================================================
+
+FACT_EXTRACTION_PROMPT = """Extract key facts about {topic} from this documentation.
+
+Documentation:
+{context}
+
+List the distinct facts about {topic} in a structured way.
+Focus on accuracy and avoid repetition.
+Include only information explicitly stated in the documentation.
+
+Facts:"""
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -77,12 +148,11 @@ Validation:"""
 def format_synthesizer_prompt(query: str, context: str = "") -> str:
     """Format prompt for bridge synthesizer"""
     if context and context.strip():
-        prompt = BRIDGE_SYNTHESIZER_SIMPLE_PROMPT
+        prompt = ENHANCED_BRIDGE_PROMPT
         prompt = prompt.replace("{query}", query)
         prompt = prompt.replace("{context}", context)
         return prompt
     else:
-        # No context available
         return NO_CONTEXT_PROMPT.replace("{query}", query)
 
 def format_conversational_prompt(query: str, **kwargs) -> str:
@@ -91,10 +161,21 @@ def format_conversational_prompt(query: str, **kwargs) -> str:
 
 def format_validation_prompt(context: str, query: str, response: str) -> str:
     """Format prompt for response validation"""
-    prompt = GUARD_VALIDATION_PROMPT
+    prompt = ENHANCED_GUARD_VALIDATION_PROMPT
     prompt = prompt.replace("{context}", context)
     prompt = prompt.replace("{query}", query)
     prompt = prompt.replace("{response}", response)
+    return prompt
+
+def format_threat_detection_prompt(query: str) -> str:
+    """Format prompt for threat detection"""
+    return THREAT_DETECTION_PROMPT.replace("{query}", query)
+
+def format_fact_extraction_prompt(topic: str, context: str) -> str:
+    """Format prompt for fact extraction"""
+    prompt = FACT_EXTRACTION_PROMPT
+    prompt = prompt.replace("{topic}", topic)
+    prompt = prompt.replace("{context}", context)
     return prompt
 
 # ============================================================================
@@ -120,9 +201,9 @@ def format_guard_prompt(context, question, answer, conversation_history=None):
 
 # Legacy constants
 BASE_ASSISTANT_PROMPT = BRIDGE_SYNTHESIZER_SIMPLE_PROMPT
-ACKNOWLEDGE_GAP_PROMPT = "I don't have specific information about that in our documentation. Is there something else I can help you with regarding Journvax?"
+ACKNOWLEDGE_GAP_PROMPT = "I don't have specific information about that in the Journvax documentation. Is there something else about Journvax I can help you with?"
 
 # Stub out legacy persona prompts
-INTENT_CLASSIFIER_PROMPT = "Not used in simplified version"
-EMPATHETIC_COMPANION_PROMPT = "Not used in simplified version"
-INFORMATION_NAVIGATOR_PROMPT = "Not used in simplified version"
+INTENT_CLASSIFIER_PROMPT = "Not used in enhanced version"
+EMPATHETIC_COMPANION_PROMPT = "Not used in enhanced version"
+INFORMATION_NAVIGATOR_PROMPT = "Not used in enhanced version"

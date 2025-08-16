@@ -71,6 +71,8 @@ def clean_model_output(text: str) -> str:
         "Natural Response:",  # Also remove if model generates another response
         # ADD THESE NEW MARKERS TO CATCH "Note:" and similar
         "\nNote:",
+        " Note.",  # Catch "Note." with space before
+        "\nNote.",
         "Note:",
         "\n--",
         "--.",
@@ -94,6 +96,29 @@ def clean_model_output(text: str) -> str:
     # Cut off at the earliest marker found, but ensure we end at a sentence boundary
     if earliest_pos < len(text):
         text = text[:earliest_pos]
+        
+        # Remove trailing incomplete sentences
+        # First, check if we're mid-sentence (doesn't end with punctuation)
+        text = text.strip()
+        
+        # If text ends with certain incomplete patterns, remove them
+        incomplete_patterns = [
+            "it's always best to consult with your",
+            "you should talk to your",
+            "please consult with your",
+            "speak with your",
+            "contact your",
+            "ask your",
+            "check with your"
+        ]
+        
+        for pattern in incomplete_patterns:
+            if text.lower().endswith(pattern):
+                # Find where this pattern starts and cut before it
+                pattern_start = text.lower().rfind(pattern)
+                if pattern_start > 0:
+                    text = text[:pattern_start].strip()
+                break
         
         # Find the last complete sentence before the cutoff
         # Look for the last period, exclamation, or question mark

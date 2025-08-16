@@ -1,10 +1,10 @@
-# guard.py - Clean Simple Version for Single Model System
+# guard.py - Enhanced Version with Sophisticated Safety Detection
 
 import logging
 import re
 import json
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, List
 from dataclasses import dataclass
 from enum import Enum
 
@@ -18,12 +18,21 @@ from config import (
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# SIMPLE VALIDATION RESULT
+# ENHANCED VALIDATION RESULTS
 # ============================================================================
 
 class ValidationResult(Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
+    REDIRECT = "redirect"  # New: for redirecting dangerous queries
+
+class ThreatType(Enum):
+    NONE = "none"
+    VIOLENCE = "violence"
+    INAPPROPRIATE = "inappropriate"
+    UNSAFE_MEDICAL = "unsafe_medical"
+    MIXED_MALICIOUS = "mixed_malicious"
+    OFF_TOPIC = "off_topic"
 
 @dataclass
 class ValidationDecision:
@@ -31,32 +40,66 @@ class ValidationDecision:
     final_response: str
     reasoning: str
     confidence: float = 0.0
+    threat_type: ThreatType = ThreatType.NONE
+    should_log: bool = False  # For security monitoring
 
 # ============================================================================
-# SIMPLE GUARD
+# ENHANCED GUARD WITH EARLY DETECTION
 # ============================================================================
 
-class SimpleGuard:
+class EnhancedGuard:
     """
-    Simple guard focused on:
-    1. Basic grounding check (with lower threshold)
-    2. Critical safety patterns
-    3. Optional LLM reasoning for edge cases
+    Sophisticated guard with:
+    1. Early malicious query detection
+    2. Proper handling of mixed queries
+    3. Consistent response formatting
+    4. Better transparency about limitations
     """
     
     def __init__(self):
         self.enabled = ENABLE_GUARD
-        self.similarity_threshold = SEMANTIC_SIMILARITY_THRESHOLD  # Should be ~0.35
+        self.similarity_threshold = SEMANTIC_SIMILARITY_THRESHOLD
         self.use_llm = USE_LLM_GUARD
         self.embedding_model = None
         
-        # Only truly dangerous patterns that should always be blocked
-        self.critical_safety_patterns = [
+        # Enhanced threat patterns
+        self.threat_patterns = {
+            ThreatType.VIOLENCE: [
+                (r'\b(?:build|make|create|construct)(?:ing)?\s+(?:a\s+)?(?:bomb|explosive|weapon)', 'explosive_creation'),
+                (r'\b(?:how to|ways to|methods to)\s+(?:harm|hurt|kill|poison)', 'harm_instructions'),
+                (r'\b(?:suicide|self.?harm|end(?:ing)?\s+(?:my\s+)?life)', 'self_harm'),
+                (r'\b(?:terror|attack|destroy|damage)\s+(?:plan|method|instruction)', 'destructive_intent'),
+            ],
+            ThreatType.INAPPROPRIATE: [
+                (r'\b(?:sexy|erotic|sexual|nude|naked|porn)', 'sexual_content'),
+                (r'\b(?:write|tell|create)\s+(?:me\s+)?(?:a\s+)?(?:sexy|erotic|adult)\s+(?:story|tale)', 'inappropriate_story'),
+                (r'\b(?:romance|romantic|intimate)\s+(?:between|with|involving)', 'inappropriate_relationship'),
+            ],
+            ThreatType.UNSAFE_MEDICAL: [
+                (r'\b(?:without|no)\s+(?:a\s+)?prescription', 'no_prescription'),
+                (r'\b(?:my\s+)?(?:kid|child|baby|infant|toddler)\s+(?:take|try|use)', 'child_medication'),
+                (r'\b(?:overdose|lethal\s+dose|maximum\s+dose)', 'dangerous_dosage'),
+                (r'\b(?:mix|combine)\s+with\s+(?:alcohol|drugs|medication)', 'dangerous_combination'),
+                (r'\bwhat\s+(?:dose|dosage|amount)\s+(?:should|to|for)', 'dosage_recommendation'),
+            ]
+        }
+        
+        # Critical safety patterns for response validation
+        self.response_safety_patterns = [
             (r'\b(?:take|inject|consume)\s+\d+\s*(?:mg|ml|pills)\s+(?:every|daily|twice)', 'specific_dosage_instruction'),
             (r'\byou (?:definitely|certainly) have\b', 'diagnostic_claim'),
             (r'\b(?:stop|start) taking (?:journvax|your medication) immediately\b', 'medication_directive'),
             (r'\b(?:crush|snort|inject|smoke) (?:the|your|journvax)', 'dangerous_administration'),
         ]
+        
+        # Response templates for different threat types
+        self.threat_responses = {
+            ThreatType.VIOLENCE: "I cannot and will not provide information about creating weapons, explosives, or causing harm. If you're experiencing thoughts of self-harm, please contact a crisis helpline immediately: 988 (Suicide & Crisis Lifeline) or text HOME to 741741.",
+            ThreatType.INAPPROPRIATE: "I cannot create inappropriate or sexual content. I'm here to provide helpful information about Journvax and pharmaceutical topics. How can I assist you with that instead?",
+            ThreatType.UNSAFE_MEDICAL: "I cannot provide medical advice or dosage recommendations. This medication requires a prescription and should only be used under the guidance of a healthcare professional. Please consult with a doctor or pharmacist for personalized medical advice.",
+            ThreatType.MIXED_MALICIOUS: "I've detected potentially harmful content in your query. I can only provide safe, appropriate information about Journvax. Please rephrase your question if you need legitimate pharmaceutical information.",
+            ThreatType.OFF_TOPIC: "I'm specifically designed to provide information about Journvax. I don't have information about that topic. Is there something about Journvax I can help you with?"
+        }
         
         self._load_embedding_model()
     
@@ -65,35 +108,60 @@ class SimpleGuard:
         try:
             from embeddings import get_embedding_model
             self.embedding_model = get_embedding_model()
-            logger.info("Embedding model loaded for guard")
+            logger.info("Embedding model loaded for enhanced guard")
         except Exception as e:
             logger.warning(f"Could not load embedding model for guard: {e}")
             self.embedding_model = None
     
-    def check_safety_patterns(self, response: str) -> Tuple[bool, str]:
+    def detect_query_threats(self, query: str) -> Tuple[ThreatType, str]:
         """
-        Check for critical safety issues
+        Early detection of threats in user queries
+        Returns: (threat_type, pattern_name)
+        """
+        query_lower = query.lower()
+        
+        # Check each threat category
+        for threat_type, patterns in self.threat_patterns.items():
+            for pattern, pattern_name in patterns:
+                if re.search(pattern, query_lower):
+                    logger.warning(f"Threat detected - Type: {threat_type.value}, Pattern: {pattern_name}")
+                    return threat_type, pattern_name
+        
+        # Check for mixed malicious queries (safe topic + dangerous topic)
+        safe_keywords = ['journvax', 'medication', 'side effect', 'dosage', 'usage']
+        danger_keywords = ['bomb', 'weapon', 'explosive', 'sexy', 'erotic', 'kill', 'harm']
+        
+        has_safe = any(keyword in query_lower for keyword in safe_keywords)
+        has_danger = any(keyword in query_lower for keyword in danger_keywords)
+        
+        if has_safe and has_danger:
+            logger.warning("Mixed malicious query detected")
+            return ThreatType.MIXED_MALICIOUS, "mixed_query"
+        
+        return ThreatType.NONE, ""
+    
+    def check_response_safety(self, response: str) -> Tuple[bool, str]:
+        """
+        Check response for safety issues
         Returns: (is_safe, reason)
         """
         response_lower = response.lower()
         
-        for pattern, pattern_name in self.critical_safety_patterns:
+        for pattern, pattern_name in self.response_safety_patterns:
             if re.search(pattern, response_lower):
-                logger.warning(f"Critical safety pattern detected: {pattern_name}")
+                logger.warning(f"Response safety issue: {pattern_name}")
                 return False, f"Contains {pattern_name}"
         
         return True, "No safety issues"
     
     def calculate_grounding_score(self, response: str, context: str) -> float:
         """
-        Calculate semantic similarity between response and context
-        Lower scores are OK - we just want some relationship
+        Calculate semantic similarity with better handling
         """
         if not context or not self.embedding_model:
             return 0.0
         
         try:
-            # Get embeddings
             response_embedding = self.embedding_model.encode(
                 response, convert_to_tensor=False, show_progress_bar=False
             )
@@ -101,7 +169,6 @@ class SimpleGuard:
                 context, convert_to_tensor=False, show_progress_bar=False
             )
             
-            # Calculate cosine similarity
             similarity = float(
                 np.dot(response_embedding, context_embedding) / 
                 (np.linalg.norm(response_embedding) * np.linalg.norm(context_embedding))
@@ -111,65 +178,63 @@ class SimpleGuard:
             
         except Exception as e:
             logger.error(f"Error calculating grounding score: {e}")
-            return 0.5  # Return neutral score on error
+            return 0.5
     
-    async def llm_safety_check(self, response: str, context: str, query: str) -> Tuple[bool, str]:
+    def enhance_response_transparency(self, response: str, context: str) -> str:
         """
-        Use LLM for nuanced safety check
-        Returns: (is_safe, reasoning)
+        Add transparency markers to responses
         """
-        if not self.use_llm:
-            return True, "LLM check disabled"
+        # Check if response contains medical information
+        medical_terms = ['side effect', 'dosage', 'symptom', 'treatment', 'medication']
+        contains_medical = any(term in response.lower() for term in medical_terms)
         
-        try:
-            from llm_client import call_guard_agent
+        if contains_medical and context:
+            # Add disclaimer if not already present
+            disclaimers = [
+                "according to", "based on", "documentation states", 
+                "information provided", "not a complete list"
+            ]
+            has_disclaimer = any(disc in response.lower() for disc in disclaimers)
             
-            # Simple prompt for safety check
-            prompt = f"""Check if this response is safe and appropriate for a pharmaceutical assistant.
-
-Context provided: {context[:500]}...
-User question: {query}
-Response: {response}
-
-Is this response:
-1. Safe (no dangerous medical advice)?
-2. Appropriate (answers the question)?
-3. Grounded (if facts are stated, are they from context)?
-
-Answer with JSON:
-{{"safe": true/false, "appropriate": true/false, "grounded": true/false, "reasoning": "brief explanation"}}
-"""
-            
-            llm_response = await call_guard_agent(prompt)
-            
-            # Parse response
-            try:
-                json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
-                if json_match:
-                    data = json.loads(json_match.group())
-                    is_safe = data.get("safe", True) and data.get("appropriate", True)
-                    reasoning = data.get("reasoning", "LLM check")
-                    return is_safe, reasoning
-            except:
-                pass
-            
-            # Default to safe if parsing fails
-            return True, "LLM check passed (parsing failed)"
-            
-        except Exception as e:
-            logger.error(f"LLM safety check failed: {e}")
-            return True, "LLM check failed, defaulting to safe"
+            if not has_disclaimer:
+                response = response.rstrip('.')
+                response += ". Please note this information is based on available documentation and may not be complete. Always consult your healthcare provider for personalized advice."
+        
+        return response
     
+    async def validate_query(self, query: str) -> Optional[ValidationDecision]:
+        """
+        Validate query BEFORE processing (early detection)
+        Returns ValidationDecision if query should be blocked, None if safe
+        """
+        if not self.enabled:
+            return None
+        
+        # Detect threats early
+        threat_type, pattern_name = self.detect_query_threats(query)
+        
+        if threat_type != ThreatType.NONE:
+            # Return appropriate response for threat type
+            return ValidationDecision(
+                result=ValidationResult.REDIRECT,
+                final_response=self.threat_responses[threat_type],
+                reasoning=f"Query contains {threat_type.value}: {pattern_name}",
+                confidence=0.95,
+                threat_type=threat_type,
+                should_log=True  # Log for security monitoring
+            )
+        
+        return None  # Query is safe to process
     
     async def validate_response(
         self,
         response: str,
         context: str = "",
         query: str = "",
-        **kwargs  # Ignore extra args from legacy calls
+        **kwargs
     ) -> ValidationDecision:
         """
-        Main validation function
+        Validate response AFTER generation
         """
         if not self.enabled:
             return ValidationDecision(
@@ -180,94 +245,90 @@ Answer with JSON:
             )
         
         try:
-            # Step 1: Check critical safety patterns
-            is_safe, safety_reason = self.check_safety_patterns(response)
+            # First, check if query had threats we missed
+            threat_type, _ = self.detect_query_threats(query)
+            if threat_type != ThreatType.NONE:
+                # Should have been caught earlier, but block anyway
+                return ValidationDecision(
+                    result=ValidationResult.REDIRECT,
+                    final_response=self.threat_responses[threat_type],
+                    reasoning=f"Late detection of {threat_type.value}",
+                    confidence=0.9,
+                    threat_type=threat_type,
+                    should_log=True
+                )
+            
+            # Check response safety
+            is_safe, safety_reason = self.check_response_safety(response)
             if not is_safe:
                 return ValidationDecision(
                     result=ValidationResult.REJECTED,
-                    final_response=DEFAULT_FALLBACK_MESSAGE,
-                    reasoning=f"Safety check failed: {safety_reason}",
+                    final_response="I cannot provide that information as it may be unsafe. Please consult with a healthcare professional for medical advice.",
+                    reasoning=f"Response safety check failed: {safety_reason}",
                     confidence=0.95
                 )
             
-            # Step 2: Check if response indicates off-topic or inability to help
+            # Check for off-topic or unhelpful responses
             response_lower = response.lower()
             off_topic_indicators = [
                 "i don't have that information",
                 "i don't have information about that",
                 "not in the documentation",
-                "not in our knowledge base",
                 "i cannot help with that",
-                "i can't help with that",
                 "outside my scope",
-                "not equipped to",
             ]
             
             if any(indicator in response_lower for indicator in off_topic_indicators):
-                # Replace with simple, consistent message
                 return ValidationDecision(
                     result=ValidationResult.APPROVED,
-                    final_response="I'm sorry, I am not able to help you with that. Would you like to discuss something else?",
-                    reasoning="Off-topic query detected",
-                    confidence=0.9
+                    final_response="I don't have specific information about that in the Journvax documentation. Could you please ask something specific about Journvax?",
+                    reasoning="Off-topic response detected",
+                    confidence=0.9,
+                    threat_type=ThreatType.OFF_TOPIC
                 )
             
-            # Step 3: If we have context, check grounding (with low threshold)
+            # Check grounding if context provided
             if context and len(context) > 100:
                 grounding_score = self.calculate_grounding_score(response, context)
                 
-                if grounding_score < self.similarity_threshold:
-                    # Only reject if it's REALLY ungrounded (very low score)
-                    if grounding_score < 0.2:  # Much lower threshold
-                        logger.warning(f"Very poor grounding: {grounding_score:.2f}")
-                        # For poor grounding, use the off-topic response instead of fallback
-                        return ValidationDecision(
-                            result=ValidationResult.APPROVED,
-                            final_response="I'm sorry, I am not able to help you with that. Would you like to discuss something else?",
-                            reasoning=f"Poor grounding score: {grounding_score:.2f}",
-                            confidence=0.7
-                        )
-                    # Otherwise just log it
-                    logger.info(f"Low grounding score but acceptable: {grounding_score:.2f}")
-            
-            # Step 4: Optional LLM check for complex cases
-            if self.use_llm and len(response) > 200:  # Only for longer responses
-                is_safe_llm, llm_reason = await self.llm_safety_check(response, context, query)
-                if not is_safe_llm:
+                if grounding_score < 0.2:  # Very poor grounding
+                    logger.warning(f"Poor grounding: {grounding_score:.2f}")
                     return ValidationDecision(
-                        result=ValidationResult.REJECTED,
-                        final_response=DEFAULT_FALLBACK_MESSAGE,
-                        reasoning=f"LLM safety check: {llm_reason}",
-                        confidence=0.8
+                        result=ValidationResult.APPROVED,
+                        final_response="I don't have sufficient information to answer that question accurately. Please ask about specific aspects of Journvax that I can help with.",
+                        reasoning=f"Poor grounding score: {grounding_score:.2f}",
+                        confidence=0.7
                     )
             
-            # Step 5: Approved!
+            # Enhance response with transparency
+            enhanced_response = self.enhance_response_transparency(response, context)
+            
             return ValidationDecision(
                 result=ValidationResult.APPROVED,
-                final_response=response,
-                reasoning="Passed all checks",
+                final_response=enhanced_response,
+                reasoning="Passed all safety checks",
                 confidence=0.85
             )
             
         except Exception as e:
             logger.error(f"Validation error: {e}", exc_info=True)
-            # On error, approve rather than block
             return ValidationDecision(
                 result=ValidationResult.APPROVED,
                 final_response=response,
-                reasoning=f"Validation error, approved by default",
+                reasoning="Validation error, approved by default",
                 confidence=0.5
             )
 
 # ============================================================================
-# SINGLETON & LEGACY SUPPORT
+# SINGLETON INSTANCE
 # ============================================================================
 
 # Create singleton instance
-simple_guard = SimpleGuard()
+enhanced_guard = EnhancedGuard()
 
-# Legacy support - map old names to new
-persona_validator = simple_guard  # For app.py compatibility
+# Legacy support
+simple_guard = enhanced_guard
+persona_validator = enhanced_guard
 
 def evaluate_response(
     context: str,
@@ -279,7 +340,7 @@ def evaluate_response(
     import asyncio
     
     async def validate():
-        decision = await simple_guard.validate_response(
+        decision = await enhanced_guard.validate_response(
             response=assistant_response,
             context=context,
             query=user_question
