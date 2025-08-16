@@ -160,6 +160,7 @@ Answer with JSON:
             logger.error(f"LLM safety check failed: {e}")
             return True, "LLM check failed, defaulting to safe"
     
+    
     async def validate_response(
         self,
         response: str,
@@ -189,7 +190,29 @@ Answer with JSON:
                     confidence=0.95
                 )
             
-            # Step 2: If we have context, check grounding (with low threshold)
+            # Step 2: Check if response indicates off-topic or inability to help
+            response_lower = response.lower()
+            off_topic_indicators = [
+                "i don't have that information",
+                "i don't have information about that",
+                "not in the documentation",
+                "not in our knowledge base",
+                "i cannot help with that",
+                "i can't help with that",
+                "outside my scope",
+                "not equipped to",
+            ]
+            
+            if any(indicator in response_lower for indicator in off_topic_indicators):
+                # Replace with simple, consistent message
+                return ValidationDecision(
+                    result=ValidationResult.APPROVED,
+                    final_response="I'm sorry, I am not able to help you with that. Would you like to discuss something else?",
+                    reasoning="Off-topic query detected",
+                    confidence=0.9
+                )
+            
+            # Step 3: If we have context, check grounding (with low threshold)
             if context and len(context) > 100:
                 grounding_score = self.calculate_grounding_score(response, context)
                 
@@ -197,16 +220,17 @@ Answer with JSON:
                     # Only reject if it's REALLY ungrounded (very low score)
                     if grounding_score < 0.2:  # Much lower threshold
                         logger.warning(f"Very poor grounding: {grounding_score:.2f}")
+                        # For poor grounding, use the off-topic response instead of fallback
                         return ValidationDecision(
-                            result=ValidationResult.REJECTED,
-                            final_response=DEFAULT_FALLBACK_MESSAGE,
+                            result=ValidationResult.APPROVED,
+                            final_response="I'm sorry, I am not able to help you with that. Would you like to discuss something else?",
                             reasoning=f"Poor grounding score: {grounding_score:.2f}",
                             confidence=0.7
                         )
                     # Otherwise just log it
                     logger.info(f"Low grounding score but acceptable: {grounding_score:.2f}")
             
-            # Step 3: Optional LLM check for complex cases
+            # Step 4: Optional LLM check for complex cases
             if self.use_llm and len(response) > 200:  # Only for longer responses
                 is_safe_llm, llm_reason = await self.llm_safety_check(response, context, query)
                 if not is_safe_llm:
@@ -217,7 +241,7 @@ Answer with JSON:
                         confidence=0.8
                     )
             
-            # Step 4: Approved!
+            # Step 5: Approved!
             return ValidationDecision(
                 result=ValidationResult.APPROVED,
                 final_response=response,
