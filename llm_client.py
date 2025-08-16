@@ -57,121 +57,63 @@ def clean_model_output(text: str) -> str:
     
     original_text = text
     
-    # CRITICAL FIX: Remove everything after "User Question:" or similar markers
-    # This stops the model from generating multiple question/response pairs
+    # CRITICAL FIX: Only cut at EXPLICIT markers on new lines
+    # These markers indicate the model is generating a new turn
     user_markers = [
-        "User Question:", 
-        "\nUser Question:", 
-        "User:", 
-        "\nUser:", 
-        "\nUser ", 
-        "\nHuman:", 
-        "Human:",
-        "\n\nQuestion:",
-        "Natural Response:",  # Also remove if model generates another response
-        # ADD THESE NEW MARKERS TO CATCH "Note:" and similar
-        "\nNote:",
-        " Note.",  # Catch "Note." with space before
-        "\nNote.",
-        "Note:",
-        "\n--",
-        "--.",
-        "Response:",
-        "\nResponse:",
-        "IMPORTANT:",
-        "\nIMPORTANT:",
-        "Remember:",
-        "\nRemember:",
-        "This response",
-        "\nThis response"
+        "\n\nUser Question:",  # Must be on new line with double break
+        "\n\nUser:",
+        "\n\nHuman:",
+        "\n\nAssistant:",
+        "\n\nNatural Response:",
+        "\n\nNote:",  # Only if it's clearly a new section
+        "\n--",  # Line breaks
+        "\n\n###",  # Clear section break
     ]
     
-    # Find the earliest occurrence of any marker
+    # Find the earliest EXPLICIT marker
     earliest_pos = len(text)
     for marker in user_markers:
         pos = text.find(marker)
         if pos != -1 and pos < earliest_pos:
             earliest_pos = pos
     
-    # Cut off at the earliest marker found, but ensure we end at a sentence boundary
+    # Only cut if we found an explicit marker
     if earliest_pos < len(text):
-        text = text[:earliest_pos]
-        
-        # Remove trailing incomplete sentences
-        # First, check if we're mid-sentence (doesn't end with punctuation)
-        text = text.strip()
-        
-        # If text ends with certain incomplete patterns, remove them
-        incomplete_patterns = [
-            "it's always best to consult with your",
-            "you should talk to your",
-            "please consult with your",
-            "speak with your",
-            "contact your",
-            "ask your",
-            "check with your"
+        text = text[:earliest_pos].strip()
+    
+    # Check for incomplete sentences at the very end
+    # But be more careful about what counts as "incomplete"
+    if text:
+        # Only consider it incomplete if it ends with obvious cut-offs
+        incomplete_endings = [
+            " and just a",
+            " but the",
+            " with the", 
+            " for the",
+            " to the",
+            " in the",
+            " or the",
+            " as well as",
+            " along with",
+            " together with",
         ]
         
-        for pattern in incomplete_patterns:
-            if text.lower().endswith(pattern):
-                # Find where this pattern starts and cut before it
-                pattern_start = text.lower().rfind(pattern)
-                if pattern_start > 0:
-                    text = text[:pattern_start].strip()
+        text_lower = text.lower()
+        for ending in incomplete_endings:
+            if text_lower.endswith(ending):
+                # Find the last complete sentence
+                sentences = text.rsplit('.', 1)
+                if len(sentences) > 1:
+                    text = sentences[0] + '.'
                 break
-        
-        # Find the last complete sentence before the cutoff
-        # Look for the last period, exclamation, or question mark
-        last_sentence_end = -1
-        for i in range(len(text) - 1, -1, -1):
-            if text[i] in '.!?':
-                # Make sure it's not an abbreviation (check for capital letter after)
-                if i == len(text) - 1 or (i < len(text) - 1 and (text[i+1].isspace() or text[i+1] in '"\')')):
-                    last_sentence_end = i + 1
-                    break
-        
-        # If we found a sentence boundary, cut there
-        if last_sentence_end > 0:
-            text = text[:last_sentence_end].strip()
-        else:
-            # If no sentence boundary found, at least try to avoid cutting mid-word
-            # Find the last space before the cutoff
-            last_space = text.rfind(' ')
-            if last_space > 0:
-                text = text[:last_space].strip()
-                # Add a period if the text doesn't end with punctuation
-                if text and text[-1] not in '.!?':
-                    text += '.'
-            else:
-                text = text.strip()
     
-    # Additional cleanup for sentences that start with meta-commentary
-    # Split into sentences and filter out meta-commentary
-    sentences = text.split('. ')
-    cleaned_sentences = []
-    
-    meta_patterns = [
-        "This response follows",
-        "This response provides",
-        "I've provided",
-        "I'm providing",
-        "As requested",
-        "Following the",
-        "According to the rules",
-        "Per the guidelines"
-    ]
-    
-    for sentence in sentences:
-        sentence = sentence.strip()
-        # Skip sentences that are meta-commentary about the response
-        if any(sentence.startswith(pattern) for pattern in meta_patterns):
-            continue
-        if sentence:
-            cleaned_sentences.append(sentence)
-    
-    if cleaned_sentences:
-        text = '. '.join(cleaned_sentences)
-        # Ensure the last sentence ends with proper punctuation
+    # Handle single word "Note" at the end (but not "note that" or other uses)
+    if text.endswith(" Note."):
+        text = text[:-6].strip()
+        if text and text[-1] not in '.!?':
+            text += '.'
+    elif text.endswith(" Note"):
+        text = text[:-5].strip()
         if text and text[-1] not in '.!?':
             text += '.'
     
@@ -180,7 +122,7 @@ def clean_model_output(text: str) -> str:
     text = re.sub(r'^Extracted Information:\s*', '', text, flags=re.IGNORECASE | re.MULTILINE)
     text = re.sub(r'^\*\*.*?Information.*?:\*\*\s*', '', text, flags=re.MULTILINE | re.IGNORECASE)
     
-    # Remove role markers
+    # Remove role markers at the beginning
     text = text.strip()
     for prefix in ["Assistant:", "assistant:", "ASSISTANT:", "Bot:", "AI:", "Model:", "Response:", "Navigator:", "Information Navigator:"]:
         if text.startswith(prefix):
@@ -223,7 +165,6 @@ def clean_model_output(text: str) -> str:
         r"^Here's what I found:\s*",
         r"^Here is the information:\s*",
         r"^\[.*?\]\s*",
-        r"^Note:.*?\n",
     ]
     
     for pattern in cot_patterns:
@@ -241,7 +182,14 @@ def clean_model_output(text: str) -> str:
     
     # Ensure complete sentence
     if text and text[-1] not in '.!?':
-        text += '.'
+        # But only add period if it doesn't look like we cut off mid-sentence
+        last_words = text.split()[-3:] if len(text.split()) >= 3 else text.split()
+        last_phrase = ' '.join(last_words).lower()
+        
+        # Don't add period if we clearly cut off mid-thought
+        cut_off_indicators = ['and', 'but', 'or', 'with', 'for', 'to', 'the', 'a', 'an', 'just']
+        if not any(last_phrase.endswith(' ' + word) for word in cut_off_indicators):
+            text += '.'
     
     return text.strip()
 
