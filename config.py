@@ -79,13 +79,19 @@ INFORMATION_NAVIGATOR_PARAMS = {
 
 # Bridge Synthesizer - CREATIVE
 BRIDGE_SYNTHESIZER_PARAMS = {
-    "max_new_tokens": 250,  # Final composition
-    "temperature": 0.6,  # Balanced creativity
+    "max_new_tokens": 150,  # Reduced for faster responses
+    "temperature": 0.6,
     "do_sample": True,
     "top_p": 0.9,
     "repetition_penalty": 1.1,
     "return_full_text": False,
-    "stop": ["\nUser Question:", "\nUser:", "\nHuman:", "\nAssistant:", "User Question:", "###"],
+    # Only 4 stop sequences (HF limit)
+    "stop": [
+        "\nUser Question:",
+        "\nUser:",
+        "\nHuman:",
+        "###"
+    ]
 }
 
 # Guard Agent - FAST & PRECISE
