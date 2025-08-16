@@ -61,6 +61,7 @@ class EnhancedGuard:
         self.similarity_threshold = SEMANTIC_SIMILARITY_THRESHOLD
         self.use_llm = USE_LLM_GUARD
         self.embedding_model = None
+        self.medical_detector = None  # Will be initialized below
         
         # Enhanced threat patterns
         self.threat_patterns = {
@@ -102,6 +103,7 @@ class EnhancedGuard:
         }
         
         self._load_embedding_model()
+        self._initialize_medical_safety()
     
     def _load_embedding_model(self):
         """Load embedding model for similarity check"""
@@ -112,6 +114,46 @@ class EnhancedGuard:
         except Exception as e:
             logger.warning(f"Could not load embedding model for guard: {e}")
             self.embedding_model = None
+    
+    def _initialize_medical_safety(self):
+        """Initialize medical safety detection"""
+        try:
+            from medical_safety_patterns import MedicalSafetyDetector
+            self.medical_detector = MedicalSafetyDetector()
+            logger.info("Medical safety detector initialized")
+        except ImportError:
+            # If medical_safety_patterns doesn't exist, create inline version
+            self._create_inline_medical_detector()
+    
+    def _create_inline_medical_detector(self):
+        """Create inline medical detector if module not found"""
+        class InlineMedicalDetector:
+            def detect_medical_request(self, query):
+                query_lower = query.lower()
+                
+                # Critical patterns for dosage changes
+                dosage_patterns = [
+                    r'\b(?:can|should|could).*(?:take|have|use).*(?:double|triple|extra|more)',
+                    r'\b(?:increase|decrease|change).*(?:dose|dosage)',
+                    r'\bmissed.*dose.*(?:double|two|extra)',
+                    r'\bin.*pain.*(?:more|extra|double).*(?:dose|medication)',
+                ]
+                
+                for pattern in dosage_patterns:
+                    if re.search(pattern, query_lower):
+                        return ThreatType.UNSAFE_MEDICAL, pattern, False
+                
+                return ThreatType.NONE, '', False
+            
+            def get_safe_response(self, request_type, is_emergency=False):
+                return (
+                    "I cannot recommend changing medication dosage. "
+                    "Journvax should only be taken exactly as prescribed by your doctor. "
+                    "Please contact your healthcare provider for guidance."
+                )
+        
+        self.medical_detector = InlineMedicalDetector()
+        logger.info("Inline medical detector created")
     
     def detect_query_threats(self, query: str) -> Tuple[ThreatType, str]:
         """
@@ -210,7 +252,21 @@ class EnhancedGuard:
         if not self.enabled:
             return None
         
-        # Detect threats early
+        # Check medical safety FIRST (highest priority)
+        if self.medical_detector:
+            med_type, pattern, is_emergency = self.medical_detector.detect_medical_request(query)
+            if med_type != ThreatType.NONE:
+                logger.warning(f"Medical safety issue detected: {pattern}")
+                return ValidationDecision(
+                    result=ValidationResult.REDIRECT,
+                    final_response=self.medical_detector.get_safe_response(med_type, is_emergency),
+                    reasoning=f"Medical safety: {pattern}",
+                    confidence=0.98,
+                    threat_type=ThreatType.UNSAFE_MEDICAL,
+                    should_log=True
+                )
+        
+        # Then detect other threats
         threat_type, pattern_name = self.detect_query_threats(query)
         
         if threat_type != ThreatType.NONE:
