@@ -64,7 +64,6 @@ class EnhancedGuard:
         self.medical_detector = None  # Will be initialized below
         self.off_topic_handler = None  # Will be initialized below
         self.compliance_validator = None  # Will be initialized below
-        self.final_safety = None  # Will be initialized below
         
         # Enhanced threat patterns
         self.threat_patterns = {
@@ -109,7 +108,6 @@ class EnhancedGuard:
         self._initialize_medical_safety()
         self._initialize_off_topic_handler()
         self._initialize_compliance_validator()
-        self._initialize_final_safety()
     
     def _load_embedding_model(self):
         """Load embedding model for similarity check"""
@@ -531,7 +529,7 @@ class EnhancedGuard:
                 # Determine if this is a refusal based on content
                 is_refusal = response_lower.startswith(("i cannot", "i will not", "i do not"))
                 
-                # Enforce compliance rules
+                # Enforce compliance rules (now includes final safety)
                 enhanced_response = self.compliance_validator.enforce_compliance(
                     response,
                     query,
@@ -539,16 +537,6 @@ class EnhancedGuard:
                 )
             else:
                 enhanced_response = self.enhance_response_transparency(response, context)
-            
-            # FINAL SAFETY HARDENING - Last check
-            if self.final_safety:
-                if 'enforce' in self.final_safety:
-                    # Inline version
-                    enhanced_response = self.final_safety['enforce'](enhanced_response, query)
-                elif 'validator' in self.final_safety:
-                    # Full version
-                    from final_safety_hardening import enforce_final_safety
-                    enhanced_response = enforce_final_safety(enhanced_response, query)
             
             return ValidationDecision(
                 result=ValidationResult.APPROVED,

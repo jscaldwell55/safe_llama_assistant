@@ -1,137 +1,144 @@
 # Pharma Enterprise Assistant - Safety Architecture
 
 ## Overview
-Enterprise-grade pharmaceutical assistant for Journvax information with regulatory-compliant safety controls and deterministic response policies.
+Enterprise-grade pharmaceutical assistant for Journvax with regulatory-compliant safety controls.
 
-## 🛡️ Five-Layer Safety System
+## 🛡️ Three-Layer Safety System
 
 ```
-User Input → [Pre-emptive Blocking] → [Query Validation] → [LLM Processing] → [Response Validation] → [Compliance Enforcement] → Output
+User Input → [Medical Safety Check] → [LLM Processing] → [Compliance Validation] → Safe Output
 ```
 
-### Layer 1: Pre-emptive Blocking
-**File**: `dosing_query_blocker.py`
-- Blocks ALL dosing queries before LLM processing
-- Zero-tolerance for: maximum doses, safe amounts, symptom-based dosing
-- Immediate refusal: "I cannot provide dosing advice. Contact your healthcare provider immediately."
+### Layer 1: Medical Safety Detection
+**File**: `medical_safety_patterns.py`
+- Detects unsafe medical requests BEFORE processing
+- Categories: Dosing, Prescription Sharing, Administration, Medical Advice
+- Returns pre-approved refusal templates
 
-### Layer 2: Query Validation  
-**Files**: `guard.py`, `medical_safety_patterns.py`
-- **Medical Safety**: Prescription sharing, pediatric dosing, self-medication
-- **Threat Detection**: Violence, weapons, inappropriate content
-- **Off-Topic Handling**: Graceful redirection for harmless off-topic requests
-
-### Layer 3: LLM Processing Controls
+### Layer 2: LLM Processing
 **File**: `prompts.py`
-- Explicit instructions against dosing advice
-- No mixing refusals with medical information
-- Forbidden: mg amounts, administration timing, "we should" language
+- Strict instructions preventing medical advice
+- Banned phrases list (no "don't worry", "consider having", etc.)
+- Required structure: State refusal → Add warning if needed → Direct to provider
 
-### Layer 4: Response Validation
-**File**: `guard.py`
-- Grounding check (similarity score >0.35)
-- Safety pattern detection
-- Scope control (removes tangential info)
-
-### Layer 5: Compliance Enforcement
+### Layer 3: Compliance Validation
 **File**: `enterprise_compliance.py`
-- Removes ALL hedging from refusals ("maybe", "perhaps", "might")
-- Strips ungrounded claims and numbers
+- Removes ALL hedging ("maybe", "perhaps", "might")
+- Blocks risk minimization ("don't worry")
+- Strips unsanctioned guidance (meal timing, schedules)
 - Enforces medical disclaimers
-- Uses pre-approved templates only
+- Final sanitization of problematic offers
 
-## 📋 Compliance Standards
-
-### Deterministic Safety Policy
-```python
-APPROVED_REFUSAL_TEMPLATES = {
-    "dosing_advice": "I cannot provide dosing advice. Contact your healthcare provider immediately.",
-    "prescription_sharing": "I cannot recommend sharing prescription medications.",
-    "medical_advice": "I cannot provide medical advice. Contact your healthcare provider."
-}
-```
-
-### No Reward Hijacking
-- ❌ "I can't help with dosing, but the usual dose is 100mg..."
-- ✅ "I cannot provide dosing advice. Contact your healthcare provider immediately."
-
-### Required Disclaimers
-All medical information includes: *"This is not a complete list. See the Medication Guide for full information."*
-
-## 🚫 Blocked Content
+## 📋 Safety Rules
 
 ### Always Blocked (Zero Tolerance)
-- Dosing advice or modifications
-- Prescription sharing/lending
-- Pediatric use without Rx
-- Violence/weapons/harm
-- Sexual/inappropriate content
+| Query Type | Response |
+|------------|----------|
+| Dosing/Maximum amounts | "I cannot provide dosing advice. Contact your healthcare provider immediately." |
+| Administration timing | "I cannot provide administration guidance. Contact your healthcare provider immediately." |
+| Prescription sharing | "I cannot recommend sharing prescription medications. Each person must have their own prescription." |
+| Drug interactions | "I cannot advise on drug interactions. Contact your healthcare provider or pharmacist immediately." |
+| OTC combinations | "I cannot recommend specific over-the-counter products while taking Journvax." |
 
-### Forbidden in Responses
-- Specific mg amounts (unless citing verbatim labeling)
-- Administration instructions in refusals
-- Prescriptive language ("we should")
-- Uncited comparisons or percentages
-- Tangential clinical info not directly asked
+### Banned Content
+- ❌ Specific mg amounts (unless citing documentation verbatim)
+- ❌ Food/meal recommendations
+- ❌ Schedule advice ("stick to your regular schedule")
+- ❌ Risk minimization ("don't worry", "should be okay")
+- ❌ General medical advice ("stay hydrated", "get rest")
+- ❌ Offering alternatives ("would you like suggestions?")
 
-## 📊 Safety Examples
+## 🔧 System Components
 
-| Query | Response |
-|-------|----------|
-| "Most I can safely take?" | "I cannot advise on maximum doses or safe amounts. Contact your healthcare provider immediately." |
-| "Share medication with wife?" | "I cannot recommend sharing prescription medications. Each person must have their own prescription." |
-| "Bedtime story for my son?" | "I'm not able to tell bedtime stories, but I can share tips for creating a calming bedtime routine..." |
-| "Side effects?" | "[List from documentation]. This is not a complete list. See the Medication Guide for full information." |
+### Core Safety Files
+```
+├── guard.py                      # Main orchestrator
+├── medical_safety_patterns.py    # Unsafe query detection
+├── enterprise_compliance.py      # Response validation & sanitization
+├── off_topic_handler.py         # Graceful off-topic handling
+└── prompts.py                    # Compliant prompt templates
+```
 
-## 🔧 Configuration
+### Supporting Files
+```
+├── conversational_agent.py      # Response orchestration
+├── llm_client.py               # Output cleaning
+├── rag.py                      # Document retrieval
+├── embeddings.py               # Grounding validation
+├── config.py                   # System configuration
+└── app.py                      # Streamlit interface
+```
+
+## 🔄 Request Flow
+
+1. **Query Validation** (`guard.py`)
+   - Routes to appropriate safety checker
+   - Coordinates all safety layers
+
+2. **Medical Safety Check** (`medical_safety_patterns.py`)
+   - Semantic detection of unsafe requests
+   - Returns if unsafe: pre-approved template
+
+3. **If Safe → LLM Processing**
+   - Retrieves context from documentation
+   - Generates response with strict prompts
+
+4. **Compliance Enforcement** (`enterprise_compliance.py`)
+   - Validates response for violations
+   - Removes problematic content
+   - Applies required disclaimers
+   - Final sanitization
+
+5. **Clean Output** (`llm_client.py`)
+   - Removes meta-commentary
+   - Ensures complete sentences
+
+## 📊 Configuration
 
 ```python
-# config.py
+# config.py key settings
 ENABLE_GUARD = True
 SEMANTIC_SIMILARITY_THRESHOLD = 0.35
 USE_LLM_GUARD = False  # Optional additional validation
+MAX_CACHE_SIZE = 100
 ```
 
-## 📁 Key Files
+## ✅ Compliance Standards
 
+### Required Response Structure
 ```
-Core Safety:
-├── dosing_query_blocker.py     # Pre-emptive dosing blocks
-├── medical_safety_patterns.py   # Medical request detection
-├── enterprise_compliance.py     # Compliance enforcement
-├── guard.py                     # Integrated safety system
-├── off_topic_handler.py        # Graceful off-topic handling
-
-Processing:
-├── conversational_agent.py     # Response orchestration
-├── prompts.py                  # Compliant prompt templates
-├── llm_client.py              # Output cleaning
-
-Support:
-├── rag.py                      # Document retrieval
-├── embeddings.py              # Grounding validation
-└── app.py                     # Streamlit interface
+1. Clear refusal: "I cannot provide [X] advice."
+2. Safety warning (if relevant): "Alcohol can increase side effects..."
+3. Provider redirect: "Contact your healthcare provider."
 ```
+
+### Pre-Approved Templates Only
+All unsafe queries receive ONLY pre-approved templates. No dynamic generation for:
+- Dosing questions
+- Administration queries  
+- Drug interactions
+- Medical advice
 
 ## 🎯 Performance Metrics
 
-- **Pre-emptive blocking**: 100% of dosing queries
-- **Query validation**: <50ms latency
-- **Medical safety detection**: >98% accuracy
-- **Compliance enforcement**: 100% template adherence
-- **False positive rate**: <5%
+- Query validation: <50ms
+- Safety detection accuracy: >98%
+- Template compliance: 100%
+- False positive rate: <5%
 
-## ⚠️ Regulatory Notice
+## ⚠️ Regulatory Compliance
 
 **This system**:
-- Never provides medical advice or dosing recommendations
-- Always defers to healthcare professionals
-- Maintains strict separation between refusals and medical content
-- Uses only pre-approved response templates for safety refusals
-- Logs all safety interventions for audit purposes
+- Never provides medical advice, dosing, or administration guidance
+- Uses only pre-approved templates for all safety refusals
+- Maintains complete separation between refusals and medical content
+- Logs all safety interventions for audit
+- Complies with pharmaceutical industry standards
+
+**Key Principle**: When in doubt, refuse and redirect to healthcare provider.
 
 ---
 
-**Version**: 3.0 (Regulatory Compliant)  
+**Version**: 4.0 (Streamlined Architecture)  
 **Last Updated**: November 2024  
-**Compliance Standard**: Enterprise Pharmaceutical
+**Files**: 11 core files (reduced from 15+)

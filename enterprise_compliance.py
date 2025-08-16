@@ -306,6 +306,37 @@ class ComplianceValidator:
         Main compliance enforcement function.
         Returns: Compliant response
         """
+        response_lower = response.lower()
+        query_lower = query.lower()
+        
+        # FINAL SAFETY: Immediate template replacement for problematic patterns
+        problematic_offers = [
+            "would you like some suggestions",
+            "can i help you explore",
+            "alternative strategies",
+            "other options",
+            "let me suggest",
+            "shall i look up"
+        ]
+        
+        for phrase in problematic_offers:
+            if phrase in response_lower:
+                # Return safe template based on query type
+                if "alcohol" in query_lower or "drink" in query_lower:
+                    return (
+                        "I can't advise you to change your medication dose. "
+                        "Alcohol can sometimes increase the risk of side effects when combined with medications. "
+                        "Please consult your healthcare provider for guidance."
+                    )
+                elif "otc" in query_lower or "over-the-counter" in query_lower:
+                    return (
+                        "I can't recommend specific over-the-counter products while taking Journvax. "
+                        "Combining medications and OTC remedies can sometimes cause unexpected interactions. "
+                        "Please check with your doctor or pharmacist."
+                    )
+                else:
+                    return "I cannot provide medical advice. Contact your healthcare provider."
+        
         # For refusals, ensure no hedging and use templates
         if is_refusal:
             # Detect refusal type from response content
@@ -320,11 +351,36 @@ class ComplianceValidator:
                 refusal_type = "pediatric_without_rx"
             
             is_compliant, corrected = self.validate_refusal(response, refusal_type)
-            return corrected if not is_compliant else response
+            if not is_compliant:
+                return corrected
         
         # For medical content, ensure grounding and disclaimers
         is_compliant, corrected = self.validate_medical_content(response, query)
-        return corrected if not is_compliant else response
+        
+        # FINAL SAFETY: Remove any remaining problematic content
+        if is_compliant:
+            # Sanitize general medical advice
+            advice_patterns = [
+                r"it's often suggested that.*?\.",
+                r"general guidelines.*?\.",
+                r"stay hydrated.*?\.",
+                r"get rest.*?\.",
+                r"drink water.*?\.",
+                r"clear liquids.*?\.",
+            ]
+            
+            for pattern in advice_patterns:
+                corrected = re.sub(pattern, "", corrected, flags=re.IGNORECASE)
+            
+            # Clean up
+            corrected = re.sub(r'\s+', ' ', corrected)
+            corrected = corrected.strip()
+            
+            # If we removed too much, return safe default
+            if len(corrected) < 20:
+                return "I cannot provide medical advice. Contact your healthcare provider."
+        
+        return corrected
 
 # ============================================================================
 # INTEGRATION HELPERS
