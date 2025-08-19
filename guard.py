@@ -317,34 +317,115 @@ JSON:"""
     def _check_compliance_patterns(self, response: str, query: str) -> ValidationDecision:
         """Deterministic pattern-based compliance check"""
         response_lower = response.lower()
+        query_lower = query.lower()
         
-        # Category 1: Inaccurate Claims
+        # Skip compliance checks for refusals or no-info responses
+        if any(phrase in response_lower for phrase in [
+            "i cannot", "i don't have", "i'm not able", "i'm sorry", 
+            "i don't seem to have", "would you like to talk about something else"
+        ]):
+            return ValidationDecision(
+                result=ValidationResult.APPROVED,
+                final_response=response,
+                reasoning="Refusal/no-info response - no compliance check needed",
+                confidence=0.95,
+                violation=RegulatoryViolation.NONE
+            )
+        
+        # Category 1: Inaccurate Claims - "It doesn't mention X, so you're fine"
         if re.search(r"(?:doesn't|don't) mention.*(?:so|therefore).*(?:fine|safe|ok)", response_lower):
             return self._create_rejection(RegulatoryViolation.INACCURATE_CLAIMS, "Implied safety from absence")
         
-        # Category 2: Risk Communication
-        if self._has_medical_content(response_lower) and not self._has_disclaimer(response_lower):
-            if re.search(r'(include|such as|may cause|reported)', response_lower):
-                corrected = response.rstrip('.') + ". This is not a complete list. See the Medication Guide for full information."
-                return ValidationDecision(
-                    result=ValidationResult.REJECTED,
-                    final_response=corrected,
-                    reasoning="Missing medical disclaimer",
-                    violation=RegulatoryViolation.INADEQUATE_RISK_COMM
-                )
+        # Category 2: Risk Communication - Only for actual medical content
+        # Check if response is actually listing side effects (not just mentioning the concept)
+        listing_indicators = ['include', 'such as', 'may cause', 'can cause', 'reported', 'common side effects are']
+        has_medical_list = any(indicator in response_lower for indicator in listing_indicators)
+        has_disclaimer = any(phrase in response_lower for phrase in [
+            "not a complete list", "medication guide", "full information",
+            "complete safety information", "see the medication guide"
+        ])
         
-        # Categories 3-9: Core violations
-        violation_patterns = [
-            (r"don't worry|should be fine|typically safe", RegulatoryViolation.IMPROPER_PROMOTION),
-            (r"you (?:should|must) (?:take|stop|increase)", RegulatoryViolation.MEDICAL_ADVICE),
-            (r"take \d+\s*(?:mg|tablet|pill)", RegulatoryViolation.UNAPPROVED_DOSING),
-            (r"(?:better|worse) than (?:other|another)", RegulatoryViolation.CROSS_PRODUCT_REF),
-            (r"give.*to.*(?:child|kid|baby)", RegulatoryViolation.OFF_LABEL_USE),
+        if has_medical_list and not has_disclaimer:
+            corrected = response.rstrip('.') + ". This is not a complete list. See the Medication Guide for full information."
+            return ValidationDecision(
+                result=ValidationResult.REJECTED,
+                final_response=corrected,
+                reasoning="Missing medical disclaimer",
+                violation=RegulatoryViolation.INADEQUATE_RISK_COMM
+            )
+        
+        # Category 3: Off-Label Use - Only flag ACTUAL recommendations for unapproved use
+        # NOT general information requests about side effects
+        off_label_patterns = [
+            r"(?:give|administer|safe to give).*(?:to|for).*(?:child|pediatric|infant|baby)",
+            r"(?:child|baby|infant).*(?:can|should|may).*(?:take|use|have)\s+(?:journvax|it|this)",
+            r"(?:safe|okay|fine).*(?:during|while|if).*(?:pregnant|pregnancy|nursing|breastfeed)",
+            r"use (?:journvax|it|this).*(?:for|to treat).*(?:off-label|unapproved)"
         ]
         
-        for pattern, violation in violation_patterns:
+        for pattern in off_label_patterns:
             if re.search(pattern, response_lower):
-                return self._create_rejection(violation, f"Pattern: {pattern[:30]}...")
+                return self._create_rejection(RegulatoryViolation.OFF_LABEL_USE, "Off-label use recommendation")
+        
+        # Category 4: Improper Promotion - Casual reassurance
+        problematic_tone = [
+            "don't worry", "no need to worry", "should be fine", "nothing to worry about",
+            "typically safe", "generally safe", "usually safe", "perfectly safe",
+            "err on the side of caution", "better safe than sorry"
+        ]
+        
+        for phrase in problematic_tone:
+            if phrase in response_lower:
+                return self._create_rejection(RegulatoryViolation.IMPROPER_PROMOTION, f"Inappropriate tone: {phrase}")
+        
+        # Category 5: Cross-Product References
+        if re.search(r"(?:like|similar to|same as|compared to|versus|better than|worse than)\s+(?:other|another|different|competitor)", response_lower):
+            return self._create_rejection(RegulatoryViolation.CROSS_PRODUCT_REF, "Product comparison")
+        
+        # Category 6: Medical Advice - Individual treatment guidance
+        medical_advice_patterns = [
+            r"you (?:should|must|need to) (?:take|stop|start|increase|decrease)",
+            r"(?:increase|decrease|double|halve) your (?:dose|dosage)",
+            r"your doctor (?:will|should) (?:prescribe|adjust)",
+            r"(?:try|consider) (?:taking|stopping|changing) your",
+            r"i (?:recommend|suggest|advise) (?:you|that you)"
+        ]
+        
+        for pattern in medical_advice_patterns:
+            if re.search(pattern, response_lower):
+                return self._create_rejection(RegulatoryViolation.MEDICAL_ADVICE, "Individual medical guidance")
+        
+        # Category 7: Safety-Critical - Missing emergency guidance
+        severe_symptoms = ['severe', 'emergency', 'trouble breathing', 'chest pain', 'swelling', 'anaphylaxis']
+        has_severe = any(symptom in response_lower for symptom in severe_symptoms)
+        has_emergency = any(phrase in response_lower for phrase in ["seek immediate", "call 911", "emergency"])
+        
+        if has_severe and not has_emergency:
+            return self._create_rejection(RegulatoryViolation.SAFETY_CRITICAL_MISS, "Missing emergency guidance")
+        
+        # Category 8: Administration Misuse
+        admin_patterns = [
+            r"(?:share|split|crush|chew|inject|snort)\s+(?:the|your|journvax)",
+            r"give (?:it|journvax) to (?:someone|friend|family)"
+        ]
+        
+        for pattern in admin_patterns:
+            if re.search(pattern, response_lower):
+                return self._create_rejection(RegulatoryViolation.ADMIN_MISUSE, "Unsafe administration")
+        
+        # Category 9: Dosing - Specific dosing instructions
+        dosing_patterns = [
+            r"take \d+\s*(?:tablet|pill|mg|ml|capsule)",
+            r"take (?:it|journvax) (?:in the |at )?(?:morning|evening|night|bedtime)",
+            r"take (?:with|without|before|after) (?:food|meal|eating)",
+            r"(?:stick to|maintain|follow) (?:a |your |the )?(?:regular|usual) schedule"
+        ]
+        
+        for pattern in dosing_patterns:
+            if re.search(pattern, response_lower):
+                # Check if citing documentation
+                if not re.search(r'(according to|per|as stated in|medication guide says)', response_lower):
+                    return self._create_rejection(RegulatoryViolation.UNAPPROVED_DOSING, "Dosing guidance")
         
         return ValidationDecision(
             result=ValidationResult.APPROVED,
