@@ -1,4 +1,4 @@
-# llm_client.py - Clean Working Version with Event Loop Fix
+# llm_client.py - Fixed Output Cleaning Version
 
 import aiohttp
 import asyncio
@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import time
-from typing import Dict, Any, Optional, List, AsyncGenerator
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from collections import deque
 
@@ -47,91 +47,47 @@ def get_or_create_event_loop():
         return loop
 
 # ============================================================================
-# OUTPUT CLEANING
+# OUTPUT CLEANING - SIMPLIFIED AND FIXED
 # ============================================================================
 
 def clean_model_output(text: str) -> str:
-    """Clean and format model output to natural language"""
+    """Clean and format model output - more lenient to preserve complete responses"""
     if not text:
         return ""
     
-    original_text = text
-    
-    # CRITICAL FIX: Only cut at EXPLICIT markers on new lines
-    # These markers indicate the model is generating a new turn
-    user_markers = [
-        "\n\nUser Question:",  # Must be on new line with double break
-        "\n\nUser:",
-        "\n\nHuman:",
-        "\n\nAssistant:",
-        "\n\nNatural Response:",
-        "\n\nNote:",  # Only if it's clearly a new section
-        "\n--",  # Line breaks
-        "\n\n###",  # Clear section break
-    ]
-    
-    # Find the earliest EXPLICIT marker
-    earliest_pos = len(text)
-    for marker in user_markers:
-        pos = text.find(marker)
-        if pos != -1 and pos < earliest_pos:
-            earliest_pos = pos
-    
-    # Only cut if we found an explicit marker
-    if earliest_pos < len(text):
-        text = text[:earliest_pos].strip()
-    
-    # Check for incomplete sentences at the very end
-    # But be more careful about what counts as "incomplete"
-    if text:
-        # Only consider it incomplete if it ends with obvious cut-offs
-        incomplete_endings = [
-            " and just a",
-            " but the",
-            " with the", 
-            " for the",
-            " to the",
-            " in the",
-            " or the",
-            " as well as",
-            " along with",
-            " together with",
-        ]
-        
-        text_lower = text.lower()
-        for ending in incomplete_endings:
-            if text_lower.endswith(ending):
-                # Find the last complete sentence
-                sentences = text.rsplit('.', 1)
-                if len(sentences) > 1:
-                    text = sentences[0] + '.'
-                break
-    
-    # Handle single word "Note" at the end (but not "note that" or other uses)
-    if text.endswith(" Note."):
-        text = text[:-6].strip()
-        if text and text[-1] not in '.!?':
-            text += '.'
-    elif text.endswith(" Note"):
-        text = text[:-5].strip()
-        if text and text[-1] not in '.!?':
-            text += '.'
-    
-    # Remove extraction format artifacts
-    text = re.sub(r'\*\*Extracted Information:\*\*\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'^Extracted Information:\s*', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r'^\*\*.*?Information.*?:\*\*\s*', '', text, flags=re.MULTILINE | re.IGNORECASE)
-    
-    # Remove role markers at the beginning
+    # Step 1: Remove any role markers at the beginning
     text = text.strip()
-    for prefix in ["Assistant:", "assistant:", "ASSISTANT:", "Bot:", "AI:", "Model:", "Response:", "Navigator:", "Information Navigator:"]:
+    role_prefixes = [
+        "Assistant:", "assistant:", "ASSISTANT:", 
+        "Bot:", "AI:", "Model:", "Response:",
+        "Information Navigator:", "Navigator:"
+    ]
+    for prefix in role_prefixes:
         if text.startswith(prefix):
             text = text[len(prefix):].lstrip()
     
-    # Convert bullet points to natural text
-    has_bullets = '•' in text or re.search(r'^\s*[-*]\s+', text, re.MULTILINE)
+    # Step 2: Cut at explicit turn markers (but be conservative)
+    turn_markers = [
+        "\n\nUser Question:",
+        "\n\nUser:",
+        "\n\nHuman:",
+        "\n\nAssistant:",
+        "\n\n###",
+        "\n---\n",
+    ]
     
-    if has_bullets:
+    for marker in turn_markers:
+        pos = text.find(marker)
+        if pos != -1:
+            text = text[:pos].strip()
+            break
+    
+    # Step 3: Remove extraction format artifacts
+    text = re.sub(r'\*\*Extracted Information:\*\*\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^Extracted Information:\s*', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Step 4: Clean up bullet points if present
+    if '•' in text or re.search(r'^\s*[-*]\s+', text, re.MULTILINE):
         lines = text.split('\n')
         cleaned_lines = []
         
@@ -141,55 +97,85 @@ def clean_model_output(text: str) -> str:
                 continue
             # Remove bullet markers
             line = re.sub(r'^[•\-\*]\s*', '', line)
-            # Skip headers
-            if line and not line.endswith(':'):
-                # Ensure line ends with period
+            # Keep everything except pure headers
+            if line and not (line.endswith(':') and len(line) < 30):
                 if line and line[-1] not in '.!?':
                     line += '.'
                 cleaned_lines.append(line)
         
-        # Join facts with better flow
         if cleaned_lines:
             text = ' '.join(cleaned_lines)
     
-    # Remove chain-of-thought patterns
-    cot_patterns = [
-        r"^\*\*Step \d+:.*?\*\*\s*",
-        r"^Step \d+:.*?\n",
-        r"^Let me.*?:\s*",
-        r"^I need to.*?:\s*",
-        r"^Based on the (?:context|documentation):\s*",
-        r"^According to the documentation:\s*",
-        r"^From the documentation:\s*",
-        r"^The documentation states:\s*",
-        r"^Here's what I found:\s*",
-        r"^Here is the information:\s*",
-        r"^\[.*?\]\s*",
-    ]
-    
-    for pattern in cot_patterns:
-        text = re.sub(pattern, "", text, flags=re.MULTILINE | re.IGNORECASE)
-    
-    # Clean up formatting artifacts
+    # Step 5: Remove formatting marks (bold, italic, etc)
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Remove bold
     text = re.sub(r'__(.*?)__', r'\1', text)  # Remove underline
     text = re.sub(r'(?<!\*)\*(?!\*)(.*?)\*', r'\1', text)  # Remove italics
     
-    # Fix spacing
-    text = re.sub(r'\n\s*\n', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
+    # Step 6: Fix spacing
+    text = re.sub(r'\n\s*\n', ' ', text)  # Replace double newlines with space
+    text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
     text = text.strip()
     
-    # Ensure complete sentence
+    # Step 7: Fix incomplete sentences at the end
+    # Look for obvious cutoffs
+    if text:
+        # Check if it ends with incomplete phrases
+        incomplete_patterns = [
+            r'\.\s+There are no\s*$',  # "There are no" at end
+            r'\.\s+The\s*$',  # Just "The" at end
+            r'\.\s+This\s*$',  # Just "This" at end
+            r'\.\s+In\s*$',  # Just "In" at end
+            r'\.\s+For\s*$',  # Just "For" at end
+            r',\s+and\s*$',  # Ends with ", and"
+            r',\s+or\s*$',  # Ends with ", or"
+            r',\s+but\s*$',  # Ends with ", but"
+        ]
+        
+        for pattern in incomplete_patterns:
+            if re.search(pattern, text):
+                # Remove the incomplete part
+                text = re.sub(pattern, '.', text)
+                break
+        
+        # Remove trailing incomplete sentence if it's very short
+        sentences = text.split('. ')
+        if len(sentences) > 1:
+            last_sentence = sentences[-1].strip()
+            # If last "sentence" is less than 3 words and doesn't end properly, remove it
+            if len(last_sentence.split()) < 3 and not last_sentence.endswith(('.', '!', '?')):
+                text = '. '.join(sentences[:-1]) + '.'
+    
+    # Step 8: Ensure proper ending punctuation
     if text and text[-1] not in '.!?':
-        # But only add period if it doesn't look like we cut off mid-sentence
-        last_words = text.split()[-3:] if len(text.split()) >= 3 else text.split()
+        # Check if we should add a period
+        last_words = text.split()[-5:] if len(text.split()) >= 5 else text.split()
         last_phrase = ' '.join(last_words).lower()
         
-        # Don't add period if we clearly cut off mid-thought
-        cut_off_indicators = ['and', 'but', 'or', 'with', 'for', 'to', 'the', 'a', 'an', 'just']
-        if not any(last_phrase.endswith(' ' + word) for word in cut_off_indicators):
+        # Don't add period if it's clearly incomplete
+        incomplete_endings = [
+            'and', 'but', 'or', 'with', 'for', 'to', 'the', 
+            'a', 'an', 'in', 'on', 'at', 'by', 'there are'
+        ]
+        
+        should_add_period = True
+        for ending in incomplete_endings:
+            if last_phrase.endswith(' ' + ending) or last_phrase == ending:
+                should_add_period = False
+                break
+        
+        if should_add_period:
             text += '.'
+        else:
+            # Try to remove the incomplete ending
+            words = text.split()
+            if len(words) > 3:
+                # Remove last few words if they're incomplete
+                text = ' '.join(words[:-2]) + '.'
+    
+    # Step 9: Final cleanup
+    text = text.replace('..', '.')
+    text = text.replace('.,', '.')
+    text = re.sub(r'\s+([.,!?])', r'\1', text)  # Remove space before punctuation
     
     return text.strip()
 
@@ -349,12 +335,14 @@ class HuggingFaceClient:
                 try:
                     result = json.loads(text)
                 except json.JSONDecodeError:
-                    cleaned = clean_model_output(text)
-                    if cleaned:
-                        return cleaned
+                    # Try to use raw text if it looks like a response
+                    if text and not text.startswith('{"error"'):
+                        cleaned = clean_model_output(text)
+                        if cleaned:
+                            return cleaned
                     return "Error: Invalid response format"
                 
-                # Extract text
+                # Extract text from different response formats
                 generated = ""
                 if isinstance(result, list) and result:
                     generated = result[0].get("generated_text", "")
@@ -366,11 +354,12 @@ class HuggingFaceClient:
                     generated = str(result)
                 
                 if not generated:
+                    logger.warning("Empty response from model")
                     return "Error: No response generated"
                 
-                # Remove prompt from response
-                if generated.startswith(prompt):
-                    generated = generated[len(prompt):].lstrip()
+                # Remove prompt from response if it's included
+                if prompt in generated:
+                    generated = generated.replace(prompt, "", 1).strip()
                 
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 if elapsed_ms > 5000:
@@ -378,7 +367,10 @@ class HuggingFaceClient:
                 else:
                     logger.info(f"[PERF] Generation completed in {elapsed_ms}ms")
                 
-                return clean_model_output(generated)
+                cleaned = clean_model_output(generated)
+                logger.debug(f"Cleaned output length: {len(cleaned)}")
+                
+                return cleaned
                 
         except asyncio.TimeoutError:
             logger.error("Request timed out")
@@ -652,6 +644,7 @@ async def call_huggingface(
         logger.error(f"Unexpected error: {e}", exc_info=True)
         return "Error: An unexpected error occurred"
 
+# Legacy functions for compatibility
 async def call_base_assistant(prompt: str) -> str:
     """Call base assistant"""
     base_params = MODEL_PARAMS.copy()
@@ -668,21 +661,6 @@ async def call_guard_agent(prompt: str) -> str:
     """Call guard agent"""
     from config import GUARD_MODEL_PARAMS
     return await call_huggingface(prompt, GUARD_MODEL_PARAMS)
-
-async def call_intent_classifier(prompt: str) -> str:
-    """Call intent classifier"""
-    from config import INTENT_CLASSIFIER_PARAMS
-    return await call_huggingface(prompt, INTENT_CLASSIFIER_PARAMS)
-
-async def call_empathetic_companion(prompt: str) -> str:
-    """Call empathetic companion"""
-    from config import EMPATHETIC_COMPANION_PARAMS
-    return await call_huggingface_with_retry(prompt, EMPATHETIC_COMPANION_PARAMS)
-
-async def call_information_navigator(prompt: str) -> str:
-    """Call information navigator"""
-    from config import INFORMATION_NAVIGATOR_PARAMS
-    return await call_huggingface_with_retry(prompt, INFORMATION_NAVIGATOR_PARAMS)
 
 async def call_bridge_synthesizer(prompt: str) -> str:
     """Call bridge synthesizer"""
