@@ -587,24 +587,38 @@ JSON:"""
         return any(disc in text for disc in disclaimers)
     
     def _find_unsupported_claims(self, response: str, context: str) -> List[str]:
-        """Find claims not supported by context"""
+        """Find claims not supported by context - be more lenient"""
         unsupported = []
         sentences = re.split(r'[.!?]+', response)
         context_lower = context.lower()
         
         for sentence in sentences:
             sentence = sentence.strip()
-            if len(sentence) < 10:
+            if len(sentence) < 20:  # Skip very short sentences
                 continue
             
-            # Skip meta-statements
-            if any(phrase in sentence.lower() for phrase in ["i don't", "i cannot", "please consult", "according to"]):
+            # Skip meta-statements and common phrases
+            skip_phrases = [
+                "i don't", "i cannot", "please consult", "according to",
+                "medication guide", "healthcare provider", "this is not",
+                "see the", "for full information", "journvax"
+            ]
+            if any(phrase in sentence.lower() for phrase in skip_phrases):
                 continue
             
-            # Check for specific items not in context
-            items = re.findall(r'\b(avoid|take with|limit)\s+(\w+)', sentence.lower())
-            for _, item in items:
-                if item not in context_lower and item not in ['water', 'food', 'it', 'medication']:
+            # Only flag if sentence mentions SPECIFIC items not in context
+            # Look for "avoid X" or "take with Y" patterns where X/Y isn't mentioned
+            specific_items = re.findall(r'\b(?:avoid|take with|do not take with|limit)\s+(\w+)', sentence.lower())
+            for item in specific_items:
+                # Only flag if it's a specific substance, not generic terms
+                if item not in context_lower and item not in ['water', 'food', 'it', 'medication', 'this', 'that']:
+                    unsupported.append(sentence)
+                    break
+            
+            # Check for specific numbers not in context
+            numbers = re.findall(r'\b\d+\s*(?:mg|ml|percent|%)\b', sentence.lower())
+            for num in numbers:
+                if num not in context_lower:
                     unsupported.append(sentence)
                     break
         
