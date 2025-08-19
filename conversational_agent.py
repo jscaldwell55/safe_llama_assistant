@@ -307,6 +307,7 @@ Response (using ONLY the documentation above):"""
                 if validation_result.result.value != "approved":
                     logger.warning(f"Response corrected: {validation_result.reasoning}")
                     response = validation_result.final_response
+                    # Don't cache corrected responses
                 elif self.cache and cache_key:
                     # Cache only validated, approved responses
                     self.cache.put(cache_key, response)
@@ -318,7 +319,7 @@ Response (using ONLY the documentation above):"""
             debug_info = {
                 "timing": {
                     "rag_ms": rag_time,
-                    "generation_ms": gen_time,
+                    "generation_ms": gen_time,  
                     "total_ms": total_time
                 },
                 "context_length": len(context),
@@ -329,7 +330,8 @@ Response (using ONLY the documentation above):"""
                 debug_info["validation"] = {
                     "result": validation_result.result.value,
                     "grounding_score": getattr(validation_result, 'grounding_score', 0.0),
-                    "violation": validation_result.violation.value if hasattr(validation_result, 'violation') else None
+                    "violation": validation_result.violation.value if hasattr(validation_result, 'violation') else None,
+                    "was_corrected": validation_result.result.value != "approved"
                 }
             
             return ConductorDecision(

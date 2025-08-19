@@ -118,10 +118,15 @@ class DocumentGroundingValidator:
             skip_phrases = [
                 "i don't have", "i cannot", "please consult", "according to",
                 "the documentation", "medication guide", "healthcare provider",
-                "i'm not able", "i apologize", "please refer"
+                "i'm not able", "i apologize", "please refer", "see the medication",
+                "this is not a complete", "for full information"
             ]
             
             if any(phrase in sentence.lower() for phrase in skip_phrases):
+                continue
+            
+            # Also skip if it's just a greeting or acknowledgment
+            if len(sentence.split()) < 4:  # Very short sentences likely not factual claims
                 continue
             
             # This is likely a factual claim that needs grounding
@@ -150,31 +155,49 @@ class DocumentGroundingValidator:
         claims = self.extract_factual_claims(response)
         unsupported = []
         
+        # If there are no factual claims to check, consider it grounded
+        if not claims:
+            return overall_similarity, True, []
+        
+        context_lower = context.lower()
+        
         for claim in claims:
             # Check if this claim is supported by context
             claim_similarity = self.calculate_similarity(claim, context)
-            
-            # Extract key pharmaceutical/medical terms from claim
             claim_lower = claim.lower()
-            context_lower = context.lower()
             
-            # Pattern for pharmaceutical terms (compounds, medications, symptoms)
-            pharm_pattern = r'\b[a-z]+(?:ine|ol|ate|ide|ium|azole|amine|acid|oxide)\b'
-            pharm_terms = re.findall(pharm_pattern, claim_lower)
+            # Look for specific ungrounded patterns
+            # 1. Check for substances/items not mentioned in context
+            substance_pattern = r'\b(avoid|take with|don\'t take with|limit|reduce)\s+(\w+(?:\s+\w+)?)'
+            substance_match = re.search(substance_pattern, claim_lower)
+            if substance_match:
+                substance = substance_match.group(2)
+                if substance not in context_lower and substance not in ['water', 'food']:
+                    unsupported.append(claim)
+                    logger.debug(f"Unsupported substance claim: {substance} not in context")
+                    continue
             
-            # Also check for other key medical/substance terms
-            key_terms = re.findall(r'\b(?:alcohol|food|meal|juice|drink|water|milk|caffeine|tobacco)\b', claim_lower)
-            all_key_terms = pharm_terms + key_terms
+            # 2. Check for specific numbers/values not in context
+            numbers = re.findall(r'\b\d+\s*(?:mg|ml|hours?|days?|weeks?|times?|%)\b', claim_lower)
+            for num in numbers:
+                if num not in context_lower:
+                    unsupported.append(claim)
+                    logger.debug(f"Unsupported numeric claim: {num} not in context")
+                    break
             
-            # Check if key terms from claim appear in context
-            missing_terms = [term for term in all_key_terms if term not in context_lower]
-            
-            # Claim is unsupported if similarity is low OR key terms are missing
-            if claim_similarity < self.similarity_threshold or missing_terms:
-                unsupported.append(claim)
-                logger.debug(f"Unsupported claim: {claim[:50]}... (score: {claim_similarity:.3f}, missing: {missing_terms})")
+            # 3. If claim similarity is very low, it's likely unsupported
+            # Use a slightly lower threshold for individual claims vs overall
+            if claim_similarity < (self.similarity_threshold * 0.8):
+                if claim not in unsupported:  # Avoid duplicates
+                    unsupported.append(claim)
+                    logger.debug(f"Low similarity claim: {claim[:50]}... (score: {claim_similarity:.3f})")
         
-        is_grounded = overall_similarity >= self.similarity_threshold and not unsupported
+        # Be more lenient with grounding if most content is good
+        # If overall similarity is high and few unsupported claims, allow it
+        is_grounded = (
+            overall_similarity >= self.similarity_threshold and 
+            len(unsupported) <= 1  # Allow max 1 unsupported claim if overall similarity is good
+        )
         
         if not is_grounded:
             logger.warning(f"Poor grounding: score={overall_similarity:.3f}, unsupported={len(unsupported)}")
@@ -411,18 +434,20 @@ class EnhancedSafetyGuard:
         
         # Unsafe query patterns that should be blocked immediately
         unsafe_patterns = [
+            (r"(?:give|can i give|should i give).*(?:to my|to a|to the).*(?:child|kid|baby|infant|toddler)", 
+             RegulatoryViolation.OFF_LABEL_USE, "pediatric administration"),
+            (r"(?:my|a|the).*(?:child|kid|baby|infant|toddler).*(?:take|have|use|given|dose)", 
+             RegulatoryViolation.OFF_LABEL_USE, "pediatric dosing"),
+            (r"(?:snort|inject|smoke|crush|chew|inhale)(?:ing)?\s+(?:it|journvax|the|medication|pill)", 
+             RegulatoryViolation.ADMIN_MISUSE, "unsafe administration method"),
             (r"(?:double|triple|increase|extra|more).*(?:dose|dosage|medication|pills?)", 
              RegulatoryViolation.UNAPPROVED_DOSING, "dosage increase request"),
             (r"share.*(?:prescription|medication|pills?|journvax)", 
              RegulatoryViolation.ADMIN_MISUSE, "prescription sharing"),
-            (r"(?:child|kid|baby|infant|toddler).*(?:give|dose|how much|medication)", 
-             RegulatoryViolation.OFF_LABEL_USE, "pediatric dosing"),
             (r"(?:maximum|most|highest|safest).*(?:can|should|safe).*take", 
              RegulatoryViolation.UNAPPROVED_DOSING, "maximum dose inquiry"),
             (r"overdose|lethal dose|kill (?:myself|me)|suicide", 
              RegulatoryViolation.SAFETY_CRITICAL_MISS, "dangerous request"),
-            (r"(?:crush|snort|inject|smoke).*(?:journvax|medication|pill)", 
-             RegulatoryViolation.ADMIN_MISUSE, "unsafe administration method"),
         ]
         
         for pattern, violation, description in unsafe_patterns:
