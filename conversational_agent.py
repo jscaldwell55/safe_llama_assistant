@@ -171,13 +171,9 @@ class PersonaConductor:
         from llm_client import call_huggingface_with_retry
         from config import BRIDGE_SYNTHESIZER_PARAMS
         
-        # If no meaningful context, return safe fallback
+        # If no meaningful context, return standard no-info response
         if not context or len(context.strip()) < 50:
-            return (
-                "I don't have specific information about that in the Journvax documentation. "
-                "Could you please ask about side effects, dosage information, drug interactions, "
-                "or other aspects covered in the Medication Guide?"
-            )
+            return "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
         
         # Build strict grounding prompt
         prompt = f"""You are a pharmaceutical information specialist providing information about Journvax.
@@ -186,7 +182,7 @@ CRITICAL RULES:
 1. ONLY provide information that is EXPLICITLY stated in the documentation below
 2. Do NOT add information from general knowledge
 3. Do NOT make inferences or assumptions
-4. If the documentation doesn't contain the answer, say: "I don't have that specific information in the Journvax documentation."
+4. If the documentation doesn't contain the answer, say: "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
 
 COMPLIANCE REQUIREMENTS:
 - Never provide dosing advice beyond what's in the documentation
