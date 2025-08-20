@@ -104,9 +104,9 @@ MAX_CONTEXT_LENGTH = 3500
 # ============================================================================
 
 ENABLE_GUARD = True
-SEMANTIC_SIMILARITY_THRESHOLD = 0.35  # lenient enough to allow paraphrases
-USE_LLM_GUARD = True
-LLM_CONFIDENCE_THRESHOLD = 0.85  # ↑ reduce false positives from LLM guard
+SEMANTIC_SIMILARITY_THRESHOLD = 0.35  # Much lower - just needs some relationship
+USE_LLM_GUARD = True  # Set to True for extra safety check
+LLM_CONFIDENCE_THRESHOLD = 0.7
 
 # ============================================================================
 # CONVERSATION MANAGEMENT
@@ -134,3 +134,4 @@ DEFAULT_FALLBACK_MESSAGE = (
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 LOG_SLOW_REQUESTS_THRESHOLD_MS = 5000  # Log requests over 5s
+
