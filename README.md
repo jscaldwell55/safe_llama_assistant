@@ -163,14 +163,7 @@ EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 }
 ```
 
-## Known Improvements from Original
 
-### ✅ Fixed Issues
-1. **False positives eliminated** - LLM guard disabled, preventing blocking of legitimate information
-2. **Proper FDA language handling** - "See the Medication Guide" no longer flagged as violation
-3. **Clean responses** - Meta-commentary and re-answers removed
-4. **Correct spelling** - "Journvax" consistently spelled correctly
-5. **Auto-corrections work** - Disclaimers added without blocking responses
 
 ### 🚀 Performance
 - Response time: 2-5 seconds typical
@@ -256,6 +249,34 @@ streamlit run app.py
 - No external API calls except to configured HF endpoint
 - PDFs processed locally, not sent to external services
 - Cache stored in memory only, cleared on restart
+
+---
+
+## System Files Reference
+
+| File | Purpose |
+|------|---------|
+| `app.py` | Main Streamlit application entry point with chat interface, sidebar controls, and debug mode functionality |
+| `conversational_agent.py` | Core orchestrator that coordinates the entire RAG pipeline: retrieval → generation → validation → caching |
+| `guard.py` | Safety validation system implementing pattern-based rules and document grounding verification |
+| `llm_client.py` | Asynchronous Hugging Face endpoint client with comprehensive response cleaning and formatting |
+| `rag.py` | FAISS vector search engine, PDF document parsing, and context retrieval functionality |
+| `semantic_chunker.py` | Intelligent document chunking with section awareness for optimal retrieval performance |
+| `context_formatter.py` | Deduplicates and compacts retrieved context to optimize token usage |
+| `embeddings.py` | SentenceTransformer singleton manager (all-MiniLM-L6-v2 model) |
+| `conversation.py` | Session and conversation state management for multi-turn dialogues |
+| `prompts.py` | Generation prompts with strict document grounding requirements |
+| `config.py` | Central configuration file for all system parameters: thresholds, model settings, UI text |
+| `code_executor.py` | Code execution utilities (if present - for advanced functionality) |
+| `requirements.txt` | Python package dependencies |
+| `packages.txt` | System package dependencies for deployment |
+
+### Supporting Directories
+| Directory | Purpose |
+|-----------|---------|
+| `data/` | Storage for PDF documentation files that serve as the knowledge base |
+| `faiss_index/` | Persisted FAISS vector index and metadata for fast document retrieval |
+| `venv/` | Python virtual environment (development dependency) |
 
 ---
 

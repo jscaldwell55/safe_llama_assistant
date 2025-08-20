@@ -121,6 +121,35 @@ def clean_model_output(text: str) -> str:
             # Cut at the reanswer attempt
             text = text[:match.start()].strip()
             break
+
+    # Step 3c: Remove Q&A format bleeding through
+    # Remove Question/Answer pairs that shouldn't be in response
+    qa_patterns = [
+        r'Question:.*?Answer:.*?(?=Question:|$)',  # Q&A pairs
+        r'\bQuestion:.*?(?=\.|$)',  # Standalone questions
+        r'\bAnswer:.*?(?=\.|$)',  # Standalone answers
+    ]
+
+    for pattern in qa_patterns:
+        matches = list(re.finditer(pattern, text, re.DOTALL | re.IGNORECASE))
+        # Remove Q&A pairs from the end first to preserve the main response
+        for match in reversed(matches):
+            # Only remove if it's clearly not part of the main response
+            if 'Question:' in match.group() and match.start() > len(text) // 2:
+                text = text[:match.start()].strip()
+
+    # Step 3d: Remove code snippets that shouldn't be in response
+    # Remove python code blocks and print statements
+    code_patterns = [
+        r'```python.*?```',  # Python code blocks
+        r'```.*?```',  # Any code blocks
+        r'print\(["\'].*?["\'].*?\)',  # Print statements
+        r'#.*?Example usage:.*?$',  # Example usage comments
+        r'//.*?$',  # Single line comments
+    ]
+
+    for pattern in code_patterns:
+        text = re.sub(pattern, '', text, flags=re.DOTALL | re.MULTILINE)            
     
     # Step 4: Cut at explicit turn markers
     turn_markers = [
@@ -245,6 +274,12 @@ def clean_model_output(text: str) -> str:
                 text = '. '.join(sentences[:-1]) + '.'
             elif len(last_sentence.split()) < 3 and not last_sentence.endswith(('.', '!', '?')):
                 text = '. '.join(sentences[:-1]) + '.'
+
+    # Step 10b: Fix incomplete sentences in the middle of text
+    # Look for patterns like "may have." without completion
+    text = re.sub(r'may have\.\s+(?=[A-Z])', 'may have side effects. ', text)
+    text = re.sub(r'should\.\s+(?=[A-Z])', 'should use caution. ', text)
+    text = re.sub(r'can\.\s+(?=[A-Z])', 'can occur. ', text)            
     
     # Step 11: Ensure proper ending punctuation
     if text and text[-1] not in '.!?':
