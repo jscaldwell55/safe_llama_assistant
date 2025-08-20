@@ -1,4 +1,4 @@
-# conversational_agent.py - Document-Grounded Conversational Agent Final Version
+# conversational_agent.py - Document-Grounded Conversational Agent Fixed Version
 """
 Simplified agent that:
 1. Retrieves relevant documentation
@@ -187,7 +187,7 @@ CRITICAL RULES:
 COMPLIANCE REQUIREMENTS:
 - Never provide dosing advice beyond what's in the documentation
 - Never suggest dose changes or administration timing
-- Add "This is not a complete list. See the Medication Guide for full information." when discussing side effects
+- When discussing side effects, simply present the information from the documentation
 - Never use phrases like "don't worry", "should be fine", "generally safe"
 - Never imply safety from absence ("doesn't mention X, so...")
 
@@ -235,7 +235,11 @@ Response (using ONLY the documentation above):"""
                         total_latency_ms=int((time.time() - start_time) * 1000),
                         debug_info={
                             "blocked_reason": query_validation.reasoning,
-                            "violation": query_validation.violation.value if hasattr(query_validation, 'violation') else "unknown"
+                            "violation": query_validation.violation.value if hasattr(query_validation, 'violation') else "unknown",
+                            "validation": {
+                                "result": "blocked",
+                                "violation": query_validation.violation.value if hasattr(query_validation, 'violation') else "unknown"
+                            }
                         }
                     )
             
@@ -250,7 +254,10 @@ Response (using ONLY the documentation above):"""
                         requires_validation=False,
                         strategy_used=ResponseStrategy.CACHED,
                         total_latency_ms=int((time.time() - start_time) * 1000),
-                        debug_info={"cache_hit": True}
+                        debug_info={
+                            "cache_hit": True,
+                            "validation": {"result": "cached_approved"}
+                        }
                     )
             
             # Step 3: Check for instant responses (greetings, etc.)
@@ -266,7 +273,10 @@ Response (using ONLY the documentation above):"""
                     requires_validation=False,
                     strategy_used=ResponseStrategy.CONVERSATIONAL,
                     total_latency_ms=int((time.time() - start_time) * 1000),
-                    debug_info={"instant_response": True}
+                    debug_info={
+                        "instant_response": True,
+                        "validation": {"result": "instant_approved"}
+                    }
                 )
             
             # Step 4: Retrieve context if needed
@@ -299,7 +309,7 @@ Response (using ONLY the documentation above):"""
                     strategy_used=ResponseStrategy.SYNTHESIZED.value
                 )
                 
-                # Use corrected response if validation failed
+                # Handle validation result
                 if validation_result.result.value != "approved":
                     logger.warning(f"Response corrected: {validation_result.reasoning}")
                     response = validation_result.final_response
@@ -311,7 +321,7 @@ Response (using ONLY the documentation above):"""
             # Calculate total time
             total_time = int((time.time() - start_time) * 1000)
             
-            # Build debug info
+            # Build comprehensive debug info
             debug_info = {
                 "timing": {
                     "rag_ms": rag_time,
@@ -322,17 +332,25 @@ Response (using ONLY the documentation above):"""
                 "used_context": bool(context)
             }
             
+            # Always include validation info if validation was performed
             if validation_result:
                 debug_info["validation"] = {
                     "result": validation_result.result.value,
                     "grounding_score": getattr(validation_result, 'grounding_score', 0.0),
                     "violation": validation_result.violation.value if hasattr(validation_result, 'violation') else None,
-                    "was_corrected": validation_result.result.value != "approved"
+                    "was_corrected": validation_result.result.value != "approved",
+                    "confidence": getattr(validation_result, 'confidence', 0.0),
+                    "reasoning": validation_result.reasoning if validation_result.result.value != "approved" else None
+                }
+            else:
+                debug_info["validation"] = {
+                    "result": "no_guard",
+                    "reason": "Guard not available"
                 }
             
             return ConductorDecision(
                 final_response=response,
-                requires_validation=False,  # Already validated
+                requires_validation=False,  # Already validated internally
                 strategy_used=ResponseStrategy.SYNTHESIZED,
                 context_used=context,
                 total_latency_ms=total_time,
@@ -348,7 +366,10 @@ Response (using ONLY the documentation above):"""
                 requires_validation=False,
                 strategy_used=ResponseStrategy.ERROR,
                 total_latency_ms=int((time.time() - start_time) * 1000),
-                debug_info={"error": str(e)}
+                debug_info={
+                    "error": str(e),
+                    "validation": {"result": "error"}
+                }
             )
     
     def reset_conversation(self):
