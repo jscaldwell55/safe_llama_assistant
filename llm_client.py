@@ -52,7 +52,7 @@ def get_or_create_event_loop():
 
 def clean_model_output(text: str) -> str:
     """
-    Clean model output - optimized version focusing on essential cleaning only
+    Clean model output - comprehensive version addressing all known issues
     """
     if not text:
         return ""
@@ -68,39 +68,107 @@ def clean_model_output(text: str) -> str:
         flags=re.IGNORECASE
     )
     
-    # Step 3: Fix Journvax spelling (single pass)
+    # Step 3: Remove "Note:" meta-commentary EARLY (before other processing)
+    # This catches "Note: The response includes..." type commentary
+    text = re.sub(
+        r'Note:\s*[^.]*?(?:response|documentation|includes|information|sources)[^.]*\.',
+        '',
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    
+    # Step 4: Remove "User Question:" artifacts
+    text = re.sub(r'(?:Here\'s another\s+)?[Uu]ser [Qq]uestion:.*?(?:\.|$)', '', text)
+    text = re.sub(r'User Question:.*?$', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'User:.*?$', '', text, flags=re.IGNORECASE)
+    
+    # Step 5: Fix Journvax spelling (single pass)
     text = re.sub(r'\b[Jj][Oo][Uu][Rr][Nn][Aa]?[Vv][Xx]\b', 'Journvax', text, flags=re.IGNORECASE)
     
-    # Step 4: Remove prompt echo if present
-    # This should be handled by checking if response starts with the prompt
+    # Step 6: Fix incomplete sentences BEFORE cutting
+    # Fix "when taking." without object
+    text = re.sub(r'when taking\.\s*(?=[A-Z]|$)', 'when taking Journvax. ', text)
+    text = re.sub(r'may experience.*?when taking\.\s*', 'may experience side effects when taking Journvax. ', text)
     
-    # Step 5: Cut at conversation markers
-    for marker in ["\n\nUser:", "\n\nHuman:", "\n\nAssistant:", "\n\n###"]:
+    # Step 7: Cut at conversation markers
+    for marker in ["\n\nUser:", "\n\nHuman:", "\n\nAssistant:", "\n\n###", "\nUser Question:", "\nQuestion:"]:
         if marker in text:
             text = text.split(marker)[0].strip()
             break
     
-    # Step 6: Remove obvious meta-commentary (single regex with alternation)
-    meta_pattern = r'\((?:removed|rephrased|edited|simplified|clarified|for clarity)[^)]*\)'
-    text = re.sub(meta_pattern, '', text, flags=re.IGNORECASE)
+    # Step 8: Remove obvious meta-commentary (expanded pattern)
+    meta_patterns = [
+        r'\((?:removed|rephrased|edited|simplified|clarified|for clarity)[^)]*\)',
+        r'\(using only the documentation\)',
+        r'\(from the documentation\)',
+        r'According to the documentation provided[,:]?\s*',
+        r'Based on the documentation[,:]?\s*',
+    ]
+    for pattern in meta_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
     
-    # Step 7: Clean up whitespace and punctuation
+    # Step 9: Remove any remaining "Note:" at the end
+    if 'Note:' in text:
+        parts = text.split('Note:')
+        # Check if what comes after Note: is meta-commentary
+        if len(parts) > 1:
+            after_note = parts[-1].lower()
+            if any(word in after_note for word in ['response', 'compliance', 'documentation', 'information', 'ensure']):
+                text = parts[0].strip()
+    
+    # Step 10: Clean up incomplete sentences at the end
+    sentences = text.split('. ')
+    if len(sentences) > 1:
+        last_sentence = sentences[-1].strip()
+        # Check for incomplete endings
+        incomplete_patterns = [
+            r'when taking$',
+            r'may experience.*?when$',
+            r'increased risk of.*?when$',
+            r', it\.$',
+            r'but it\.$'
+        ]
+        
+        for pattern in incomplete_patterns:
+            if re.search(pattern, last_sentence, re.IGNORECASE):
+                # Remove the incomplete sentence
+                text = '. '.join(sentences[:-1]) + '.'
+                break
+        
+        # Also check if last sentence is too short and doesn't end properly
+        if len(last_sentence.split()) < 3 and not last_sentence.endswith(('.', '!', '?')):
+            text = '. '.join(sentences[:-1]) + '.'
+    
+    # Step 11: Clean up whitespace and punctuation
     text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
     text = re.sub(r'\s+([.,!?])', r'\1', text)  # Remove space before punctuation
     text = re.sub(r'([.,!?])([A-Z])', r'\1 \2', text)  # Add space after punctuation
     
-    # Step 8: Ensure proper ending
+    # Step 12: Remove double periods or period-comma
+    text = text.replace('..', '.')
+    text = text.replace('.,', '.')
+    text = text.replace('. .', '.')
+    
+    # Step 13: Ensure proper ending
     if text and text[-1] not in '.!?':
         # Only add period if the text seems complete
         last_words = text.split()[-3:] if len(text.split()) >= 3 else text.split()
-        if last_words and last_words[-1].lower() not in ['and', 'but', 'or', 'the', 'a', 'to']:
+        if last_words:
+            last_word = last_words[-1].lower()
+            incomplete_endings = ['and', 'but', 'or', 'the', 'a', 'to', 'when', 'of', 'with', 'for']
+            if last_word not in incomplete_endings:
+                text += '.'
+    
+    # Step 14: Final trim
+    text = text.strip()
+    
+    # Step 15: One final check for any remaining artifacts
+    if text.endswith('User Question'):
+        text = text[:-13].strip()
+        if text and text[-1] not in '.!?':
             text += '.'
     
-    # Step 9: Final cleanup
-    text = text.replace('..', '.')
-    text = text.replace('.,', '.')
-    
-    return text.strip()
+    return text
 
 
 def clean_model_output_minimal(text: str) -> str:
