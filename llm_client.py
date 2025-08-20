@@ -51,7 +51,7 @@ def get_or_create_event_loop():
 # ============================================================================
 
 def clean_model_output(text: str) -> str:
-    """Clean and format model output - more lenient to preserve complete responses"""
+    """Clean and format model output - enhanced to remove meta-commentary"""
     if not text:
         return ""
     
@@ -66,7 +66,29 @@ def clean_model_output(text: str) -> str:
         if text.startswith(prefix):
             text = text[len(prefix):].lstrip()
     
-    # Step 2: Cut at explicit turn markers (but be conservative)
+    # Step 2: Fix common misspellings
+    text = text.replace("JOURNAVX", "Journvax")
+    text = text.replace("Journavx", "Journvax")
+    text = text.replace("journavx", "Journvax")
+    
+    # Step 3: Remove meta-commentary patterns
+    meta_patterns = [
+        r'Note:\s*Response only includes.*?\.(?:\s|$)',
+        r'Note:\s*This response.*?\.(?:\s|$)',
+        r'Response only includes.*?\.(?:\s|$)',
+        r'No inference or assumption made.*?\.(?:\s|$)',
+        r'User question could be further clarified.*?\.(?:\s|$)',
+        r'follows compliance rules.*?\.(?:\s|$)',
+        r'\(using only the documentation\)',
+        r'\(from the documentation\)',
+        r'According to the documentation provided[,:]?\s*',
+        r'Based on the documentation[,:]?\s*',
+    ]
+    
+    for pattern in meta_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Step 4: Cut at explicit turn markers
     turn_markers = [
         "\n\nUser Question:",
         "\n\nUser:",
@@ -82,11 +104,16 @@ def clean_model_output(text: str) -> str:
             text = text[:pos].strip()
             break
     
-    # Step 3: Remove extraction format artifacts
-    text = re.sub(r'\*\*Extracted Information:\*\*\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'^Extracted Information:\s*', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    # Step 5: Fix formatting issues
+    # Fix missing space after colon
+    text = re.sub(r'([a-z]):\.', r'\1:', text)
+    text = re.sub(r'include:\.', 'include:', text)
     
-    # Step 4: Clean up bullet points if present
+    # Fix awkward bullet points
+    text = re.sub(r'\.\s*([a-z])', r'. \1', text)  # Add space after period before lowercase
+    text = re.sub(r':\.\s*', ': ', text)  # Fix ":." to ": "
+    
+    # Step 6: Clean up bullet points if present
     if '•' in text or re.search(r'^\s*[-*]\s+', text, re.MULTILINE):
         lines = text.split('\n')
         cleaned_lines = []
@@ -97,85 +124,83 @@ def clean_model_output(text: str) -> str:
                 continue
             # Remove bullet markers
             line = re.sub(r'^[•\-\*]\s*', '', line)
-            # Keep everything except pure headers
-            if line and not (line.endswith(':') and len(line) < 30):
-                if line and line[-1] not in '.!?':
-                    line += '.'
+            # Ensure proper capitalization
+            if line and line[0].islower() and len(cleaned_lines) > 0:
+                line = line[0].upper() + line[1:]
+            # Add to cleaned lines
+            if line and line not in cleaned_lines:  # Avoid duplicates
                 cleaned_lines.append(line)
         
+        # Join with proper punctuation
         if cleaned_lines:
-            text = ' '.join(cleaned_lines)
+            # Check if we're listing items
+            if len(cleaned_lines) > 1 and all(len(line.split()) < 5 for line in cleaned_lines[1:]):
+                # It's a list - format as "X include: a, b, c, d."
+                if ':' in cleaned_lines[0]:
+                    text = cleaned_lines[0] + ' ' + ', '.join(cleaned_lines[1:]) + '.'
+                else:
+                    text = cleaned_lines[0] + ': ' + ', '.join(cleaned_lines[1:]) + '.'
+            else:
+                # Regular sentences
+                text = ' '.join(cleaned_lines)
     
-    # Step 5: Remove formatting marks (bold, italic, etc)
+    # Step 7: Remove extraction format artifacts
+    text = re.sub(r'\*\*Extracted Information:\*\*\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^Extracted Information:\s*', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Step 8: Remove formatting marks (bold, italic, etc)
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Remove bold
     text = re.sub(r'__(.*?)__', r'\1', text)  # Remove underline
     text = re.sub(r'(?<!\*)\*(?!\*)(.*?)\*', r'\1', text)  # Remove italics
     
-    # Step 6: Fix spacing
+    # Step 9: Fix spacing
     text = re.sub(r'\n\s*\n', ' ', text)  # Replace double newlines with space
     text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
     text = text.strip()
     
-    # Step 7: Fix incomplete sentences at the end
-    # Look for obvious cutoffs
+    # Step 10: Fix incomplete sentences at the end
     if text:
         # Check if it ends with incomplete phrases
         incomplete_patterns = [
-            r'\.\s+There are no\s*$',  # "There are no" at end
-            r'\.\s+The\s*$',  # Just "The" at end
-            r'\.\s+This\s*$',  # Just "This" at end
-            r'\.\s+In\s*$',  # Just "In" at end
-            r'\.\s+For\s*$',  # Just "For" at end
-            r',\s+and\s*$',  # Ends with ", and"
-            r',\s+or\s*$',  # Ends with ", or"
-            r',\s+but\s*$',  # Ends with ", but"
+            r'\.\s+There are no\s*$',
+            r'\.\s+The\s*$',
+            r'\.\s+This\s*$',
+            r'\.\s+In\s*$',
+            r'\.\s+For\s*$',
+            r',\s+and\s*$',
+            r',\s+or\s*$',
+            r',\s+but\s*$',
         ]
         
         for pattern in incomplete_patterns:
             if re.search(pattern, text):
-                # Remove the incomplete part
                 text = re.sub(pattern, '.', text)
                 break
         
-        # Remove trailing incomplete sentence if it's very short
+        # Remove trailing incomplete sentence if very short
         sentences = text.split('. ')
         if len(sentences) > 1:
             last_sentence = sentences[-1].strip()
-            # If last "sentence" is less than 3 words and doesn't end properly, remove it
             if len(last_sentence.split()) < 3 and not last_sentence.endswith(('.', '!', '?')):
                 text = '. '.join(sentences[:-1]) + '.'
     
-    # Step 8: Ensure proper ending punctuation
+    # Step 11: Ensure proper ending punctuation
     if text and text[-1] not in '.!?':
-        # Check if we should add a period
-        last_words = text.split()[-5:] if len(text.split()) >= 5 else text.split()
-        last_phrase = ' '.join(last_words).lower()
-        
-        # Don't add period if it's clearly incomplete
-        incomplete_endings = [
-            'and', 'but', 'or', 'with', 'for', 'to', 'the', 
-            'a', 'an', 'in', 'on', 'at', 'by', 'there are'
-        ]
-        
-        should_add_period = True
-        for ending in incomplete_endings:
-            if last_phrase.endswith(' ' + ending) or last_phrase == ending:
-                should_add_period = False
-                break
-        
-        if should_add_period:
-            text += '.'
-        else:
-            # Try to remove the incomplete ending
-            words = text.split()
-            if len(words) > 3:
-                # Remove last few words if they're incomplete
-                text = ' '.join(words[:-2]) + '.'
+        text += '.'
     
-    # Step 9: Final cleanup
+    # Step 12: Final cleanup
     text = text.replace('..', '.')
     text = text.replace('.,', '.')
     text = re.sub(r'\s+([.,!?])', r'\1', text)  # Remove space before punctuation
+    
+    # Step 13: One more pass to remove any remaining meta-commentary
+    if 'Note:' in text:
+        # Remove everything after "Note:" if it's at the end
+        parts = text.split('Note:')
+        if len(parts) > 1:
+            text = parts[0].strip()
+            if text and text[-1] not in '.!?':
+                text += '.'
     
     return text.strip()
 

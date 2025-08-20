@@ -176,13 +176,14 @@ class PersonaConductor:
             return "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
         
         # Build strict grounding prompt
-        prompt = f"""You are a pharmaceutical information specialist providing information about Journvax.
+        prompt = f"""You are a pharmaceutical information specialist providing information about Journvax (spelled J-O-U-R-N-V-A-X).
 
 CRITICAL RULES:
-1. ONLY provide information that is EXPLICITLY stated in the documentation below
-2. Do NOT add information from general knowledge
-3. Do NOT make inferences or assumptions
-4. If the documentation doesn't contain the answer, say: "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
+1. ALWAYS spell the medication name as "Journvax" (not JOURNAVX or any other variation)
+2. ONLY provide information that is EXPLICITLY stated in the documentation below
+3. Do NOT add meta-commentary about your response or compliance
+4. Format responses naturally with proper punctuation and spacing
+5. Never say things like "Note:" or "Response only includes..." 
 
 COMPLIANCE REQUIREMENTS:
 - Never provide dosing advice beyond what's in the documentation
@@ -196,7 +197,7 @@ Documentation Available:
 
 User Question: {query}
 
-Response (using ONLY the documentation above):"""
+Natural, professional response (using ONLY the documentation above):"""
         
         try:
             response = await call_huggingface_with_retry(prompt, BRIDGE_SYNTHESIZER_PARAMS)
