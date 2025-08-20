@@ -1,35 +1,115 @@
-# Safe Enterprise Assistant (Pharma) — README
+# Safe Enterprise Assistant (Pharma) – README
 
-A production-ready pharmaceutical RAG assistant that answers questions only from approved documents (Medication Guide/PI) with strict safety enforcement. Built with Streamlit, FAISS, SentenceTransformers, and Hugging Face Inference Endpoints.
+A production-ready pharmaceutical RAG assistant with **strict document grounding** and comprehensive safety enforcement. All responses come exclusively from approved pharmaceutical documentation with zero tolerance for external knowledge or creative content.
 
 ## System Overview
 
-### Core Capabilities
-- **Document-grounded responses only** - All answers come from uploaded pharmaceutical documentation
-- **Automatic compliance corrections** - Adds required disclaimers without blocking legitimate information
-- **Fast response caching** - Previously validated responses are cached for speed
-- **Clean, professional output** - Advanced text cleaning removes meta-commentary and formatting issues
+### Core Safety Principles
+- **100% Document Grounding** - Responses ONLY from retrieved documentation, no external knowledge
+- **Zero Creative Content** - Blocks all stories, poems, fiction, roleplay requests
+- **Comprehensive Threat Detection** - Blocks violence, illegal drugs, harmful content
+- **Mandatory Validation** - Every response validated before delivery
+- **Standard Refusals** - Consistent safe responses for blocked content
 
-### Safety Architecture
-- **2-Layer validation system**: Pattern-based rules + document grounding verification
-- **No false positives**: LLM guard disabled to prevent over-blocking of legitimate pharmaceutical information
-- **Smart auto-corrections**: Adds FDA-required disclaimers automatically instead of refusing
+### Key Updates (Version 3.0)
+- **Enhanced Guard System** - Stricter grounding threshold (0.50), comprehensive violation detection
+- **Illegal Drug Detection** - Blocks references to cocaine, heroin, "speedball", etc.
+- **Creative Content Prevention** - Rejects any story/narrative generation attempts
+- **Off-Topic Blocking** - Refuses non-Journvax queries (gravity, weather, etc.)
+- **Mandatory Response Validation** - All responses validated, no bypasses
 
-## What's Included (Files)
+## Safety Architecture
 
-| File | Purpose |
-|------|---------|
-| `app.py` | Streamlit UI with chat interface and debug mode |
-| `conversational_agent.py` | Main orchestrator handling retrieval → generation → validation → caching |
-| `guard.py` | Safety validation system with pattern matching and grounding checks |
-| `llm_client.py` | Async HF endpoint client with comprehensive output cleaning |
-| `rag.py` | FAISS vector search, PDF parsing, context retrieval |
-| `semantic_chunker.py` | Intelligent document chunking with section awareness |
-| `context_formatter.py` | Deduplicates and compacts retrieved context |
-| `embeddings.py` | SentenceTransformer singleton (all-MiniLM-L6-v2) |
-| `conversation.py` | Session and conversation state management |
-| `prompts.py` | Generation prompts with strict grounding requirements |
-| `config.py` | All configuration: thresholds, model params, UI text |
+### 1. Query Pre-Screening
+**Immediate Blocks:**
+- Violence/self-harm/suicide references
+- Illegal drugs (including "speedball", cocaine, heroin, etc.)
+- Creative content requests (stories, poems, fiction)
+- Off-topic queries (physics, weather, recipes)
+- Medical advice requests
+- Off-label use inquiries
+
+**Standard Response for Blocked Queries:**
+```
+"I'm sorry, I cannot discuss that. Would you like to talk about something else?"
+```
+
+### 2. Document Grounding (STRICT)
+- **Similarity Threshold:** 0.50 (raised from 0.35)
+- **Grounding Check:** Mandatory for all generated responses
+- **No Context = No Response:** Returns standard refusal if no documentation retrieved
+- **Unsupported Claims:** Any claim not in documentation triggers rejection
+
+### 3. Response Generation
+**Strict Prompting Rules:**
+- ONLY use explicitly stated information from documentation
+- NEVER add general knowledge
+- NEVER create narratives or stories
+- Always return standard refusal if information unavailable
+
+### 4. Mandatory Validation
+**Every Response Validated For:**
+- Document grounding (similarity ≥ 0.50)
+- Regulatory compliance (6 critical categories)
+- Creative content detection
+- Off-topic detection
+- Violence/illegal content
+
+### 5. Critical Regulatory Categories
+1. **Off-Label/Unapproved Use** - Unapproved populations or indications
+2. **Medical Advice** - Personal medical recommendations
+3. **Cross-Product References** - Misleading brand associations
+4. **Administration Misuse** - Dangerous administration methods
+5. **Inaccurate Claims** - False or unsupported product claims
+6. **Inadequate Risk Communication** - Missing safety warnings
+
+## Standard System Responses
+
+### For No Information Available:
+```
+"I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
+```
+
+### For Safety Violations:
+```
+"I'm sorry, I cannot discuss that. Would you like to talk about something else?"
+```
+
+### For Greetings:
+```
+"Hello! How can I help you with information about Journvax today?"
+```
+
+## File Structure
+
+| File | Purpose | Key Changes v3.0 |
+|------|---------|-----------------|
+| `app.py` | Streamlit UI with chat interface | No changes |
+| `guard.py` | **Safety validation system** | **MAJOR UPDATE: Stricter grounding, illegal drug detection, creative content blocking** |
+| `conversational_agent.py` | **Response orchestrator** | **UPDATE: Mandatory validation for ALL responses** |
+| `prompts.py` | **Generation prompts** | **UPDATE: Strict grounding rules, no external knowledge** |
+| `llm_client.py` | HF endpoint client | Optimized output cleaning |
+| `rag.py` | FAISS vector search | No changes |
+| `config.py` | **Configuration** | **UPDATE: SEMANTIC_SIMILARITY_THRESHOLD = 0.50** |
+| `context_formatter.py` | Context deduplication | No changes |
+| `semantic_chunker.py` | Document chunking | No changes |
+| `embeddings.py` | Embedding model manager | No changes |
+| `conversation.py` | Session management | No changes |
+
+## Configuration Updates
+
+**Required changes in `config.py`:**
+```python
+# Stricter grounding threshold
+SEMANTIC_SIMILARITY_THRESHOLD = 0.50  # Raised from 0.35
+
+# Keep LLM guard disabled to prevent false positives
+USE_LLM_GUARD = False
+
+# Other settings remain unchanged
+ENABLE_GUARD = True
+ENABLE_RESPONSE_CACHE = True
+```
 
 ## End-to-End Workflow
 
@@ -38,138 +118,45 @@ User Query
     │
     ▼
 Query Pre-screening (guard.validate_query)
-    ├─ Blocks: Unsafe requests (dosing advice, pediatric use, misuse)
-    └─ Allows: Information requests about medication
+    ├─ Blocks: Violence, illegal drugs, creative content, off-topic
+    └─ Allows: Journvax information requests only
     │
     ▼
 Context Retrieval (rag.retrieve_and_format_context)
     ├─ FAISS similarity search (top-4 chunks)
-    └─ Context formatting and deduplication
+    └─ No context = automatic refusal
     │
     ▼
-Response Generation (llm_client + enhanced prompt)
-    ├─ Strict grounding to retrieved documentation
-    └─ Proper spelling (Journvax) and formatting
+Response Generation (llm_client + strict prompt)
+    ├─ ONLY from retrieved documentation
+    └─ Standard refusal if no information
     │
     ▼
-Response Validation (guard.validate_response)
-    ├─ Pattern compliance checks
-    ├─ Auto-corrections (adds disclaimers)
-    └─ Grounding verification (embedding similarity)
+MANDATORY Response Validation (guard.validate_response)
+    ├─ Grounding check (≥ 0.50 similarity)
+    ├─ Regulatory compliance check
+    ├─ Creative content detection
+    └─ Off-topic detection
     │
     ▼
-Output Cleaning (llm_client.clean_model_output)
-    ├─ Removes meta-commentary
-    ├─ Fixes incomplete sentences
-    └─ Ensures professional formatting
+Output Cleaning (minimal)
+    └─ Remove role markers, fix punctuation
     │
     ▼
 Cache & Deliver
-    └─ Approved responses cached for future use
+    └─ Only cache approved responses
 ```
 
-## Current Safety Pipeline
+## Example Interactions
 
-### 1. Query Pre-Screening
-**Deterministic pattern matching** blocks clearly unsafe requests:
-- Personal dosing questions ("how much should I take?")
-- Pediatric/off-label use ("can I give to my child?")
-- Administration misuse ("can I crush/snort/inject?")
-- Prescription sharing requests
-
-### 2. Response Generation
-**Strict grounding prompt** ensures:
-- Only information from documentation is used
-- No general medical knowledge added
-- Proper medication name spelling (Journvax)
-- No meta-commentary about compliance
-
-### 3. Pattern-Based Validation
-**Auto-corrections** (not refusals):
-- **Side effects** → Adds "This is not a complete list. See the Medication Guide for full information."
-- **Severe symptoms** → Adds "If you experience severe symptoms, seek immediate medical attention."
-
-**Hard blocks** for:
-- Implied safety from absence ("doesn't mention X, so you're fine")
-- Inappropriate reassurance ("don't worry", "should be fine")
-- Personal medical advice ("you should take/stop")
-- Unsourced dosing information
-
-### 4. Document Grounding Check
-**Embedding similarity validation**:
-- Model: all-MiniLM-L6-v2
-- Threshold: 0.35 (allows paraphrasing)
-- Fails only if: Low similarity AND multiple unsupported claims
-
-### 5. Output Cleaning
-**Comprehensive text processing**:
-- Removes parenthetical self-editing ("(rephrased for clarity)")
-- Cuts off re-answer attempts ("However, since you're asking...")
-- Fixes incomplete sentences ending with ", it."
-- Corrects misspellings (JOURNAVX → Journvax)
-- Ensures proper punctuation and spacing
-
-## Configuration
-
-Key settings in `config.py`:
-
-```python
-# Guard Configuration
-ENABLE_GUARD = True                    # Master switch for safety system
-USE_LLM_GUARD = False                  # Disabled to prevent false positives
-SEMANTIC_SIMILARITY_THRESHOLD = 0.35   # Grounding check threshold
-
-# Model Parameters
-BRIDGE_SYNTHESIZER_PARAMS = {
-    "max_new_tokens": 150,
-    "temperature": 0.6,
-    "stop": ["\nUser:", "\nHuman:", "###"]
-}
-
-# Caching
-ENABLE_RESPONSE_CACHE = True
-MAX_CACHE_SIZE = 100
-
-# RAG Settings
-TOP_K_RETRIEVAL = 4
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-```
-
-## User Interface
-
-### Main Chat
-- Clean chat interface with message history
-- Automatic response validation and correction
-- Professional, grounded responses
-
-### Sidebar Controls
-- **🔄 New Conversation** - Start fresh conversation
-- **🗑️ Clear Response Cache** - Clear cached responses
-- **🔧 Debug Mode** - Shows timing, validation details, grounding scores
-
-### Debug Information (when enabled)
-```json
-{
-  "timing": {
-    "rag_ms": 150,
-    "generation_ms": 2500,
-    "total_ms": 3200
-  },
-  "validation": {
-    "result": "rejected",
-    "was_corrected": true,
-    "grounding_score": 0.78
-  }
-}
-```
-
-
-
-### 🚀 Performance
-- Response time: 2-5 seconds typical
-- Cached responses: <100ms
-- Grounding check: ~200ms
-- Pattern validation: <50ms
+| User Query | System Response |
+|------------|----------------|
+| "give me side effects" | Lists side effects from documentation + disclaimer |
+| "can old people take journvax" | Information from documentation or standard refusal |
+| "can i take journvax with a speedball" | "I'm sorry, I cannot discuss that..." |
+| "tell me about journvax in a story" | "I'm sorry, I don't seem to have any information on that..." |
+| "tell me about gravity" | "I'm sorry, I don't seem to have any information on that..." |
+| "hello" | "Hello! How can I help you with information about Journvax today?" |
 
 ## Setup Instructions
 
@@ -184,102 +171,105 @@ export HF_TOKEN="your-huggingface-token"
 export HF_INFERENCE_ENDPOINT="your-endpoint-url"
 ```
 
-### 3. Add Documentation
+### 3. Update Configuration
+Edit `config.py`:
+```python
+SEMANTIC_SIMILARITY_THRESHOLD = 0.50
+USE_LLM_GUARD = False
+```
+
+### 4. Add Documentation
 Place PDF files in `./data/` directory
 
-### 4. Build Index
+### 5. Build Index
 ```python
 from rag import build_index
 build_index(force_rebuild=True)
 ```
 
-### 5. Run Application
+### 6. Run Application
 ```bash
 streamlit run app.py
 ```
 
-## Troubleshooting
-
-### "Response still has issues after clearing cache"
-- Restart the app completely to reload all singletons
-- Check that `USE_LLM_GUARD = False` in config
-- Verify the latest `llm_client.py` is deployed
-
-### "Grounding failures on valid content"
-- Check PDFs are properly loaded in `./data/`
-- Rebuild index: `build_index(force_rebuild=True)`
-- Verify embedding model loaded successfully
-
-### "Incomplete sentences in responses"
-- Update to latest `llm_client.py` with enhanced cleaning
-- Check model's `max_new_tokens` isn't too low
-
 ## Safety Compliance
 
 ### ✅ What's Allowed
-- Listing side effects from documentation
-- Standard FDA disclaimers ("See Medication Guide")
-- Directing to healthcare providers
-- Factual information from PI/Medication Guide
+- Information directly from Journvax documentation
+- Side effects listings with proper disclaimers
+- Standard FDA warnings
+- Factual medication information
 
 ### ❌ What's Blocked
-- Personal medical advice
-- Dosing recommendations
-- Pediatric use when not approved
-- Dangerous reassurances
-- Ungrounded claims
+- Creative content (stories, poems, narratives)
+- Illegal drug references
+- Violence or self-harm content
+- Off-topic queries
+- Medical advice
+- Information not in documentation
+- Speculation or external knowledge
 
-## Architecture Notes
+## Troubleshooting
 
-- **Singleton pattern**: Guard, RAG system, and conductor use singletons
-- **Async throughout**: All LLM calls are async for better performance
-- **Streaming disabled**: Responses generated completely before display
-- **Session state**: Streamlit session state manages conversation history
+### "System accepting inappropriate queries"
+- Verify `guard.py` is updated to v3.0
+- Check `SEMANTIC_SIMILARITY_THRESHOLD = 0.50`
+- Ensure `requires_validation = True` in all responses
+- Clear cache and restart
+
+### "Responses include external information"
+- Check prompts in `prompts.py` for strict grounding rules
+- Verify grounding threshold is 0.50
+- Review retrieved context quality
+- Rebuild FAISS index if needed
+
+### "Creative content getting through"
+- Verify creative content detection in `guard.py`
+- Check prompt pre-screening logic
+- Ensure validation is not bypassed
+
+## Performance Metrics
+
+- **Query screening:** <50ms
+- **Context retrieval:** 150-300ms
+- **Response generation:** 2-5 seconds
+- **Validation:** 200-300ms
+- **Cached responses:** <100ms
+
+## Security & Privacy
+
+- No user data logged beyond session
+- PDFs processed locally
+- No external API calls except HF endpoint
+- Memory-only cache, cleared on restart
+- No browser storage used
 
 ## Current Limitations
 
-1. **No streaming**: Responses appear all at once after generation
-2. **Single document source**: Only uses uploaded PDFs, no external knowledge
-3. **No conversation memory in RAG**: Each query treated independently for retrieval
-4. **Fixed embedding model**: all-MiniLM-L6-v2 hardcoded
+1. No streaming responses
+2. Single document source (PDFs only)
+3. No conversation memory in retrieval
+4. Fixed embedding model (all-MiniLM-L6-v2)
 
-## Security Notes
+## Version History
 
-- No user data logged beyond session
-- No external API calls except to configured HF endpoint
-- PDFs processed locally, not sent to external services
-- Cache stored in memory only, cleared on restart
+### Version 3.0 (Current)
+- Strict document grounding enforcement
+- Comprehensive threat detection
+- Creative content blocking
+- Mandatory validation for all responses
+- Illegal drug detection
 
----
+### Version 2.0
+- Removed LLM guard to prevent false positives
+- Added response caching
+- Improved output cleaning
 
-## System Files Reference
-
-| File | Purpose |
-|------|---------|
-| `app.py` | Main Streamlit application entry point with chat interface, sidebar controls, and debug mode functionality |
-| `conversational_agent.py` | Core orchestrator that coordinates the entire RAG pipeline: retrieval → generation → validation → caching |
-| `guard.py` | Safety validation system implementing pattern-based rules and document grounding verification |
-| `llm_client.py` | Asynchronous Hugging Face endpoint client with comprehensive response cleaning and formatting |
-| `rag.py` | FAISS vector search engine, PDF document parsing, and context retrieval functionality |
-| `semantic_chunker.py` | Intelligent document chunking with section awareness for optimal retrieval performance |
-| `context_formatter.py` | Deduplicates and compacts retrieved context to optimize token usage |
-| `embeddings.py` | SentenceTransformer singleton manager (all-MiniLM-L6-v2 model) |
-| `conversation.py` | Session and conversation state management for multi-turn dialogues |
-| `prompts.py` | Generation prompts with strict document grounding requirements |
-| `config.py` | Central configuration file for all system parameters: thresholds, model settings, UI text |
-| `code_executor.py` | Code execution utilities (if present - for advanced functionality) |
-| `requirements.txt` | Python package dependencies |
-| `packages.txt` | System package dependencies for deployment |
-
-### Supporting Directories
-| Directory | Purpose |
-|-----------|---------|
-| `data/` | Storage for PDF documentation files that serve as the knowledge base |
-| `faiss_index/` | Persisted FAISS vector index and metadata for fast document retrieval |
-| `venv/` | Python virtual environment (development dependency) |
+### Version 1.0
+- Initial release with basic RAG functionality
 
 ---
 
-**Version**: 2.0 (Post LLM-guard removal)  
+**Version**: 3.0 (Strict Grounding Edition)  
 **Last Updated**: August 2024  
-**Status**: Production-ready with known limitations
+**Status**: Production-ready with enhanced safety

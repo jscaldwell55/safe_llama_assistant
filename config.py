@@ -104,7 +104,7 @@ MAX_CONTEXT_LENGTH = 3500
 # ============================================================================
 
 ENABLE_GUARD = True
-SEMANTIC_SIMILARITY_THRESHOLD = 0.35  # Much lower - just needs some relationship
+SEMANTIC_SIMILARITY_THRESHOLD = 0.50  # Much lower - just needs some relationship
 USE_LLM_GUARD = False  # Set to True for extra safety check
 LLM_CONFIDENCE_THRESHOLD = 0.7
 

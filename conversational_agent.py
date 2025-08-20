@@ -1,9 +1,6 @@
-# conversational_agent.py - Document-Grounded Conversational Agent Fixed Version
+# conversational_agent.py - Fixed to Always Validate Responses
 """
-Simplified agent that:
-1. Retrieves relevant documentation
-2. Generates responses grounded in documentation
-3. Applies safety validation
+Document-grounded agent with mandatory validation for all responses
 """
 
 import logging
@@ -37,7 +34,7 @@ class ConversationMode(Enum):
 class ConductorDecision:
     """Main decision structure for response orchestration"""
     final_response: str = ""
-    requires_validation: bool = True
+    requires_validation: bool = True  # ALWAYS TRUE NOW
     strategy_used: ResponseStrategy = ResponseStrategy.SYNTHESIZED
     context_used: str = ""
     debug_info: Dict[str, Any] = field(default_factory=dict)
@@ -58,7 +55,7 @@ class AgentDecision:
 # ============================================================================
 
 class ResponseCache:
-    """Simple cache for responses to avoid repeated processing"""
+    """Simple cache for validated responses"""
     
     def __init__(self, max_size: int = 100):
         self.cache = {}
@@ -77,14 +74,13 @@ class ResponseCache:
         return None
     
     def put(self, key: str, value: str):
-        """Store response in cache"""
+        """Store validated response in cache"""
         if len(self.cache) >= self.max_size:
-            # Remove oldest entry (FIFO)
             first_key = next(iter(self.cache))
             del self.cache[first_key]
         
         self.cache[key] = value
-        logger.info(f"Cached response for key: {key[:8]}...")
+        logger.info(f"Cached validated response for key: {key[:8]}...")
 
 # ============================================================================
 # MAIN CONDUCTOR CLASS
@@ -92,8 +88,7 @@ class ResponseCache:
 
 class PersonaConductor:
     """
-    Main orchestrator for response generation.
-    Ensures all responses are grounded in documentation.
+    Main orchestrator ensuring all responses are validated
     """
     
     def __init__(self):
@@ -107,22 +102,13 @@ class PersonaConductor:
             if ENABLE_RESPONSE_CACHE:
                 self.cache = ResponseCache(max_size=MAX_CACHE_SIZE)
         except ImportError:
-            logger.warning("Could not load cache config, cache disabled")
+            logger.warning("Could not load cache config")
         
-        # Quick responses for common greetings
-        self.greeting_patterns = re.compile(
-            r'^(hi|hello|hey|good morning|good afternoon|good evening)[\s!?.,]*$',
-            re.IGNORECASE
-        )
-        self.thanks_patterns = re.compile(
-            r'^(thank|thanks|thank you|thx|ty)[\s!?.,]*$',
-            re.IGNORECASE
-        )
-        
+        # Standard responses that don't need generation
         self.instant_responses = {
             "hello": "Hello! How can I help you with information about Journvax today?",
             "hi": "Hi there! What would you like to know about Journvax?",
-            "hey": "Hey! How can I help you?",
+            "hey": "Hey! How can I help you with Journvax information?",
             "thank you": "You're welcome! Is there anything else about Journvax I can help with?",
             "thanks": "You're welcome! Let me know if you need anything else.",
             "goodbye": "Goodbye! Take care!",
@@ -143,71 +129,38 @@ class PersonaConductor:
         """Lazy load guard"""
         if self._guard is None:
             try:
-                from guard import enhanced_guard
-                self._guard = enhanced_guard
+                from guard import hybrid_guard
+                self._guard = hybrid_guard
             except ImportError:
                 logger.error("Could not import guard")
         return self._guard
     
-    def should_retrieve_context(self, query: str) -> bool:
-        """Determine if we need to retrieve context for this query"""
-        query_lower = query.lower()
-        
-        # Don't retrieve for greetings or thanks
-        if self.greeting_patterns.match(query) or self.thanks_patterns.match(query):
-            return False
-        
-        # Don't retrieve for single-word responses unless medical
-        if query_lower in ["yes", "no", "ok", "okay", "sure"]:
-            return False
-        
-        return True
-    
     async def generate_synthesized_response(self, query: str, context: str) -> str:
         """
-        Generate response that MUST be grounded in context.
-        Uses strict prompting to prevent hallucination.
+        Generate response strictly grounded in context
         """
         from llm_client import call_huggingface_with_retry
         from config import BRIDGE_SYNTHESIZER_PARAMS
+        from prompts import format_synthesizer_prompt
         
-        # If no meaningful context, return standard no-info response
-        if not context or len(context.strip()) < 50:
-            return "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
-        
-        # Build strict grounding prompt
-        prompt = f"""You are a pharmaceutical information specialist providing information about Journvax.
-
-CRITICAL RULES:
-1. ALWAYS spell the medication name as "Journvax" 
-2. ONLY use information from the documentation below
-3. If the documentation contains Q&A format, extract the relevant information and present it as a natural response
-4. NEVER output Question/Answer format in your response
-5. Synthesize information into clear, direct statements
-
-Documentation Available:
-{context}
-
-User Question: {query}
-
-Natural, professional response (using ONLY the documentation above):"""
+        # Use enhanced prompt with strict grounding
+        prompt = format_synthesizer_prompt(query, context)
         
         try:
             response = await call_huggingface_with_retry(prompt, BRIDGE_SYNTHESIZER_PARAMS)
             
             if response.startswith("Error:"):
-                return "I apologize, but I'm having trouble generating a response. Please try again."
+                return "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
             
             return response.strip()
             
         except Exception as e:
             logger.error(f"Generation failed: {e}")
-            return "I apologize, but I encountered an error. Please try again."
+            return "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
     
     async def orchestrate_response(self, query: str) -> ConductorDecision:
         """
-        Main orchestration logic with safety-first approach.
-        Flow: Query validation → Cache check → Context retrieval → Generation → Response validation
+        Main orchestration with MANDATORY validation for all responses
         """
         start_time = time.time()
         
@@ -223,7 +176,7 @@ Natural, professional response (using ONLY the documentation above):"""
                     
                     return ConductorDecision(
                         final_response=query_validation.final_response,
-                        requires_validation=False,  # Already validated
+                        requires_validation=True,  # ALWAYS TRUE
                         strategy_used=ResponseStrategy.BLOCKED,
                         was_blocked=True,
                         total_latency_ms=int((time.time() - start_time) * 1000),
@@ -245,7 +198,7 @@ Natural, professional response (using ONLY the documentation above):"""
                 if cached_response:
                     return ConductorDecision(
                         final_response=cached_response,
-                        requires_validation=False,
+                        requires_validation=True,  # ALWAYS TRUE (even for cached)
                         strategy_used=ResponseStrategy.CACHED,
                         total_latency_ms=int((time.time() - start_time) * 1000),
                         debug_info={
@@ -254,46 +207,56 @@ Natural, professional response (using ONLY the documentation above):"""
                         }
                     )
             
-            # Step 3: Check for instant responses (greetings, etc.)
+            # Step 3: Check for instant responses (greetings)
             query_lower = query.lower().strip()
             if query_lower in self.instant_responses:
                 response = self.instant_responses[query_lower]
+                
+                # Even instant responses get validated
+                if guard:
+                    validation_result = await guard.validate_response(
+                        response=response,
+                        context="",
+                        query=query
+                    )
+                    
+                    if validation_result.result.value != "approved":
+                        response = validation_result.final_response
                 
                 if self.cache and cache_key:
                     self.cache.put(cache_key, response)
                 
                 return ConductorDecision(
                     final_response=response,
-                    requires_validation=False,
+                    requires_validation=True,  # ALWAYS TRUE
                     strategy_used=ResponseStrategy.CONVERSATIONAL,
                     total_latency_ms=int((time.time() - start_time) * 1000),
                     debug_info={
                         "instant_response": True,
-                        "validation": {"result": "instant_approved"}
+                        "validation": {"result": "instant_validated"}
                     }
                 )
             
-            # Step 4: Retrieve context if needed
+            # Step 4: Retrieve context
             context = ""
             rag_time = 0
-            if self.should_retrieve_context(query):
-                rag_start = time.time()
-                try:
-                    retriever = self._get_retriever()
-                    if retriever:
-                        context = retriever(query)
-                        logger.info(f"Retrieved context: {len(context)} chars")
-                except Exception as e:
-                    logger.error(f"RAG retrieval failed: {e}")
-                    context = ""
-                rag_time = int((time.time() - rag_start) * 1000)
+            rag_start = time.time()
+            try:
+                retriever = self._get_retriever()
+                if retriever:
+                    context = retriever(query)
+                    logger.info(f"Retrieved context: {len(context)} chars")
+            except Exception as e:
+                logger.error(f"RAG retrieval failed: {e}")
+                context = ""
+            rag_time = int((time.time() - rag_start) * 1000)
             
             # Step 5: Generate response
             gen_start = time.time()
             response = await self.generate_synthesized_response(query, context)
             gen_time = int((time.time() - gen_start) * 1000)
             
-            # Step 6: Validate generated response
+            # Step 6: MANDATORY validation of generated response
             validation_result = None
             if guard:
                 validation_result = await guard.validate_response(
@@ -305,12 +268,17 @@ Natural, professional response (using ONLY the documentation above):"""
                 
                 # Handle validation result
                 if validation_result.result.value != "approved":
-                    logger.warning(f"Response corrected: {validation_result.reasoning}")
+                    logger.warning(f"Response rejected/corrected: {validation_result.reasoning}")
                     response = validation_result.final_response
-                    # Don't cache corrected responses
-                elif self.cache and cache_key:
+                    # Don't cache rejected/corrected responses
+                else:
                     # Cache only validated, approved responses
-                    self.cache.put(cache_key, response)
+                    if self.cache and cache_key:
+                        self.cache.put(cache_key, response)
+            else:
+                # If guard is not available, use standard refusal
+                logger.error("Guard not available - using standard refusal")
+                response = "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
             
             # Calculate total time
             total_time = int((time.time() - start_time) * 1000)
@@ -326,7 +294,7 @@ Natural, professional response (using ONLY the documentation above):"""
                 "used_context": bool(context)
             }
             
-            # Always include validation info if validation was performed
+            # Include validation info
             if validation_result:
                 debug_info["validation"] = {
                     "result": validation_result.result.value,
@@ -334,17 +302,17 @@ Natural, professional response (using ONLY the documentation above):"""
                     "violation": validation_result.violation.value if hasattr(validation_result, 'violation') else None,
                     "was_corrected": validation_result.result.value != "approved",
                     "confidence": getattr(validation_result, 'confidence', 0.0),
-                    "reasoning": validation_result.reasoning if validation_result.result.value != "approved" else None
+                    "reasoning": validation_result.reasoning
                 }
             else:
                 debug_info["validation"] = {
                     "result": "no_guard",
-                    "reason": "Guard not available"
+                    "reason": "Guard not available - defaulted to refusal"
                 }
             
             return ConductorDecision(
                 final_response=response,
-                requires_validation=False,  # Already validated internally
+                requires_validation=True,  # ALWAYS TRUE
                 strategy_used=ResponseStrategy.SYNTHESIZED,
                 context_used=context,
                 total_latency_ms=total_time,
@@ -356,8 +324,8 @@ Natural, professional response (using ONLY the documentation above):"""
             logger.error(f"Orchestration failed: {e}", exc_info=True)
             
             return ConductorDecision(
-                final_response="I apologize, but I'm having trouble processing your request. Please try again.",
-                requires_validation=False,
+                final_response="I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?",
+                requires_validation=True,  # ALWAYS TRUE
                 strategy_used=ResponseStrategy.ERROR,
                 total_latency_ms=int((time.time() - start_time) * 1000),
                 debug_info={
@@ -367,7 +335,7 @@ Natural, professional response (using ONLY the documentation above):"""
             )
     
     def reset_conversation(self):
-        """Reset conversation state (for new conversations)"""
+        """Reset conversation state"""
         logger.info("Conversation state reset")
 
 # ============================================================================
@@ -383,7 +351,6 @@ class ConversationalAgent:
     def process_query(self, query: str) -> AgentDecision:
         """Legacy synchronous interface"""
         try:
-            # Run async orchestration in sync context
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
