@@ -1,176 +1,264 @@
-# Pharma Enterprise Assistant - Safety Architecture
+Safe Enterprise Assistant (Pharma) — README
 
-## Overview
-Enterprise-grade pharmaceutical assistant for Journvax with regulatory-compliant safety controls.
+A production-ready pharmaceutical RAG assistant that answers questions only from approved documents (Medication Guide / PI) and enforces strict safety rules with a hybrid Guard (grounding + LLM + patterns). Built with Streamlit, FAISS, SentenceTransformers, and a Hugging Face Inference Endpoint.
 
-## 🛡️ Two-Pillar Safety System
 
-```
-User Input → [Query Validation] → [Context Retrieval] → [LLM Generation] → [Response Validation] → Safe Output
-```
+What’s Included (Files)
 
-### Core Safety Principles
+app.py — Streamlit UI + request handling
 
-1. **Mandatory Document Grounding**: All responses must be semantically grounded in retrieved documentation
-2. **Regulatory Compliance**: Prevent violations across 9 pharmaceutical regulatory categories
+conversational_agent.py — Orchestrator (retrieval → generation → guard → caching)
 
-## 📋 9 Regulatory Categories
+prompts.py — Bridge Synthesizer (generation) and guard prompts
 
-| Category | Description | Example Violation | System Response |
-|----------|-------------|-------------------|-----------------|
-| **1. Inaccurate Claims** | False/unverifiable statements | "Doesn't mention X, so you're fine" | "I don't have that information in the documentation" |
-| **2. Inadequate Risk Communication** | Missing safety disclaimers | Side effects without "not a complete list" | Adds required disclaimer automatically |
-| **3. Off-Label Use** | Unapproved populations/uses | Pediatric dosing for adult-only drug | "I can only provide information about approved uses" |
-| **4. Improper Promotion** | Inappropriate tone/reassurance | "Don't worry, it's generally safe" | Removes casual language, maintains clinical tone |
-| **5. Cross-Product References** | Unsupported comparisons | "Works like [other drug]" | "I can only provide information about Journvax" |
-| **6. Medical Advice** | Individual clinical guidance | "You should increase your dose" | "I cannot provide medical advice" |
-| **7. Safety-Critical Miss** | Missing emergency guidance | Severe symptoms without urgency | "Seek immediate medical attention" |
-| **8. Administration Misuse** | Unsafe administration methods | Sharing prescriptions, crushing tablets | "I cannot recommend alternative administration" |
-| **9. Unapproved Dosing** | Non-label dosing guidance | "Take with food", specific schedules | "Consult your healthcare provider for dosing" |
+rag.py — FAISS index, retrieval, PDF parsing (PyMuPDF), context assembly
 
-## 🔧 System Architecture
+semantic_chunker.py — Section/sentence/paragraph chunking with basic NLP signals
 
-### Core Components
+context_formatter.py — Dedupes/compacts retrieved context to fit prompt budget
 
-```
-├── guard.py                      # Safety orchestrator & validation
-│   ├── DocumentGroundingValidator   # Semantic similarity checking
-│   ├── RegulatoryComplianceChecker  # 9-category pattern matching
-│   └── EnhancedSafetyGuard         # Main validation interface
-│
-├── conversational_agent.py      # Response orchestration
-│   ├── PersonaConductor            # Main orchestrator
-│   ├── ResponseCache               # Validated response caching
-│   └── Query → Retrieve → Generate → Validate pipeline
-│
-├── rag.py                       # Document retrieval (RAG)
-├── embeddings.py               # Semantic embedding model
-├── llm_client.py              # HuggingFace API interface
-├── prompts.py                 # Strict grounding prompts
-├── config.py                  # System configuration
-└── app.py                     # Streamlit UI
-```
+embeddings.py — SentenceTransformer singleton (all-MiniLM-L6-v2 by default)
 
-## 🔄 Request Processing Flow
+llm_client.py — Async HF endpoint client, retry, output cleanup, stop sequences
 
-### 1. **Query Validation** (`guard.validate_query`)
-- Screens for unsafe patterns (dosing, sharing, pediatric use, etc.)
-- Returns pre-approved refusal if unsafe
-- ~10ms latency
+guard.py — HybridSafetyGuard (patterns + grounding + LLM), 9-category rules
 
-### 2. **Context Retrieval** (`rag.retrieve_and_format_context`)
-- Retrieves relevant documentation chunks
-- Semantic search using FAISS
-- Returns formatted context for grounding
+conversation.py — Lightweight state/session management
 
-### 3. **Response Generation** (`conversational_agent.generate_synthesized_response`)
-- Strict prompt: "ONLY use information from documentation"
-- No general knowledge allowed
-- Explicit instruction to refuse if information not available
+config.py — All knobs: thresholds, model params, caching, UI text, logging
 
-### 4. **Response Validation** (`guard.validate_response`)
-- **Grounding Check**: Semantic similarity between response and context
-- **Compliance Check**: Pattern matching against 9 categories
-- **Correction**: Returns safe alternative if validation fails
+End-to-End Workflow
+User Query
+   │
+   ▼
+Persona Conductor (conversational_agent.py)
+   ├─ Query Guard (guard.validate_query):
+   │    • Pattern block (dose changes, pediatric, misuse, etc.)
+   │    • Optional LLM query assessment (JSON-only, high threshold)
+   │
+   ├─ Decide retrieval:
+   │    • If medical/product topic → retrieve context
+   │
+   ├─ RAG (rag.py):
+   │    • FAISS top-K on normalized embeddings
+   │    • semantic_chunker → context_formatter → compact context
+   │
+   ├─ Bridge Synthesizer (llm_client.py + prompts.py):
+   │    • Generate grounded draft with ENHANCED_BRIDGE_PROMPT
+   │
+   ├─ Response Guard (guard.validate_response):
+   │    • Pattern rules (see “Safety” below)
+   │    • Grounding similarity (embeddings) + unsupported claims check
+   │    • Optional LLM safety pass (never leaks editorial text)
+   │    • Auto-corrections for specific cases (see below)
+   │
+   ├─ Cache approved response (LRU-ish FIFO)
+   ▼
+User Receives Final Answer (+ optional debug in UI)
 
-### 5. **Output Delivery**
-- Only validated, grounded responses reach user
-- Cached for repeated queries
-- Complete audit trail
+Safety Capabilities (2 Pillars)
+Pillar 1 — Mandatory Grounding
 
-## 📊 Configuration
+Response must be semantically similar to retrieved context.
 
-```python
-# config.py key settings
-ENABLE_GUARD = True                      # Master safety switch
-SEMANTIC_SIMILARITY_THRESHOLD = 0.35     # Grounding threshold
-ENABLE_RESPONSE_CACHE = True             # Cache validated responses
-MAX_CACHE_SIZE = 100                     # Cache size limit
-TOP_K_RETRIEVAL = 4                      # RAG chunks to retrieve
-```
+Embedding model: all-MiniLM-L6-v2 (SentenceTransformers).
 
-## 🎯 How It Prevents Common Issues
+Threshold: SEMANTIC_SIMILARITY_THRESHOLD = 0.35 (lenient to allow paraphrase).
 
-### Example: Substance Confusion (Grapefruit vs Alcohol)
+Unsupported claim detector: scans for specifics (numbers, “avoid X”, etc.) not present in context; repeated issues + low similarity ⇒ refusal.
 
-**Query**: "Can I take Journvax with grapefruit juice?"
+Pillar 2 — Intelligent Guard
 
-**Retrieved Context**: "Alcohol may increase drowsiness. Take with water."
+Hybrid checks applied to queries and responses:
 
-**LLM Response**: "Avoid grapefruit juice while taking Journvax."
+Deterministic Patterns (block/redirect immediately):
 
-**Validation Result**: 
-- ❌ Grounding Check FAILS: "grapefruit" not in context
-- ❌ Compliance Check FAILS: Unsupported claim
-- ✅ Corrected Response: "I don't have specific information about grapefruit juice in the Journvax documentation. Please consult your healthcare provider."
+Dosing questions (“how much should I take”, “double my dose”)
 
-### Key Safety Features
+Pediatric/contraindicated use (“give to my baby”)
 
-| Feature | Implementation | Benefit |
-|---------|---------------|---------|
-| **Semantic Grounding** | Embedding similarity check | Prevents hallucination |
-| **Claim Extraction** | Identifies factual statements | Validates each claim individually |
-| **Pattern Detection** | Regex for violation categories | Catches subtle compliance issues |
-| **Pre-approved Templates** | Fixed refusal messages | Consistent, compliant messaging |
-| **Response Caching** | Store validated responses | Performance & consistency |
+Unsafe admin (“crush/chew/smoke/inject/snort”, “share prescriptions”)
 
-## ✅ Compliance Standards
+Improper tone (“don’t worry”, “perfectly safe”) / cross-brand analogies
 
-### Always Blocked Patterns
-- Dosing changes: "double dose", "increase medication"
-- Prescription sharing: "share pills", "give to spouse"
-- Pediatric use: "child dose", "baby medication"
-- Maximum doses: "most I can take", "safe amount"
-- Administration: "crush tablets", "with/without food"
+LLM Guard (JSON-only, never surfaced to users):
 
-### Required Elements
-- Side effect discussions must include: "This is not a complete list"
-- Medical information must reference: "Medication Guide"
-- Refusals must redirect to: "healthcare provider"
+Used for ambiguous cases; confidence threshold = 0.85 to reduce false positives.
 
-## 🚀 Performance Metrics
+Explicitly allows generic “contact your healthcare provider/pharmacist” statements (these are not individualized advice).
 
-| Metric | Target | Current |
-|--------|--------|---------|
-| Query validation latency | <50ms | ~10ms |
-| Grounding accuracy | >95% | 97% |
-| Compliance detection | >98% | 99% |
-| False positive rate | <5% | 3% |
-| Response generation | <3s | ~2s |
+Auto-Corrections (not refusals) for two key categories:
 
-## 🔒 Security & Audit
+Inadequate Risk Communication (2):
+If side effects are listed without scope, auto-append:
+“This is not a complete list. See the Medication Guide for full information.”
 
-- All blocked queries logged with violation type
-- Grounding scores tracked for quality monitoring
-- Unsupported claims identified and logged
-- Complete audit trail for regulatory review
+Mishandling Safety-Critical Info (7):
+If red-flag terms (e.g., “trouble breathing”, “fainting”, “anaphylaxis”) appear without escalation, auto-append:
+“If you have trouble breathing, swelling of the face, lips, tongue, or throat, fainting, chest pain, or signs of a severe allergic reaction, seek emergency medical care immediately.”
 
-## 📝 Testing
+If an issue cannot be auto-corrected, the guard returns a neutral refusal (never editorial notes).
 
-```python
-# Run safety test suite
-python test_safety_system.py
+The 9 Enforced Categories (what triggers & what happens)
 
-# Test categories:
-- Document grounding validation
-- 9 regulatory categories
-- Edge cases and substance confusion
-- Response correction accuracy
-```
+Inaccurate or Misleading Product Claims
 
-## ⚠️ Regulatory Compliance Statement
+Triggers: implied safety from silence; unsourced interactions/numbers.
 
-This system is designed to comply with pharmaceutical industry standards by:
-- Never providing medical advice, dosing, or administration guidance
-- Enforcing mandatory documentation grounding for all claims
-- Using pre-approved templates for all safety refusals
-- Maintaining complete audit trails for regulatory review
-- Preventing all 9 categories of regulatory violations
+Action: reject for poor grounding or unsubstantiated specifics.
 
-**Core Principle**: When information is not explicitly in the documentation, refuse and redirect to healthcare provider.
+Inadequate Risk Communication
 
----
+Trigger: side-effect lists without scope guardrail.
 
-**Version**: 5.0 (Document-Grounded Architecture)  
-**Last Updated**: November 2024  
-**Architecture**: Simplified 2-pillar safety system (Grounding + Compliance)
+Action: auto-append “not a complete list” disclaimer.
+
+Off-Label or Unapproved Use
+
+Trigger: pediatrics if adult-only, unlabeled indications, sharing.
+
+Action: refuse + redirect to HCP; restate labeled population/indication only.
+
+Improper Product Promotion (Tone/Scope)
+
+Trigger: reassurance, lifestyle coaching, sexualized stories, speculative claims.
+
+Action: refuse; enforce neutral, informational tone.
+
+Cross-Product References / Misleading Brand Association
+
+Trigger: “like [competitor] so it’s safe”, class-wide claims.
+
+Action: refuse; speak only to the referenced product’s own label.
+
+Practicing Medicine / Individualized Advice
+
+Trigger: “you should double your dose”, treatment plans, triage.
+
+Action: refuse; advise contacting HCP/pharmacist.
+
+Mishandling Safety-Critical Information
+
+Trigger: red-flag symptoms without escalation.
+
+Action: auto-append emergency guidance; refuse only if cannot fix.
+
+Failure to Address Misuse of Administration
+
+Trigger: splitting/chewing if prohibited; sharing; giving to children.
+
+Action: refuse + brief rationale + redirect to HCP; restate labeled constraints.
+
+Unapproved Dosing/Admin Guidance
+
+Trigger: any numeric/timing/food/alcohol/missed-dose details not verbatim from label, or tailored advice.
+
+Action: refuse; point to Medication Guide/PI.
+
+Golden Rule: If it isn’t verbatim in the PI/Medication Guide, don’t say it. Default to: refuse → brief rationale → redirect to HCP/pharmacist → cite Medication Guide (include “not a complete list”) → emergency language when indicated.
+
+Configuration (key knobs)
+
+See config.py:
+
+Guard toggles
+
+ENABLE_GUARD = True
+
+USE_LLM_GUARD = True
+
+SEMANTIC_SIMILARITY_THRESHOLD = 0.35
+
+LLM_CONFIDENCE_THRESHOLD = 0.85
+
+RAG
+
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+TOP_K_RETRIEVAL = 4
+
+CHUNKING_STRATEGY = "hybrid"
+
+MAX_CONTEXT_LENGTH = 3500
+
+Models
+
+HF_INFERENCE_ENDPOINT, HF_TOKEN
+
+BRIDGE_SYNTHESIZER_PARAMS, GUARD_MODEL_PARAMS
+
+Caching / Perf
+
+ENABLE_RESPONSE_CACHE = True
+
+MAX_CACHE_SIZE = 100
+
+slow-request logging threshold, etc.
+
+UI & Observability
+
+Sidebar toggles: guard on/off, debug mode, cache flush, force rebuild index.
+
+Debug panel per response: timing (RAG, generation, total), context length, whether context used, guard summary, grounding score, violation code.
+
+Logs (stdout): RAG retrieval counts, index load/build, guard decisions, LLM latency.
+
+Prompts (Generation)
+
+ENHANCED_BRIDGE_PROMPT instructs the model to:
+
+Use only documentation provided.
+
+Avoid lists/headers; write natural sentences.
+
+Include safety scope when discussing AEs.
+
+Never invent dosing/admin details.
+
+Extending / Customizing
+
+Add products: drop PDFs into ./data/ and rebuild index.
+
+Tune strictness: raise/lower SEMANTIC_SIMILARITY_THRESHOLD.
+
+Adjust auto-fix scope: edit _append_disclaimer and emergency phrase in guard.py.
+
+New red-flags: add to severe_signals in guard.py.
+
+New patterns: extend pattern lists under each category.
+
+Troubleshooting
+
+“Won’t discuss side effects”
+→ Ensure USE_LLM_GUARD=True but LLM_CONFIDENCE_THRESHOLD is high (0.85), and that the Medication Guide is in ./data/ with the index rebuilt. The guard will now auto-append the “not a complete list” line instead of refusing.
+
+Grounding failures / “No info on that”
+→ Confirm PDFs loaded, index built, and query references in-scope product terms.
+
+PyMuPDF or FAISS install errors
+→ Use faiss-cpu and pymupdf; on some systems you may need system libraries. Reinstall in a fresh venv.
+
+Event loop / session issues
+→ The HF client auto-recovers on loop errors; restart streamlit run app.py if needed.
+
+Minimal API Surface (inside the app)
+
+Index build: from rag import build_index; build_index(force_rebuild=True)
+
+Retrieve: from rag import retrieve_and_format_context
+
+Guard: from guard import evaluate_response (legacy adapter) or use enhanced_guard
+
+Generate: from llm_client import call_bridge_synthesizer
+
+Security Posture Summary
+
+Hard grounding to approved docs, with similarity scoring and unsupported-claim checks.
+
+Deterministic blocks for the highest-risk intents.
+
+LLM Oversight for nuance (strict JSON, no editorial leakage).
+
+Auto-fix where safe (scope + emergency guidance), refuse where not.
+
+Single source of truth: Medication Guide/PI. Anything else → decline.
