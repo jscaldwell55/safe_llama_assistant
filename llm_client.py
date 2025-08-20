@@ -1,4 +1,4 @@
-# llm_client.py - Fixed Output Cleaning Version
+# llm_client.py - Complete Fixed Version with All Updates
 
 import aiohttp
 import asyncio
@@ -47,11 +47,11 @@ def get_or_create_event_loop():
         return loop
 
 # ============================================================================
-# OUTPUT CLEANING - SIMPLIFIED AND FIXED
+# OUTPUT CLEANING - ENHANCED WITH ALL FIXES
 # ============================================================================
 
 def clean_model_output(text: str) -> str:
-    """Clean and format model output - enhanced to remove meta-commentary"""
+    """Clean and format model output - comprehensive cleaning"""
     if not text:
         return ""
     
@@ -70,11 +70,22 @@ def clean_model_output(text: str) -> str:
     text = text.replace("JOURNAVX", "Journvax")
     text = text.replace("Journavx", "Journvax")
     text = text.replace("journavx", "Journvax")
+    text = text.replace("JOURNVAX", "Journvax")
     
-    # Step 3: Remove meta-commentary patterns
+    # Step 3: Remove meta-commentary patterns (ENHANCED)
     meta_patterns = [
+        # Parenthetical self-editing comments
+        r'\(removed unnecessary.*?\)',
+        r'\(rephrased for.*?\)',
+        r'\(edited for.*?\)',
+        r'\(simplified.*?\)',
+        r'\(clarified.*?\)',
+        r'\(for clarity.*?\)',
+        # Note patterns
         r'Note:\s*Response only includes.*?\.(?:\s|$)',
         r'Note:\s*This response.*?\.(?:\s|$)',
+        r'Note:\s*.*?compliance.*?\.(?:\s|$)',
+        # Meta statements
         r'Response only includes.*?\.(?:\s|$)',
         r'No inference or assumption made.*?\.(?:\s|$)',
         r'User question could be further clarified.*?\.(?:\s|$)',
@@ -87,6 +98,29 @@ def clean_model_output(text: str) -> str:
     
     for pattern in meta_patterns:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Step 3b: Cut at re-answer patterns
+    # If the model starts re-answering, cut it off
+    reanswer_patterns = [
+        r'However, since you\'re asking.*',
+        r'To clarify further.*',
+        r'Let me rephrase.*',
+        r'To be more specific.*',
+        r'In other words.*',
+        r'Put differently.*',
+        r'This implies that.*',
+        r'This means that.*',
+        r'To reiterate.*',
+        r'Additionally, I must.*',
+        r'Furthermore, I should.*',
+    ]
+    
+    for pattern in reanswer_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            # Cut at the reanswer attempt
+            text = text[:match.start()].strip()
+            break
     
     # Step 4: Cut at explicit turn markers
     turn_markers = [
@@ -108,10 +142,11 @@ def clean_model_output(text: str) -> str:
     # Fix missing space after colon
     text = re.sub(r'([a-z]):\.', r'\1:', text)
     text = re.sub(r'include:\.', 'include:', text)
-    
-    # Fix awkward bullet points
-    text = re.sub(r'\.\s*([a-z])', r'. \1', text)  # Add space after period before lowercase
     text = re.sub(r':\.\s*', ': ', text)  # Fix ":." to ": "
+    
+    # Fix awkward spacing
+    text = re.sub(r'\.\s*([a-z])', r'. \1', text)  # Add space after period before lowercase
+    text = re.sub(r':\s*([a-z])', r': \1', text)  # Ensure space after colon
     
     # Step 6: Clean up bullet points if present
     if '•' in text or re.search(r'^\s*[-*]\s+', text, re.MULTILINE):
@@ -127,8 +162,8 @@ def clean_model_output(text: str) -> str:
             # Ensure proper capitalization
             if line and line[0].islower() and len(cleaned_lines) > 0:
                 line = line[0].upper() + line[1:]
-            # Add to cleaned lines
-            if line and line not in cleaned_lines:  # Avoid duplicates
+            # Add to cleaned lines (avoid duplicates)
+            if line and line not in cleaned_lines:
                 cleaned_lines.append(line)
         
         # Join with proper punctuation
@@ -141,7 +176,7 @@ def clean_model_output(text: str) -> str:
                 else:
                     text = cleaned_lines[0] + ': ' + ', '.join(cleaned_lines[1:]) + '.'
             else:
-                # Regular sentences
+                # Regular sentences - join with spaces
                 text = ' '.join(cleaned_lines)
     
     # Step 7: Remove extraction format artifacts
@@ -158,18 +193,39 @@ def clean_model_output(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
     text = text.strip()
     
-    # Step 10: Fix incomplete sentences at the end
+    # Step 10: Fix incomplete sentences at the end (ENHANCED)
     if text:
-        # Check if it ends with incomplete phrases
+        # First, check for very obvious incomplete sentences
+        incomplete_sentence_patterns = [
+            r', it\.$',  # Ends with ", it."
+            r', but\.$',  # Ends with ", but."
+            r'but since.*?, it\.$',  # "but since X, it." incomplete
+            r'Therefore,? it\.$',  # "Therefore, it." incomplete
+            r'Additionally,? it\.$',  # "Additionally, it." incomplete
+        ]
+        
+        for pattern in incomplete_sentence_patterns:
+            if re.search(pattern, text):
+                # Find the last complete sentence
+                sentences = text.split('. ')
+                if len(sentences) > 1:
+                    # Remove the incomplete last sentence
+                    text = '. '.join(sentences[:-1]) + '.'
+                break
+        
+        # Check if it ends with other incomplete phrases
         incomplete_patterns = [
             r'\.\s+There are no\s*$',
             r'\.\s+The\s*$',
             r'\.\s+This\s*$',
             r'\.\s+In\s*$',
             r'\.\s+For\s*$',
+            r'\.\s+It\s*$',
+            r'\.\s+Therefore\s*$',
             r',\s+and\s*$',
             r',\s+or\s*$',
             r',\s+but\s*$',
+            r',\s+it\s*$',
         ]
         
         for pattern in incomplete_patterns:
@@ -181,26 +237,72 @@ def clean_model_output(text: str) -> str:
         sentences = text.split('. ')
         if len(sentences) > 1:
             last_sentence = sentences[-1].strip()
-            if len(last_sentence.split()) < 3 and not last_sentence.endswith(('.', '!', '?')):
+            # Check if last sentence is incomplete
+            if (last_sentence.endswith(', it') or 
+                last_sentence.endswith(', it.') or
+                last_sentence.endswith('but it') or
+                last_sentence.endswith('but it.')):
+                text = '. '.join(sentences[:-1]) + '.'
+            elif len(last_sentence.split()) < 3 and not last_sentence.endswith(('.', '!', '?')):
                 text = '. '.join(sentences[:-1]) + '.'
     
     # Step 11: Ensure proper ending punctuation
     if text and text[-1] not in '.!?':
-        text += '.'
+        # Check if we should add a period
+        last_words = text.split()[-5:] if len(text.split()) >= 5 else text.split()
+        last_phrase = ' '.join(last_words).lower()
+        
+        # Don't add period if it's clearly incomplete
+        incomplete_endings = [
+            'and', 'but', 'or', 'with', 'for', 'to', 'the', 
+            'a', 'an', 'in', 'on', 'at', 'by', 'there are', 'it'
+        ]
+        
+        should_add_period = True
+        for ending in incomplete_endings:
+            if last_phrase.endswith(' ' + ending) or last_phrase == ending:
+                should_add_period = False
+                break
+        
+        if should_add_period:
+            text += '.'
+        else:
+            # Try to remove the incomplete ending
+            words = text.split()
+            if len(words) > 3:
+                # Remove last few words if they're incomplete
+                text = ' '.join(words[:-2]) + '.'
     
     # Step 12: Final cleanup
     text = text.replace('..', '.')
     text = text.replace('.,', '.')
+    text = text.replace('. .', '.')
     text = re.sub(r'\s+([.,!?])', r'\1', text)  # Remove space before punctuation
+    text = re.sub(r'([.,!?])([A-Z])', r'\1 \2', text)  # Add space after punctuation before capital
     
     # Step 13: One more pass to remove any remaining meta-commentary
     if 'Note:' in text:
         # Remove everything after "Note:" if it's at the end
         parts = text.split('Note:')
         if len(parts) > 1:
-            text = parts[0].strip()
-            if text and text[-1] not in '.!?':
-                text += '.'
+            # Check if what comes after Note: is meta-commentary
+            after_note = parts[1].lower()
+            if any(phrase in after_note for phrase in ['response', 'compliance', 'documentation', 'inference']):
+                text = parts[0].strip()
+                if text and text[-1] not in '.!?':
+                    text += '.'
+    
+    # Step 14: Remove any trailing "Would you like" questions that are incomplete
+    if text.endswith('Would you like more information on this topic?'):
+        # This is fine, keep it
+        pass
+    elif 'Would you like' in text and text.count('.') > 1:
+        # Check if it's at the end and possibly incomplete
+        sentences = text.split('.')
+        last_part = sentences[-1].strip()
+        if 'Would you like' in last_part and len(last_part.split()) < 8:
+            # Likely incomplete, remove it
+            text = '.'.join(sentences[:-1]) + '.'
     
     return text.strip()
 
