@@ -9,6 +9,7 @@ import faiss
 import fitz  # PyMuPDF
 import numpy as np
 
+from safe_sanitizer import sanitize_results
 from embeddings import get_embedding_model
 from semantic_chunker import SemanticChunker
 from context_formatter import format_retrieved_context
@@ -154,8 +155,10 @@ def get_rag_system() -> RAGSystem:
 def retrieve_and_format_context(query: str, k: int = TOP_K_RETRIEVAL) -> str:
     rag_system = get_rag_system()
     results = rag_system.retrieve(query, k)
+    # NEW: sanitize retrieved chunks (drops bad ones, cleans survivors)
+    results = sanitize_results(results)
     if not results:
-        return ""
+        return ""  # all chunks dropped as unsafe
 
     # Assemble "Source + Content" chunks, then let the formatter deduplicate/trim
     chunks = [

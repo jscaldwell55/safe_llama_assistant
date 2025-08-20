@@ -16,6 +16,7 @@ import asyncio
 from typing import Tuple, Optional, Dict, List
 from dataclasses import dataclass, field
 from enum import Enum
+from grounding import split_sentences, per_sentence_grounding, attach_citations
 
 logger = logging.getLogger(__name__)
 
@@ -358,9 +359,7 @@ class HybridSafetyGuard:
         )
     
     async def _check_strict_grounding(self, response: str, context: str) -> ValidationDecision:
-        """Strict grounding check - response must be based on context"""
         if not self.embedding_model:
-            # Without embedding model, be conservative
             return ValidationDecision(
                 result=ValidationResult.REJECTED,
                 final_response=STANDARD_REFUSAL,
@@ -368,57 +367,52 @@ class HybridSafetyGuard:
                 violation=RegulatoryViolation.INSUFFICIENT_GROUNDING,
                 confidence=0.5
             )
-        
-        try:
-            # Calculate similarity
-            resp_emb = self.embedding_model.encode(response, show_progress_bar=False)
-            ctx_emb = self.embedding_model.encode(context, show_progress_bar=False)
-            similarity = float(np.dot(resp_emb, ctx_emb) / (np.linalg.norm(resp_emb) * np.linalg.norm(ctx_emb)))
-            
-            # Find unsupported claims
-            unsupported = self._find_unsupported_claims(response, context)
-            
-            # Strict criteria: Reject if similarity too low OR any unsupported claims
-            if similarity < self.similarity_threshold:
-                logger.warning(f"Poor grounding score: {similarity:.2f}")
-                return ValidationDecision(
-                    result=ValidationResult.REJECTED,
-                    final_response=STANDARD_REFUSAL,
-                    reasoning=f"Insufficient grounding (score: {similarity:.2f})",
-                    grounding_score=similarity,
-                    violation=RegulatoryViolation.INSUFFICIENT_GROUNDING,
-                    confidence=0.9
-                )
-            
-            if unsupported:
-                logger.warning(f"Unsupported claims found: {len(unsupported)}")
-                return ValidationDecision(
-                    result=ValidationResult.REJECTED,
-                    final_response=STANDARD_REFUSAL,
-                    reasoning="Unsupported claims in response",
-                    grounding_score=similarity,
-                    unsupported_claims=unsupported,
-                    violation=RegulatoryViolation.INACCURATE_CLAIMS,
-                    confidence=0.9
-                )
-            
-            return ValidationDecision(
-                result=ValidationResult.APPROVED,
-                final_response=response,
-                reasoning="Grounding check passed",
-                grounding_score=similarity,
-                confidence=0.95
-            )
-            
-        except Exception as e:
-            logger.error(f"Grounding check failed: {e}")
-            # Be conservative on error
+
+        # 1) Prepare data
+        sentences = split_sentences(response)
+        if not sentences:
             return ValidationDecision(
                 result=ValidationResult.REJECTED,
                 final_response=STANDARD_REFUSAL,
-                reasoning="Grounding check error",
+                reasoning="Empty or trivial response",
                 violation=RegulatoryViolation.INSUFFICIENT_GROUNDING,
-                confidence=0.5
+                confidence=0.9
+            )
+
+        # Use the same context string, but split on your '---' separators to recover chunk granularity
+        ctx_chunks = [c.strip() for c in re.split(r'\n---\n', context) if c.strip()]
+
+        # 2) Embed function adapter
+        def _embed(texts: List[str]):
+            return self.embedding_model.encode(texts, show_progress_bar=False)
+
+        # 3) Per-sentence grounding
+        best_scores, best_chunk_idx = per_sentence_grounding(
+            sentences, ctx_chunks, _embed, threshold=max(0.55, self.similarity_threshold)
+        )
+        if not best_scores:
+            return ValidationDecision(
+                result=ValidationResult.REJECTED,
+                final_response=STANDARD_REFUSAL,
+                reasoning="Grounding unavailable",
+                violation=RegulatoryViolation.INSUFFICIENT_GROUNDING,
+                confidence=0.8
+            )
+
+        # 4) Require high pass-rate (e.g., 90% sentences above threshold)
+        tau = max(0.55, self.similarity_threshold)
+        scores = [best_scores[i] for i in range(len(sentences))]
+        pass_mask = [s >= tau for s in scores]
+        pass_rate = sum(pass_mask) / max(1, len(pass_mask))
+
+        if pass_rate < 0.9:
+            return ValidationDecision(
+                result=ValidationResult.REJECTED,
+                final_response=STANDARD_REFUSAL,
+                reasoning=f"Insufficient grounding per sentence (pass_rate={pass_rate:.2f}, τ={tau:.2f})",
+                grounding_score=float(np.mean(scores)),
+                violation=RegulatoryViolation.INSUFFICIENT_GROUNDING,
+                confidence=0.9
             )
     
     def _find_unsupported_claims(self, response: str, context: str) -> List[str]:
