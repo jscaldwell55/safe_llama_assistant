@@ -194,6 +194,14 @@ with st.sidebar:
         st.success("Started new conversation")
         st.rerun()
     
+    # Clear Cache button
+    if st.button("🗑️ Clear Response Cache", use_container_width=True):
+        if conductor.cache:
+            conductor.cache.cache.clear()
+            st.success("Cache cleared")
+        else:
+            st.info("Cache is not enabled")
+    
     # Debug mode checkbox
     debug_mode = st.checkbox("🔧 Debug Mode", value=False)
 
