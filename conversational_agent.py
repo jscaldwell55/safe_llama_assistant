@@ -171,21 +171,19 @@ class PersonaConductor:
                 query_validation = await guard.validate_query(query)
                 
                 if query_validation is not None:
-                    # Query is unsafe - return blocked response
-                    logger.warning(f"Query blocked: {query_validation.reasoning}")
-                    
+                    # Query is blocked - return with clear debug info
                     return ConductorDecision(
                         final_response=query_validation.final_response,
-                        requires_validation=True,  # ALWAYS TRUE
+                        requires_validation=False,  # No need to validate a refusal
                         strategy_used=ResponseStrategy.BLOCKED,
                         was_blocked=True,
-                        total_latency_ms=int((time.time() - start_time) * 1000),
                         debug_info={
                             "blocked_reason": query_validation.reasoning,
-                            "violation": query_validation.violation.value if hasattr(query_validation, 'violation') else "unknown",
+                            "violation": query_validation.violation.value,
                             "validation": {
-                                "result": "blocked",
-                                "violation": query_validation.violation.value if hasattr(query_validation, 'violation') else "unknown"
+                                "result": "query_blocked",  # Clear that QUERY was blocked
+                                "stage": "pre_screening",   # Where it was blocked
+                                "response": "standard_refusal"  # What was returned
                             }
                         }
                     )

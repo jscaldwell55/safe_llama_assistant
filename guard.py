@@ -1,10 +1,11 @@
-# guard.py - Complete Safety System with Critical Violation Detection
+# guard.py - Complete Safety System with All Fixes
 """
 Comprehensive safety system enforcing:
 1. Strict document grounding (no external knowledge)
 2. Six critical regulatory violations
 3. Violence/harm/illegal activity detection
 4. No creative content generation
+5. Proper handling of legitimate information requests
 """
 
 import logging
@@ -100,7 +101,7 @@ class HybridSafetyGuard:
             logger.error(f"Could not load embedding model: {e}")
     
     # ========================================================================
-    # QUERY VALIDATION - ENHANCED DETECTION
+    # QUERY VALIDATION - FIXED WITH LEGITIMATE INFO REQUEST HANDLING
     # ========================================================================
     
     async def validate_query(self, query: str) -> Optional[ValidationDecision]:
@@ -109,6 +110,23 @@ class HybridSafetyGuard:
             return None
         
         query_lower = query.lower()
+        
+        # FIRST: Check if this is a legitimate information request about interactions/contraindications
+        legitimate_info_patterns = [
+            r'what.*(?:interact|contraindication|can.*not.*take.*with|should.*avoid)',
+            r'(?:what|which).*(?:food|drug|medication).*(?:avoid|interact)',
+            r'dangerous.*(?:combination|interaction)',
+            r'who should not take',
+            r'what.*not.*(?:take|mix|combine).*with',
+            r'drug interaction',
+            r'contraindication',
+        ]
+        
+        for pattern in legitimate_info_patterns:
+            if re.search(pattern, query_lower):
+                # This is asking for factual information - allow it
+                logger.info("Legitimate information request about interactions/contraindications - allowing")
+                return None
         
         # CRITICAL: Block violence/harm/suicide
         violence_patterns = [
@@ -136,17 +154,19 @@ class HybridSafetyGuard:
             'fentanyl', 'opioid', 'opiate', 'narcotic'
         ]
         
-        for term in illegal_terms:
-            if term in query_lower:
-                logger.warning(f"Illegal drug reference blocked: {term}")
-                return ValidationDecision(
-                    result=ValidationResult.REDIRECT,
-                    final_response=SAFETY_REFUSAL,
-                    reasoning=f"Illegal drug reference: {term}",
-                    violation=RegulatoryViolation.ILLEGAL_ACTIVITY,
-                    confidence=1.0,
-                    should_log=True
-                )
+        # Check context - allow if asking about legitimate drug interactions
+        if not re.search(r'(?:interact|can.*take|mix|combine)', query_lower):
+            for term in illegal_terms:
+                if term in query_lower:
+                    logger.warning(f"Illegal drug reference blocked: {term}")
+                    return ValidationDecision(
+                        result=ValidationResult.REDIRECT,
+                        final_response=SAFETY_REFUSAL,
+                        reasoning=f"Illegal drug reference: {term}",
+                        violation=RegulatoryViolation.ILLEGAL_ACTIVITY,
+                        confidence=1.0,
+                        should_log=True
+                    )
         
         # Block creative content requests
         creative_patterns = [
@@ -168,7 +188,7 @@ class HybridSafetyGuard:
                 )
         
         # Block clearly off-topic
-        if not any(term in query_lower for term in ['journvax', 'medication', 'drug', 'side', 'effect', 'dose']):
+        if not any(term in query_lower for term in ['journvax', 'medication', 'drug', 'side', 'effect', 'dose', 'interact', 'take']):
             # Check if it's about something unrelated
             off_topic_terms = ['gravity', 'physics', 'weather', 'recipe', 'math', 'history', 'geography']
             if any(term in query_lower for term in off_topic_terms):
@@ -181,11 +201,17 @@ class HybridSafetyGuard:
                     confidence=1.0
                 )
         
-        # Medical advice patterns
+        # Medical advice patterns - MORE SPECIFIC to avoid false positives
         medical_patterns = [
-            (r"(?:how much|what dose).*(?:should i|do i|can i)", RegulatoryViolation.MEDICAL_ADVICE),
-            (r"(?:can i|should i|is it safe).*(?:take|use|combine)", RegulatoryViolation.MEDICAL_ADVICE),
-            (r"(?:my|i have|i'm).*(?:condition|disease|pregnant|breastfeed)", RegulatoryViolation.MEDICAL_ADVICE),
+            # Personal dosing questions
+            (r"(?:how much|what dose).*(?:should i take|do i need|for me)", RegulatoryViolation.MEDICAL_ADVICE),
+            
+            # Personal medical decisions with "I" statements
+            (r"(?:i take|i'm taking|i use).*(?:can i|should i|is it safe)", RegulatoryViolation.MEDICAL_ADVICE),
+            (r"(?:should i|can i personally|is it safe for me to).*(?:take|use|start|stop)", RegulatoryViolation.MEDICAL_ADVICE),
+            
+            # Personal conditions
+            (r"(?:i have|i'm|i am|my).*(?:condition|disease|pregnant|breastfeed|allerg)", RegulatoryViolation.MEDICAL_ADVICE),
         ]
         
         for pattern, violation in medical_patterns:
@@ -205,22 +231,23 @@ class HybridSafetyGuard:
             (r"(?:pregnant|pregnancy|breastfeed|nursing)", RegulatoryViolation.OFF_LABEL_USE),
         ]
         
-        for pattern, violation in off_label_patterns:
-            if re.search(pattern, query_lower):
-                logger.warning("Off-label use query blocked")
-                return ValidationDecision(
-                    result=ValidationResult.REDIRECT,
-                    final_response=SAFETY_REFUSAL,
-                    reasoning="Off-label use query",
-                    violation=violation,
-                    confidence=0.95
-                )
+        # Only block if it's asking about personal use, not general information
+        if re.search(r"(?:my|can i|should i|for my)", query_lower):
+            for pattern, violation in off_label_patterns:
+                if re.search(pattern, query_lower):
+                    logger.warning("Off-label use query blocked")
+                    return ValidationDecision(
+                        result=ValidationResult.REDIRECT,
+                        final_response=SAFETY_REFUSAL,
+                        reasoning="Off-label use query",
+                        violation=violation,
+                        confidence=0.95
+                    )
         
         # Administration misuse
         admin_patterns = [
             (r"(?:crush|snort|inject|smoke|iv|intravenous)", RegulatoryViolation.ADMIN_MISUSE),
-            (r"(?:share|give to|sell)", RegulatoryViolation.ADMIN_MISUSE),
-            (r"(?:alcohol|drink|beer|wine|liquor)", RegulatoryViolation.ADMIN_MISUSE),
+            (r"(?:share|give to someone|sell)", RegulatoryViolation.ADMIN_MISUSE),
         ]
         
         for pattern, violation in admin_patterns:
@@ -231,6 +258,17 @@ class HybridSafetyGuard:
                     final_response=SAFETY_REFUSAL,
                     reasoning="Administration misuse",
                     violation=violation,
+                    confidence=0.95
+                )
+        
+        # Alcohol questions - allow general info, block personal use
+        if 'alcohol' in query_lower or 'drink' in query_lower:
+            if re.search(r"(?:can i|should i|if i)", query_lower):
+                return ValidationDecision(
+                    result=ValidationResult.REDIRECT,
+                    final_response=SAFETY_REFUSAL,
+                    reasoning="Personal alcohol interaction query",
+                    violation=RegulatoryViolation.MEDICAL_ADVICE,
                     confidence=0.95
                 )
         
@@ -278,7 +316,7 @@ class HybridSafetyGuard:
                 confidence=1.0
             )
         
-        # Check for off-topic content (gravity example)
+        # Check for off-topic content
         off_topic_terms = ['gravity', 'physics', 'weather', 'mathematics', 'history', 'geography']
         if any(term in response_lower for term in off_topic_terms):
             if 'journvax' not in response_lower:
@@ -394,11 +432,12 @@ class HybridSafetyGuard:
             if len(sentence) < 15:
                 continue
             
-            # Skip meta phrases
-            if any(phrase in sentence.lower() for phrase in [
+            # Skip meta phrases and disclaimers
+            skip_phrases = [
                 "i don't", "i cannot", "please consult", "medication guide",
-                "healthcare provider", "this is not"
-            ]):
+                "healthcare provider", "this is not", "see the", "call your doctor"
+            ]
+            if any(phrase in sentence.lower() for phrase in skip_phrases):
                 continue
             
             sentence_lower = sentence.lower()
