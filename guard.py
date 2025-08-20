@@ -16,7 +16,7 @@ import asyncio
 from typing import Tuple, Optional, Dict, List
 from dataclasses import dataclass, field
 from enum import Enum
-from grounding import split_sentences, per_sentence_grounding, attach_citations
+from grounding import split_sentences, per_sentence_grounding, attach_citations, _strip_header
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +368,6 @@ class HybridSafetyGuard:
                 confidence=0.5
             )
 
-        # 1) Prepare data
         sentences = split_sentences(response)
         if not sentences:
             return ValidationDecision(
@@ -379,17 +378,15 @@ class HybridSafetyGuard:
                 confidence=0.9
             )
 
-        # Use the same context string, but split on your '---' separators to recover chunk granularity
-        ctx_chunks = [c.strip() for c in re.split(r'\n---\n', context) if c.strip()]
+        # Rebuild chunk list from formatted context and STRIP headers
+        raw_chunks = [c.strip() for c in re.split(r'\n---\n', context or "") if c.strip()]
+        ctx_chunks = [_strip_header(c) for c in raw_chunks if c]
 
-        # 2) Embed function adapter
-        def _embed(texts: List[str]):
+        def _embed(texts):
             return self.embedding_model.encode(texts, show_progress_bar=False)
 
-        # 3) Per-sentence grounding
-        best_scores, best_chunk_idx = per_sentence_grounding(
-            sentences, ctx_chunks, _embed, threshold=max(0.55, self.similarity_threshold)
-        )
+        tau = max(0.55, self.similarity_threshold)
+        best_scores, best_chunk_idx = per_sentence_grounding(sentences, ctx_chunks, _embed, threshold=tau)
         if not best_scores:
             return ValidationDecision(
                 result=ValidationResult.REJECTED,
@@ -399,21 +396,37 @@ class HybridSafetyGuard:
                 confidence=0.8
             )
 
-        # 4) Require high pass-rate (e.g., 90% sentences above threshold)
-        tau = max(0.55, self.similarity_threshold)
         scores = [best_scores[i] for i in range(len(sentences))]
         pass_mask = [s >= tau for s in scores]
         pass_rate = sum(pass_mask) / max(1, len(pass_mask))
+        avg_score = float(np.mean(scores))
 
-        if pass_rate < 0.9:
+        # If many fail badly, refuse; otherwise drop only failing sentences
+        failing_idx = [i for i, ok in enumerate(pass_mask) if not ok]
+
+        if pass_rate < 0.5:
             return ValidationDecision(
                 result=ValidationResult.REJECTED,
                 final_response=STANDARD_REFUSAL,
                 reasoning=f"Insufficient grounding per sentence (pass_rate={pass_rate:.2f}, τ={tau:.2f})",
-                grounding_score=float(np.mean(scores)),
+                grounding_score=avg_score,
                 violation=RegulatoryViolation.INSUFFICIENT_GROUNDING,
                 confidence=0.9
             )
+
+        # If borderline, prune ungrounded sentences and proceed
+        pruned_sentences = [s for i, s in enumerate(sentences) if pass_mask[i]]
+        if not pruned_sentences:
+            return ValidationDecision(
+                result=ValidationResult.REJECTED,
+                final_response=STANDARD_REFUSAL,
+                reasoning="All sentences ungrounded after pruning",
+                violation=RegulatoryViolation.INSUFFICIENT_GROUNDING,
+                confidence=0.9
+            )
+
+    # Acceptance rule: pass_rate >= 0.75 OR avg_score >= 0.62
+    accept = (pass_rate >= 0.75) or (avg_score >= 0.62)
     
     def _find_unsupported_claims(self, response: str, context: str) -> List[str]:
         """Find claims in response not supported by context - FIXED VERSION"""
