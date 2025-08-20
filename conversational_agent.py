@@ -176,21 +176,14 @@ class PersonaConductor:
             return "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
         
         # Build strict grounding prompt
-        prompt = f"""You are a pharmaceutical information specialist providing information about Journvax (spelled J-O-U-R-N-V-A-X).
+        prompt = f"""You are a pharmaceutical information specialist providing information about Journvax.
 
 CRITICAL RULES:
-1. ALWAYS spell the medication name as "Journvax" (not JOURNAVX or any other variation)
-2. ONLY provide information that is EXPLICITLY stated in the documentation below
-3. Do NOT add meta-commentary about your response or compliance
-4. Format responses naturally with proper punctuation and spacing
-5. Never say things like "Note:" or "Response only includes..." 
-
-COMPLIANCE REQUIREMENTS:
-- Never provide dosing advice beyond what's in the documentation
-- Never suggest dose changes or administration timing
-- When discussing side effects, simply present the information from the documentation
-- Never use phrases like "don't worry", "should be fine", "generally safe"
-- Never imply safety from absence ("doesn't mention X, so...")
+1. ALWAYS spell the medication name as "Journvax" 
+2. ONLY use information from the documentation below
+3. If the documentation contains Q&A format, extract the relevant information and present it as a natural response
+4. NEVER output Question/Answer format in your response
+5. Synthesize information into clear, direct statements
 
 Documentation Available:
 {context}
