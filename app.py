@@ -1,4 +1,4 @@
-# app.py - Simplified Version with Clean UI
+# app.py - Simplified Streamlit UI with Extensive Logging
 
 import os
 import streamlit as st
@@ -7,14 +7,27 @@ import sys
 import asyncio
 import time
 import atexit
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
-# Configure logging
+# ============================================================================
+# CONFIGURE EXTENSIVE LOGGING
+# ============================================================================
+
+# Set up detailed logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('app.log', mode='a')
+    ]
 )
+
+# Set specific loggers to appropriate levels
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("anthropic").setLevel(logging.INFO)
+logging.getLogger("faiss").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -24,18 +37,30 @@ logger = logging.getLogger(__name__)
 @st.cache_resource
 def load_dependencies():
     """Load required dependencies"""
-    from config import APP_TITLE, WELCOME_MESSAGE
-    from conversational_agent import get_persona_conductor
-    from guard import persona_validator
-    from conversation import get_conversation_manager
+    logger.info("Loading dependencies...")
     
-    return {
-        "APP_TITLE": APP_TITLE,
-        "WELCOME_MESSAGE": WELCOME_MESSAGE,
-        "get_persona_conductor": get_persona_conductor,
-        "get_persona_validator": lambda: persona_validator,
-        "get_conversation_manager": get_conversation_manager,
-    }
+    try:
+        from config import APP_TITLE, WELCOME_MESSAGE
+        from conversational_agent import get_orchestrator, reset_orchestrator
+        from conversation import get_conversation_manager
+        from rag import get_rag_system, get_index_stats
+        
+        deps = {
+            "APP_TITLE": APP_TITLE,
+            "WELCOME_MESSAGE": WELCOME_MESSAGE,
+            "get_orchestrator": get_orchestrator,
+            "reset_orchestrator": reset_orchestrator,
+            "get_conversation_manager": get_conversation_manager,
+            "get_rag_system": get_rag_system,
+            "get_index_stats": get_index_stats,
+        }
+        
+        logger.info("All dependencies loaded successfully")
+        return deps
+        
+    except Exception as e:
+        logger.error(f"Failed to load dependencies: {e}", exc_info=True)
+        raise
 
 # ============================================================================
 # CLEANUP REGISTRATION
@@ -55,13 +80,9 @@ def register_cleanup():
     def sync_cleanup():
         """Synchronous wrapper for cleanup"""
         try:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(cleanup_resources())
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(cleanup_resources())
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(cleanup_resources())
         except Exception as e:
             logger.error(f"Sync cleanup failed: {e}")
     
@@ -72,9 +93,26 @@ def register_cleanup():
 try:
     deps = load_dependencies()
     register_cleanup()
-    logger.info("All dependencies loaded successfully")
+    
+    # Log system initialization
+    logger.info("="*60)
+    logger.info("PHARMA ENTERPRISE ASSISTANT INITIALIZED")
+    logger.info(f"App Title: {deps['APP_TITLE']}")
+    
+    # Check API key
+    from config import ANTHROPIC_API_KEY
+    if ANTHROPIC_API_KEY:
+        logger.info(f"Anthropic API Key configured (length: {len(ANTHROPIC_API_KEY)})")
+    else:
+        logger.error("ANTHROPIC_API_KEY not configured!")
+    
+    # Log RAG stats
+    index_stats = deps["get_index_stats"]()
+    logger.info(f"RAG Index Stats: {index_stats}")
+    logger.info("="*60)
+    
 except Exception as e:
-    logger.error(f"Failed to load dependencies: {e}", exc_info=True)
+    logger.error(f"Fatal Error during initialization: {e}", exc_info=True)
     st.error(f"Fatal Error: Could not load required modules. Error: {e}")
     st.stop()
 
@@ -92,8 +130,7 @@ st.title(deps["APP_TITLE"])
 
 # Get singletons
 conversation_manager = deps["get_conversation_manager"]()
-conductor = deps["get_persona_conductor"]()
-validator = deps["get_persona_validator"]()
+orchestrator = deps["get_orchestrator"]()
 
 # ============================================================================
 # ASYNC EXECUTION HELPER
@@ -119,70 +156,68 @@ def run_async(coro):
 # ============================================================================
 
 async def handle_query(query: str) -> Dict[str, Any]:
-    """Handle user query"""
+    """Handle user query with extensive logging"""
     start_time = time.time()
+    request_id = f"REQ_{int(start_time)}_{hash(query) % 10000}"
+    
+    logger.info(f"[{request_id}] START Processing query: '{query}'")
     
     try:
-        # Orchestrate response
-        logger.info(f"Processing query: {query[:50]}...")
-        decision = await conductor.orchestrate_response(query)
+        # Get conversation history for context
+        conversation_history = conversation_manager.get_turns()
         
-        # Validate if needed
-        if decision.requires_validation:
-            logger.info("Validating response...")
-            validation = await validator.validate_response(
-                response=decision.final_response,
-                strategy_used=decision.strategy_used.value,
-                context=decision.context_used,
-                query=query
-            )
-            
-            is_approved = validation.result.value == "approved"
-            final_response = validation.final_response
-            validation_info = {
-                "result": validation.result.value,
-                "confidence": validation.confidence
-            }
-        else:
-            is_approved = True
-            final_response = decision.final_response
-            validation_info = {"result": "no_validation_needed"}
+        # Orchestrate response
+        logger.info(f"[{request_id}] Calling orchestrator...")
+        decision = await orchestrator.orchestrate_response(query, conversation_history)
+        
+        # Log decision details
+        logger.info(f"[{request_id}] Response Decision:")
+        logger.info(f"  - Strategy: {decision.strategy_used.value}")
+        logger.info(f"  - Context chars: {len(decision.context_used)}")
+        logger.info(f"  - Grounding score: {decision.grounding_score:.3f}")
+        logger.info(f"  - Validated: {decision.was_validated}")
+        logger.info(f"  - Validation result: {decision.validation_result}")
+        logger.info(f"  - Cache hit: {decision.cache_hit}")
+        logger.info(f"  - Latency: {decision.latency_ms}ms")
         
         # Update conversation history
-        if is_approved:
-            conversation_manager.add_turn("user", query)
-            conversation_manager.add_turn("assistant", final_response)
+        conversation_manager.add_turn("user", query)
+        conversation_manager.add_turn("assistant", decision.final_response)
         
         total_time = time.time() - start_time
-        latency_ms = int(total_time * 1000)
+        logger.info(f"[{request_id}] END Request completed in {total_time:.2f}s")
+        
+        # Get orchestrator stats for logging
+        stats = orchestrator.get_stats()
+        logger.info(f"[STATS] Orchestrator: {stats}")
         
         return {
             "success": True,
-            "response": final_response,
-            "approved": is_approved,
+            "response": decision.final_response,
             "strategy": decision.strategy_used.value,
-            "debug_info": {
-                **decision.debug_info,
-                "validation": validation_info,
-                "latency_ms": latency_ms,
-            }
+            "grounding_score": decision.grounding_score,
+            "latency_ms": decision.latency_ms,
+            "cache_hit": decision.cache_hit,
+            "validation_result": decision.validation_result
         }
         
     except Exception as e:
-        logger.error(f"Error handling query: {e}", exc_info=True)
+        logger.error(f"[{request_id}] ERROR: {e}", exc_info=True)
         
-        latency_ms = int((time.time() - start_time) * 1000)
+        total_time = time.time() - start_time
+        logger.info(f"[{request_id}] END Request failed after {total_time:.2f}s")
         
         return {
             "success": False,
-            "response": "I apologize, but I encountered an error. Please try again.",
-            "approved": False,
+            "response": "I'm sorry, I don't have any information on that. Can I assist you with something else?",
             "strategy": "error",
-            "debug_info": {"error": str(e), "latency_ms": latency_ms}
+            "grounding_score": 0.0,
+            "latency_ms": int(total_time * 1000),
+            "error": str(e)
         }
 
 # ============================================================================
-# SIDEBAR - SIMPLIFIED
+# SIDEBAR
 # ============================================================================
 
 with st.sidebar:
@@ -190,20 +225,39 @@ with st.sidebar:
     
     # New Conversation button
     if st.button("🔄 New Conversation", type="primary", use_container_width=True):
+        logger.info("[UI] New Conversation requested")
         conversation_manager.start_new_conversation()
         st.success("Started new conversation")
+        logger.info("[UI] New conversation started")
         st.rerun()
     
     # Clear Cache button
     if st.button("🗑️ Clear Response Cache", use_container_width=True):
-        if conductor.cache:
-            conductor.cache.cache.clear()
-            st.success("Cache cleared")
-        else:
-            st.info("Cache is not enabled")
+        logger.info("[UI] Clear Cache requested")
+        deps["reset_orchestrator"]()
+        st.success("Cache cleared")
+        logger.info("[UI] Cache cleared successfully")
     
-    # Debug mode checkbox
-    debug_mode = st.checkbox("🔧 Debug Mode", value=False)
+    st.divider()
+    
+    # Display system stats
+    st.subheader("📊 System Stats")
+    
+    # RAG stats
+    rag_stats = deps["get_index_stats"]()
+    if rag_stats["index_loaded"]:
+        st.success("✅ RAG Index Loaded")
+        st.metric("Documents", rag_stats["documents"])
+        st.metric("Total Chunks", rag_stats["total_chunks"])
+    else:
+        st.error("❌ RAG Index Not Loaded")
+    
+    # Orchestrator stats
+    orch_stats = orchestrator.get_stats()
+    if orch_stats["total_requests"] > 0:
+        st.metric("Total Requests", orch_stats["total_requests"])
+        st.metric("Cache Hit Rate", f"{orch_stats.get('cache_hit_rate', 0):.1%}")
+        st.metric("Fallback Rate", f"{orch_stats.get('fallback_rate', 0):.1%}")
 
 # ============================================================================
 # MAIN CHAT UI
@@ -212,12 +266,14 @@ with st.sidebar:
 st.markdown("### 💬 Ask me anything about Journvax")
 
 # Display chat history
-for turn in conversation_manager.get_turns():
+for turn in conversation_manager.get_display_turns():
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
 
 # Handle user input
 if query := st.chat_input("Type your question..."):
+    logger.info(f"[UI] User input received: '{query}'")
+    
     # Display user message
     st.chat_message("user").write(query)
     
@@ -229,33 +285,36 @@ if query := st.chat_input("Type your question..."):
         
         # Handle result
         if result["success"]:
-            # Show warning if response was modified
-            if not result.get("approved", True):
-                st.warning("⚠️ Response modified for safety")
-            
             # Display response
             st.write(result["response"])
             
-            # Show debug info if enabled
-            if debug_mode:
-                with st.expander("🔧 Debug Information"):
-                    # Show performance timing
-                    if "latency_ms" in result.get("debug_info", {}):
-                        st.metric("Response Time", f"{result['debug_info']['latency_ms']}ms")
-                    
-                    # Show strategy used
-                    st.write(f"**Strategy:** {result.get('strategy', 'unknown')}")
-                    
-                    # Show if context was used
-                    if "used_context" in result.get("debug_info", {}):
-                        st.write(f"**Used Context:** {result['debug_info']['used_context']}")
-                    
-                    # Show full debug info
-                    st.json(result.get("debug_info", {}))
+            # Show performance metrics in tooltip
+            metrics = []
+            if result.get("cache_hit"):
+                metrics.append("📌 Cached")
+            else:
+                if result.get("grounding_score", 0) > 0:
+                    metrics.append(f"🎯 Grounding: {result['grounding_score']:.2f}")
+            
+            metrics.append(f"⚡ {result['latency_ms']}ms")
+            
+            if metrics:
+                st.caption(" | ".join(metrics))
+            
+            logger.info(f"[UI] Response delivered successfully")
         else:
             # Handle error
             st.error(result["response"])
-            
-            if debug_mode and "debug_info" in result:
-                with st.expander("🔧 Error Details"):
-                    st.json(result["debug_info"])
+            logger.error(f"[UI] Response error: {result.get('error', 'Unknown')}")
+
+# Footer with instructions
+with st.expander("ℹ️ How to use"):
+    st.markdown("""
+    - **Ask questions** about Journvax medication, dosage, side effects, interactions, etc.
+    - **New Conversation** clears the chat history to start fresh
+    - **Clear Cache** removes cached responses to force fresh generation
+    - The assistant only provides information from uploaded documentation
+    - If information isn't available, you'll receive a polite fallback message
+    """)
+
+logger.info("[UI] Page render complete")

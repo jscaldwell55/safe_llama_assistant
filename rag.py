@@ -1,176 +1,328 @@
-# rag.py
+# rag.py - Optimized RAG for 100-200 page documents
 
 import os
 import pickle
 import logging
 from typing import List, Tuple, Dict, Any, Optional
-
 import faiss
 import fitz  # PyMuPDF
 import numpy as np
 
-from safe_sanitizer import sanitize_results
 from embeddings import get_embedding_model
 from semantic_chunker import SemanticChunker
 from context_formatter import format_retrieved_context
 from config import (
     INDEX_PATH, PDF_DATA_PATH, CHUNK_SIZE, CHUNK_OVERLAP, TOP_K_RETRIEVAL,
-    CHUNKING_STRATEGY, MAX_CHUNK_TOKENS, EMBEDDING_BATCH_SIZE
+    CHUNKING_STRATEGY, MAX_CHUNK_TOKENS, EMBEDDING_BATCH_SIZE, MAX_CONTEXT_LENGTH
 )
 
 logger = logging.getLogger(__name__)
 
-class RAGSystem:
-    """Manages document processing, chunking, embedding, and retrieval."""
+class OptimizedRAGSystem:
+    """RAG system optimized for 100-200 page documents"""
+    
     def __init__(self):
         self.embedding_model = get_embedding_model()
         self.semantic_chunker = SemanticChunker()
         self.index = None
         self.texts: List[str] = []
         self.metadata: List[Dict[str, Any]] = []
+        self.doc_count = 0
+        self.total_chunks = 0
         self._load_index()
-
+    
     def _load_index(self):
+        """Load existing FAISS index if available"""
         index_file = os.path.join(INDEX_PATH, "faiss.index")
         metadata_file = os.path.join(INDEX_PATH, "metadata.pkl")
+        
         if os.path.exists(index_file) and os.path.exists(metadata_file):
             try:
                 self.index = faiss.read_index(index_file)
                 with open(metadata_file, "rb") as f:
-                    self.texts, self.metadata = pickle.load(f)
-                logger.info(f"Loaded RAG index with {self.index.ntotal} vectors.")
+                    saved_data = pickle.load(f)
+                    self.texts = saved_data["texts"]
+                    self.metadata = saved_data["metadata"]
+                    self.doc_count = saved_data.get("doc_count", 0)
+                    self.total_chunks = len(self.texts)
+                
+                logger.info(f"Loaded RAG index: {self.doc_count} documents, {self.total_chunks} chunks")
             except Exception as e:
-                logger.error(f"Failed to load index files: {e}", exc_info=True)
+                logger.error(f"Failed to load index: {e}", exc_info=True)
+                self.index = None
         else:
             logger.warning("No existing index found. Run build_index() to create one.")
-
+    
     def extract_text_from_pdf(self, pdf_path: str) -> str:
+        """Extract text from PDF with better formatting preservation"""
         try:
+            logger.info(f"Extracting text from: {os.path.basename(pdf_path)}")
             with fitz.open(pdf_path) as doc:
-                return "\n\n".join(page.get_text() for page in doc)
+                pages_text = []
+                for page_num, page in enumerate(doc, 1):
+                    text = page.get_text()
+                    if text.strip():
+                        pages_text.append(f"[Page {page_num}]\n{text}")
+                
+                full_text = "\n\n".join(pages_text)
+                logger.info(f"Extracted {len(full_text)} characters from {len(doc)} pages")
+                return full_text
         except Exception as e:
             logger.error(f"Failed to extract text from {pdf_path}: {e}", exc_info=True)
             return ""
-
+    
     def chunk_document(self, text: str, source: str) -> List[Tuple[str, Dict[str, Any]]]:
+        """Create optimized chunks for retrieval"""
         chunks: List[Tuple[str, Dict[str, Any]]] = []
+        
         try:
+            # Use semantic chunking for better context preservation
             semantic_chunks = self.semantic_chunker.semantic_chunk(
-                text, strategy=CHUNKING_STRATEGY, max_tokens=MAX_CHUNK_TOKENS
+                text, 
+                strategy=CHUNKING_STRATEGY, 
+                max_tokens=MAX_CHUNK_TOKENS
             )
+            
             for i, (chunk_text, chunk_metadata) in enumerate(semantic_chunks):
-                if len(chunk_text.strip()) < 50:
+                # Skip very small chunks
+                if len(chunk_text.strip()) < 100:
                     continue
-                metadata = {"source": source, "chunk_id": i, **chunk_metadata}
-                chunks.append((chunk_text.strip(), metadata))
+                
+                # Clean and normalize chunk text
+                chunk_text = self._clean_chunk_text(chunk_text)
+                
+                # Create metadata
+                metadata = {
+                    "source": source,
+                    "chunk_id": i,
+                    "chunk_size": len(chunk_text),
+                    **chunk_metadata
+                }
+                
+                chunks.append((chunk_text, metadata))
+                
+            logger.info(f"Created {len(chunks)} chunks from {source}")
+            
         except Exception as e:
-            logger.warning(f"Semantic chunking failed: {e}. Using fallback recursive chunking.")
-            step = CHUNK_SIZE - CHUNK_OVERLAP
-            for i in range(0, len(text), step):
-                chunk_text = text[i:i + CHUNK_SIZE].strip()
-                if len(chunk_text) > 50:
-                    metadata = {"source": source, "chunk_id": i // step, "strategy": "fallback"}
-                    chunks.append((chunk_text, metadata))
+            logger.warning(f"Semantic chunking failed: {e}. Using fallback.")
+            # Fallback to simple overlapping chunks
+            chunks = self._fallback_chunking(text, source)
+        
         return chunks
-
+    
+    def _clean_chunk_text(self, text: str) -> str:
+        """Clean chunk text for better retrieval"""
+        # Remove excessive whitespace
+        import re
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # Remove page markers if at the beginning
+        text = re.sub(r'^\[Page \d+\]\s*', '', text)
+        
+        return text.strip()
+    
+    def _fallback_chunking(self, text: str, source: str) -> List[Tuple[str, Dict[str, Any]]]:
+        """Simple overlapping chunk strategy as fallback"""
+        chunks = []
+        step = CHUNK_SIZE - CHUNK_OVERLAP
+        
+        for i in range(0, len(text), step):
+            chunk_text = text[i:i + CHUNK_SIZE].strip()
+            if len(chunk_text) > 100:
+                metadata = {
+                    "source": source,
+                    "chunk_id": i // step,
+                    "strategy": "fallback",
+                    "chunk_size": len(chunk_text)
+                }
+                chunks.append((chunk_text, metadata))
+        
+        return chunks
+    
     def build_index(self, pdf_directory: str = PDF_DATA_PATH, force_rebuild: bool = False):
+        """Build optimized FAISS index for 100-200 pages"""
         if self.index is not None and not force_rebuild:
             logger.info("Index already exists. Use force_rebuild=True to rebuild.")
             return
-
+        
         if self.embedding_model is None:
-            logger.error("Cannot build index because embedding model failed to load.")
+            logger.error("Cannot build index: embedding model not loaded.")
             return
-
-        pdf_files = [f for f in os.listdir(pdf_directory) if f.lower().endswith('.pdf')] if os.path.isdir(pdf_directory) else []
+        
+        # Find PDF files
+        pdf_files = []
+        if os.path.isdir(pdf_directory):
+            pdf_files = [f for f in os.listdir(pdf_directory) if f.lower().endswith('.pdf')]
+            logger.info(f"Found {len(pdf_files)} PDF files in {pdf_directory}")
+        
         if not pdf_files:
-            logger.error(f"No PDF files found in {pdf_directory}. Cannot build index.")
+            logger.error(f"No PDF files found in {pdf_directory}")
             return
-
-        all_chunks, all_metadata = [], []
+        
+        # Process each PDF
+        all_chunks = []
+        all_metadata = []
+        
         for pdf_file in pdf_files:
-            text = self.extract_text_from_pdf(os.path.join(pdf_directory, pdf_file))
-            if text:
-                for chunk_text, metadata in self.chunk_document(text, pdf_file):
-                    all_chunks.append(chunk_text)
-                    all_metadata.append(metadata)
-
+            pdf_path = os.path.join(pdf_directory, pdf_file)
+            logger.info(f"Processing: {pdf_file}")
+            
+            # Extract text
+            text = self.extract_text_from_pdf(pdf_path)
+            if not text:
+                logger.warning(f"No text extracted from {pdf_file}")
+                continue
+            
+            # Create chunks
+            chunks = self.chunk_document(text, pdf_file)
+            for chunk_text, metadata in chunks:
+                all_chunks.append(chunk_text)
+                all_metadata.append(metadata)
+        
         if not all_chunks:
-            logger.error("No text chunks were extracted from the PDFs.")
+            logger.error("No chunks created from PDFs")
             return
-
+        
         logger.info(f"Generating embeddings for {len(all_chunks)} chunks...")
+        
+        # Generate embeddings in batches
         embeddings = self.embedding_model.encode(
-            all_chunks, show_progress_bar=True, batch_size=EMBEDDING_BATCH_SIZE
+            all_chunks,
+            show_progress_bar=True,
+            batch_size=EMBEDDING_BATCH_SIZE,
+            convert_to_tensor=False
         ).astype('float32')
-
-        # Use cosine similarity via L2 normalization + IndexFlatIP
+        
+        # Normalize for cosine similarity
         faiss.normalize_L2(embeddings)
+        
+        # Create optimized index for small dataset
         dimension = embeddings.shape[1]
-        self.index = faiss.IndexFlatIP(dimension)
+        
+        # For 100-200 pages, use simple flat index (most accurate)
+        self.index = faiss.IndexFlatIP(dimension)  # Inner product = cosine similarity after normalization
         self.index.add(embeddings)
-
+        
+        # Store data
         self.texts = all_chunks
         self.metadata = all_metadata
-
+        self.doc_count = len(pdf_files)
+        self.total_chunks = len(all_chunks)
+        
+        # Save to disk
         os.makedirs(INDEX_PATH, exist_ok=True)
+        
         faiss.write_index(self.index, os.path.join(INDEX_PATH, "faiss.index"))
+        
         with open(os.path.join(INDEX_PATH, "metadata.pkl"), "wb") as f:
-            pickle.dump((self.texts, self.metadata), f)
-
-        logger.info(f"Index built successfully with {self.index.ntotal} chunks.")
-
+            pickle.dump({
+                "texts": self.texts,
+                "metadata": self.metadata,
+                "doc_count": self.doc_count
+            }, f)
+        
+        logger.info(f"Index built successfully: {self.doc_count} documents, {self.total_chunks} chunks")
+        logger.info(f"Average chunks per document: {self.total_chunks / self.doc_count:.1f}")
+    
     def retrieve(self, query: str, k: int = TOP_K_RETRIEVAL) -> List[Dict[str, Any]]:
+        """Retrieve most relevant chunks for query"""
         if self.index is None or self.embedding_model is None:
-            logger.warning("Cannot retrieve: RAG index or embedding model not available.")
+            logger.warning("Cannot retrieve: index or embedding model not available")
             return []
+        
         try:
+            logger.debug(f"Retrieving top {k} chunks for query: '{query[:50]}...'")
+            
+            # Encode query
             query_vec = self.embedding_model.encode([query]).astype('float32')
             faiss.normalize_L2(query_vec)
+            
+            # Search
             distances, indices = self.index.search(query_vec, k)
+            
+            # Build results
             results = []
             for i, idx in enumerate(indices[0]):
                 if 0 <= idx < len(self.texts):
                     results.append({
                         "text": self.texts[idx],
                         "metadata": self.metadata[idx],
-                        "score": float(distances[0][i])
+                        "score": float(distances[0][i]),
+                        "rank": i + 1
                     })
-            logger.info(f"Retrieved {len(results)} chunks for query: {query[:50]}...")
+            
+            # Log retrieval quality
+            if results:
+                avg_score = sum(r["score"] for r in results) / len(results)
+                logger.info(f"Retrieved {len(results)} chunks, avg score: {avg_score:.3f}, top score: {results[0]['score']:.3f}")
+            else:
+                logger.warning("No chunks retrieved")
+            
             return results
+            
         except Exception as e:
             logger.error(f"Retrieval error: {e}", exc_info=True)
             return []
+    
+    def get_index_stats(self) -> Dict[str, Any]:
+        """Get statistics about the index"""
+        return {
+            "documents": self.doc_count,
+            "total_chunks": self.total_chunks,
+            "avg_chunks_per_doc": self.total_chunks / self.doc_count if self.doc_count > 0 else 0,
+            "index_loaded": self.index is not None,
+            "embedding_model": self.embedding_model is not None
+        }
 
-# --- Public API ---
+# ============================================================================
+# PUBLIC API
+# ============================================================================
 
-_rag_system_instance: Optional[RAGSystem] = None
-def get_rag_system() -> RAGSystem:
-    global _rag_system_instance
-    if _rag_system_instance is None:
-        logger.info("Initializing RAGSystem for the first time...")
-        _rag_system_instance = RAGSystem()
-    return _rag_system_instance
+_rag_instance: Optional[OptimizedRAGSystem] = None
+
+def get_rag_system() -> OptimizedRAGSystem:
+    """Get singleton RAG system"""
+    global _rag_instance
+    if _rag_instance is None:
+        logger.info("Initializing OptimizedRAGSystem...")
+        _rag_instance = OptimizedRAGSystem()
+    return _rag_instance
 
 def retrieve_and_format_context(query: str, k: int = TOP_K_RETRIEVAL) -> str:
+    """Retrieve and format context for query"""
     rag_system = get_rag_system()
+    
+    # Retrieve chunks
     results = rag_system.retrieve(query, k)
-    # NEW: sanitize retrieved chunks (drops bad ones, cleans survivors)
-    results = sanitize_results(results)
+    
     if not results:
-        return ""  # all chunks dropped as unsafe
-
-    # Assemble "Source + Content" chunks, then let the formatter deduplicate/trim
-    chunks = [
-        f"Source: {res['metadata'].get('source','N/A')}, "
-        f"Chunk {res['metadata'].get('chunk_id','N/A')}\n"
-        f"{res['text']}".strip()
-        for res in results
-    ]
-    # Use the function directly (it's not a module)
-    formatted = format_retrieved_context(chunks)
+        logger.warning("No results retrieved from RAG")
+        return ""
+    
+    # Format chunks for context
+    chunks = []
+    for res in results:
+        source = res['metadata'].get('source', 'Unknown')
+        chunk_text = res['text']
+        
+        # Add source attribution
+        formatted_chunk = f"[Source: {source}]\n{chunk_text}"
+        chunks.append(formatted_chunk)
+    
+    # Use formatter to clean and concatenate
+    formatted = format_retrieved_context(chunks, max_chars=MAX_CONTEXT_LENGTH)
+    
+    logger.debug(f"Formatted context: {len(formatted)} chars from {len(results)} chunks")
+    
     return formatted
 
 def build_index(pdf_directory: str = PDF_DATA_PATH, force_rebuild: bool = False):
+    """Build or rebuild the index"""
     rag_system = get_rag_system()
     rag_system.build_index(pdf_directory, force_rebuild)
+
+def get_index_stats() -> Dict[str, Any]:
+    """Get RAG system statistics"""
+    rag_system = get_rag_system()
+    return rag_system.get_index_stats()

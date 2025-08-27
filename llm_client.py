@@ -1,557 +1,187 @@
-# llm_client.py - Complete Fixed Version with All Updates
+# llm_client.py - Claude 3.5 Sonnet Integration
 
-import aiohttp
 import asyncio
-import json
 import logging
-import re
 import time
 from typing import Dict, Any, Optional, List
-from dataclasses import dataclass
-from collections import deque
+from anthropic import AsyncAnthropic
+import anthropic
 
 from config import (
-    HF_TOKEN, 
-    HF_INFERENCE_ENDPOINT, 
-    MODEL_PARAMS,
-    ENABLE_REQUEST_BATCHING,
-    BATCH_TIMEOUT_MS,
-    MAX_BATCH_SIZE
+    ANTHROPIC_API_KEY, 
+    CLAUDE_MODEL,
+    MAX_TOKENS,
+    TEMPERATURE,
+    NO_CONTEXT_FALLBACK_MESSAGE
 )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# RETRY CONFIGURATION
+# SYSTEM PROMPT - Core Safety Through Design
 # ============================================================================
 
-MAX_RETRIES = 3
-RETRY_DELAY_BASE = 1.0
-RETRY_DELAY_MAX = 10.0
+SYSTEM_PROMPT = """You are a pharmaceutical information assistant for Journvax. Your responses must follow these critical rules:
+
+1. **ONLY use information from the provided context** - Never use external knowledge
+2. **If no context is provided or the context is empty**, respond exactly with: "I'm sorry, I don't have any information on that. Can I assist you with something else?"
+3. **Never generate creative content** like stories, poems, or fictional scenarios
+4. **Never provide personal medical advice** - Only share factual information from the documentation
+5. **Always stay focused on Journvax** - Don't discuss unrelated topics
+6. **Be concise and factual** - Present information as direct statements from the documentation
+
+Remember: You can ONLY discuss what is explicitly stated in the context provided. If information isn't in the context, you must use the fallback message."""
 
 # ============================================================================
-# EVENT LOOP MANAGEMENT
+# CLAUDE CLIENT
 # ============================================================================
 
-def get_or_create_event_loop():
-    """Get the current event loop or create a new one if needed"""
-    try:
-        loop = asyncio.get_running_loop()
-        if loop.is_closed():
-            raise RuntimeError("Event loop is closed")
-        return loop
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
-
-# ============================================================================
-# OUTPUT CLEANING - ENHANCED WITH ALL FIXES
-# ============================================================================
-
-
-
-
-
-def clean_model_output(text: str) -> str:
-    """
-    Clean model output - optimized for all known issues including metadata leakage
-    """
-    if not text:
-        return ""
+class ClaudeClient:
+    """Client for Anthropic's Claude API"""
     
-    # Step 1: Remove document metadata and IDs FIRST (before other processing)
-    # Remove ID patterns like "id: 551281 | Wed Mar 15 2023..."
-    text = re.sub(r'id:\s*\d+\s*\|[^|]*(?:\|[^|]*)*', '', text, flags=re.IGNORECASE)
-    
-    # Remove timestamps (various formats)
-    text = re.sub(r'\w{3}\s+\w{3}\s+\d{1,2}\s+\d{4}\s+\d{2}:\d{2}:\d{2}[^|)]*', '', text)
-    text = re.sub(r'GMT[+-]\d{4}\s*\([^)]+\)', '', text)
-    
-    # Remove "User Question | Response" type markers
-    text = re.sub(r'\|\s*(?:User Question|Response|Journvax)\s*\|?', '', text, flags=re.IGNORECASE)
-    
-    # Step 2: Basic normalization
-    text = text.strip()
-    
-    # Step 3: Remove role prefixes
-    text = re.sub(
-        r'^(?:Assistant|Bot|AI|Model|Response|Navigator):\s*',
-        '', 
-        text, 
-        flags=re.IGNORECASE
-    )
-    
-    # Step 4: Remove parenthetical instructions/meta-commentary
-    text = re.sub(r'\(\s*No additional information[^)]*\)', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\(\s*(?:removed|rephrased|edited|simplified|clarified)[^)]*\)', '', text, flags=re.IGNORECASE)
-    
-    # Step 5: Remove "Note:" meta-commentary
-    text = re.sub(
-        r'Note:\s*[^.]*?(?:response|documentation|includes|information|ensure)[^.]*\.',
-        '',
-        text,
-        flags=re.IGNORECASE
-    )
-    
-    # Step 6: Fix Journvax spelling variants (including JOURNAVAX)
-    text = re.sub(r'\b[Jj][Oo][Uu][Rr][Nn][Aa]?[Vv][Aa]?[Xx]\b', 'Journvax', text, flags=re.IGNORECASE)
-    
-    # Step 7: Cut at conversation/document boundaries
-    cutoff_markers = [
-        "\n\nUser:", "\n\nHuman:", "\n\nAssistant:", 
-        "\n\n###", "\nUser Question:", "\nQuestion:",
-        "| id:", "id:", " | J."  # Document markers
-    ]
-    
-    for marker in cutoff_markers:
-        if marker in text:
-            text = text.split(marker)[0].strip()
-            break
-    
-    # Step 8: Remove trailing fragments and pipes
-    text = re.sub(r'\|\s*\w{1,3}\.?\s*$', '', text)  # Remove "| J." type endings
-    text = re.sub(r'\s*\|+\s*$', '', text)  # Remove trailing pipes
-    
-    # Step 9: Fix incomplete sentences
-    # Fix "when taking." without object
-    text = re.sub(r'when taking\.\s*(?=[A-Z]|$)', 'when taking Journvax. ', text)
-    
-    # Remove clearly incomplete sentence at the end
-    sentences = text.split('. ')
-    if len(sentences) > 1:
-        last_sentence = sentences[-1].strip()
+    def __init__(self, api_key: str = ANTHROPIC_API_KEY):
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY is not configured")
         
-        # Check for incomplete patterns
-        if (re.search(r'(when taking|but it|, it)$', last_sentence, re.IGNORECASE) or
-            len(last_sentence.split()) < 3 and not last_sentence.endswith(('.', '!', '?'))):
-            text = '. '.join(sentences[:-1]) + '.'
-    
-    # Step 10: Clean whitespace and punctuation
-    text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
-    text = re.sub(r'\s+([.,!?])', r'\1', text)  # Remove space before punctuation
-    text = re.sub(r'([.,!?])([A-Z])', r'\1 \2', text)  # Add space after punctuation
-    
-    # Step 11: Fix punctuation issues
-    text = text.replace('..', '.')
-    text = text.replace('.,', '.')
-    text = text.replace('. .', '.')
-    
-    # Step 12: Ensure proper ending
-    text = text.strip()
-    if text and text[-1] not in '.!?':
-        # Check if the ending seems complete
-        words = text.split()
-        if words:
-            last_word = words[-1].lower()
-            # Don't add period after incomplete words
-            if last_word not in ['and', 'but', 'or', 'the', 'a', 'to', 'when', 'of', 'with', 'for', 'if']:
-                text += '.'
-    
-    # Step 13: Final cleanup - remove any remaining User Question at the end
-    if text.endswith('User Question'):
-        text = text[:-13].strip()
-        if text and text[-1] not in '.!?':
-            text += '.'
-    
-    return text
-
-def clean_model_output_minimal(text: str) -> str:
-    """
-    Minimal version for when you want fast, essential cleaning only
-    """
-    if not text:
-        return ""
-    
-    # Remove obvious metadata
-    text = re.sub(r'id:\s*\d+[^.!?]*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\|\s*(?:User Question|Response|id:)[^|]*', '', text, flags=re.IGNORECASE)
-    
-    # Fix Journvax spelling
-    text = re.sub(r'\bjournavax\b', 'Journvax', text, flags=re.IGNORECASE)
-    
-    # Cut at conversation markers
-    for marker in ["\nUser:", "\nHuman:", "| id:", " | J."]:
-        if marker in text:
-            text = text.split(marker)[0]
-    
-    # Clean up
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    # Ensure ending punctuation
-    if text and text[-1] not in '.!?':
-        text += '.'
-    
-    return text
-
-# ============================================================================
-# HUGGINGFACE CLIENT
-# ============================================================================
-
-class HuggingFaceClient:
-    """Client for HuggingFace inference endpoint"""
-    
-    def __init__(self, token: str = HF_TOKEN, endpoint: str = HF_INFERENCE_ENDPOINT):
-        if not token:
-            raise ValueError("HF_TOKEN is not configured")
-        if not endpoint:
-            raise ValueError("HF_INFERENCE_ENDPOINT is not configured")
-        
-        self.token = token
-        self.endpoint = endpoint.rstrip("/")
-        self.headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        
-        self.session = None
-        self.session_lock = asyncio.Lock()
-        self._closed = False
-        self._loop = None
-        
+        self.client = AsyncAnthropic(api_key=api_key)
+        self.model = CLAUDE_MODEL
         self.request_count = 0
         self.error_count = 0
         
-        logger.info(f"HuggingFaceClient initialized: {self.endpoint[:60]}...")
+        logger.info(f"ClaudeClient initialized with model: {self.model}")
     
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create session with current event loop"""
-        if self._closed:
-            raise RuntimeError("Client is closed")
-        
-        current_loop = get_or_create_event_loop()
-        
-        async with self.session_lock:
-            # Check if we need a new session
-            if (self.session is None or 
-                self.session.closed or 
-                self._loop != current_loop or
-                (self._loop and self._loop.is_closed())):
-                
-                # Close old session if exists
-                if self.session and not self.session.closed:
-                    try:
-                        await self.session.close()
-                    except Exception as e:
-                        logger.warning(f"Error closing old session: {e}")
-                
-                # Create new session
-                connector = aiohttp.TCPConnector(
-                    limit=10,
-                    limit_per_host=5,
-                    ttl_dns_cache=300,
-                    enable_cleanup_closed=True,
-                    force_close=False,
-                    keepalive_timeout=30
-                )
-                
-                self.session = aiohttp.ClientSession(
-                    headers=self.headers,
-                    connector=connector
-                )
-                self._loop = current_loop
-                logger.info("Created new aiohttp session")
-            
-            return self.session
-    
-    async def close(self):
-        """Close the session"""
-        self._closed = True
-        async with self.session_lock:
-            if self.session and not self.session.closed:
-                try:
-                    await self.session.close()
-                    await asyncio.sleep(0.1)
-                except Exception as e:
-                    logger.warning(f"Error closing session: {e}")
-                self.session = None
-                self._loop = None
-    
-    async def reset(self):
-        """Reset the client"""
-        logger.info("Resetting HuggingFaceClient")
-        await self.close()
-        self._closed = False
-        self._loop = None
-        self.session = None
-    
-    async def generate_response(self, prompt: str, parameters: Optional[Dict[str, Any]] = None) -> str:
-        """Generate response from the model"""
-        if self._closed:
-            await self.reset()
-        
-        if parameters is None:
-            parameters = MODEL_PARAMS.copy()
+    async def generate_response(
+        self, 
+        user_query: str, 
+        context: str = "",
+        conversation_history: List[Dict[str, str]] = None
+    ) -> str:
+        """Generate response using Claude with strict context grounding"""
         
         start_time = time.time()
         self.request_count += 1
         
-        timeout = aiohttp.ClientTimeout(total=30, sock_read=25)
+        # Build the user message with context
+        if context and len(context.strip()) > 50:
+            user_message = f"""Context from Journvax documentation:
+{context}
+
+User Question: {user_query}
+
+Please answer using ONLY the information provided in the context above."""
+        else:
+            # No context - should trigger fallback
+            user_message = f"""No documentation context available.
+
+User Question: {user_query}
+
+Since no context is provided, please respond with the appropriate fallback message."""
+        
+        # Build messages list
+        messages = []
+        
+        # Add conversation history if provided (limit to recent messages)
+        if conversation_history:
+            # Take last 10 messages to stay within context limits
+            recent_history = conversation_history[-10:]
+            for msg in recent_history:
+                messages.append({
+                    "role": msg.get("role", "user"),
+                    "content": msg.get("content", "")
+                })
+        
+        # Add current query
+        messages.append({
+            "role": "user",
+            "content": user_message
+        })
         
         try:
-            session = await self._get_session()
-        except Exception as e:
-            logger.error(f"Failed to get session: {e}")
+            logger.info(f"Sending request to Claude. Context length: {len(context)} chars")
+            
+            response = await self.client.messages.create(
+                model=self.model,
+                system=SYSTEM_PROMPT,
+                messages=messages,
+                max_tokens=MAX_TOKENS,
+                temperature=TEMPERATURE
+            )
+            
+            generated_text = response.content[0].text if response.content else ""
+            
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            
+            if elapsed_ms > 3000:
+                logger.warning(f"[PERF] Slow Claude response: {elapsed_ms}ms")
+            else:
+                logger.info(f"[PERF] Claude response in {elapsed_ms}ms")
+            
+            if not generated_text:
+                logger.warning("Empty response from Claude")
+                return NO_CONTEXT_FALLBACK_MESSAGE
+            
+            # Clean up any potential formatting issues
+            generated_text = generated_text.strip()
+            
+            logger.debug(f"Generated response length: {len(generated_text)} chars")
+            
+            return generated_text
+            
+        except anthropic.RateLimitError as e:
+            logger.error(f"Rate limit error: {e}")
             self.error_count += 1
-            await self.reset()
-            try:
-                session = await self._get_session()
-            except Exception as e2:
-                logger.error(f"Failed to get session after reset: {e2}")
-                return "Error: Failed to initialize connection"
-        
-        payload = {
-            "inputs": prompt,
-            "parameters": parameters,
-            "options": {
-                "use_cache": True,
-                "wait_for_model": False
-            }
-        }
-        
-        try:
-            async with session.post(
-                self.endpoint,
-                json=payload,
-                timeout=timeout
-            ) as response:
-                status = response.status
-                
-                if status == 503:
-                    logger.info("Model loading, waiting...")
-                    await asyncio.sleep(2)
-                    return await self.generate_response(prompt, parameters)
-                
-                text = await response.text()
-                
-                if status != 200:
-                    logger.error(f"API returned {status}: {text[:200]}")
-                    self.error_count += 1
-                    
-                    if status == 429:
-                        return "Error: Rate limit exceeded"
-                    elif status == 500:
-                        return "Error: Server error"
-                    else:
-                        return f"Error: Status {status}"
-                
-                # Parse response
-                try:
-                    result = json.loads(text)
-                except json.JSONDecodeError:
-                    # Try to use raw text if it looks like a response
-                    if text and not text.startswith('{"error"'):
-                        cleaned = clean_model_output(text)
-                        if cleaned:
-                            return cleaned
-                    return "Error: Invalid response format"
-                
-                # Extract text from different response formats
-                generated = ""
-                if isinstance(result, list) and result:
-                    generated = result[0].get("generated_text", "")
-                elif isinstance(result, dict):
-                    generated = result.get("generated_text", "")
-                    if not generated:
-                        generated = result.get("text", "") or result.get("output", "")
-                else:
-                    generated = str(result)
-                
-                if not generated:
-                    logger.warning("Empty response from model")
-                    return "Error: No response generated"
-                
-                # Remove prompt from response if it's included
-                if prompt in generated:
-                    generated = generated.replace(prompt, "", 1).strip()
-                
-                elapsed_ms = int((time.time() - start_time) * 1000)
-                if elapsed_ms > 5000:
-                    logger.warning(f"[PERF] Slow generation: {elapsed_ms}ms")
-                else:
-                    logger.info(f"[PERF] Generation completed in {elapsed_ms}ms")
-                
-                cleaned = clean_model_output(generated)
-                logger.debug(f"Cleaned output length: {len(cleaned)}")
-                
-                return cleaned
-                
-        except asyncio.TimeoutError:
-            logger.error("Request timed out")
+            return "I'm experiencing high demand. Please try again in a moment."
+            
+        except anthropic.APIError as e:
+            logger.error(f"API error: {e}")
             self.error_count += 1
-            return "Error: Request timed out"
-        except aiohttp.ClientError as e:
-            logger.error(f"Client error: {e}")
-            self.error_count += 1
-            if "Cannot connect" in str(e) or "Connection reset" in str(e):
-                await self.reset()
-            return f"Error: Connection failed"
-        except RuntimeError as e:
-            if "Event loop is closed" in str(e):
-                logger.error("Event loop closed, resetting")
-                await self.reset()
-                return "Error: Event loop issue. Please try again."
-            raise
+            return NO_CONTEXT_FALLBACK_MESSAGE
+            
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
             self.error_count += 1
-            return "Error: An unexpected error occurred"
-
-# ============================================================================
-# REQUEST BATCHING (OPTIONAL)
-# ============================================================================
-
-@dataclass
-class BatchRequest:
-    prompt: str
-    parameters: Dict[str, Any]
-    future: asyncio.Future
-    timestamp: float
-    retry_count: int = 0
-
-class RequestBatcher:
-    """Batch requests for efficiency (optional)"""
-    
-    def __init__(self, max_batch_size: int = 4, timeout_ms: int = 50):
-        self.max_batch_size = max_batch_size
-        self.timeout_ms = timeout_ms
-        self.pending_requests: deque = deque()
-        self.batch_lock = asyncio.Lock()
-        self.batch_task = None
-        self._closed = False
-    
-    async def add_request(self, prompt: str, parameters: Dict[str, Any]) -> str:
-        """Add request to batch"""
-        if self._closed:
-            raise RuntimeError("Batcher is closed")
-        
-        loop = get_or_create_event_loop()
-        future = loop.create_future()
-        request = BatchRequest(prompt, parameters, future, time.time())
-        
-        async with self.batch_lock:
-            self.pending_requests.append(request)
-            
-            if self.batch_task is None or self.batch_task.done():
-                self.batch_task = asyncio.create_task(self._process_batch())
-            
-            if len(self.pending_requests) >= self.max_batch_size:
-                if self.batch_task and not self.batch_task.done():
-                    self.batch_task.cancel()
-                self.batch_task = asyncio.create_task(self._process_batch())
-        
-        return await future
-    
-    async def _process_batch(self):
-        """Process pending batch"""
-        if self._closed:
-            return
-        
-        await asyncio.sleep(self.timeout_ms / 1000)
-        
-        async with self.batch_lock:
-            if not self.pending_requests:
-                return
-            
-            batch = []
-            for _ in range(min(self.max_batch_size, len(self.pending_requests))):
-                batch.append(self.pending_requests.popleft())
-            
-            if not batch:
-                return
-        
-        logger.info(f"[BATCH] Processing {len(batch)} requests")
-        
-        tasks = [self._process_single_with_retry(req) for req in batch]
-        
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for req, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    if not req.future.done():
-                        req.future.set_exception(result)
-                else:
-                    if not req.future.done():
-                        req.future.set_result(result)
-        except Exception as e:
-            logger.error(f"Batch processing failed: {e}")
-            for req in batch:
-                if not req.future.done():
-                    req.future.set_exception(e)
-    
-    async def _process_single_with_retry(self, request: BatchRequest) -> str:
-        """Process single request with retry"""
-        last_error = None
-        
-        for attempt in range(MAX_RETRIES):
-            try:
-                client = await get_singleton_client()
-                result = await client.generate_response(request.prompt, request.parameters)
-                
-                if result.startswith("Error:") and "Event loop" not in result and attempt < MAX_RETRIES - 1:
-                    raise Exception(result)
-                
-                return result
-                
-            except Exception as e:
-                last_error = e
-                request.retry_count = attempt + 1
-                
-                if "Event loop" in str(e) or "Session is closed" in str(e):
-                    logger.warning("Session issue detected, resetting")
-                    await reset_singleton_client()
-                
-                if attempt < MAX_RETRIES - 1:
-                    delay = min(RETRY_DELAY_BASE * (2 ** attempt), RETRY_DELAY_MAX)
-                    logger.warning(f"Request retry {attempt + 1}/{MAX_RETRIES} after {delay}s")
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error(f"Request failed after {MAX_RETRIES} attempts")
-        
-        return f"Error: Failed after {MAX_RETRIES} attempts"
+            return NO_CONTEXT_FALLBACK_MESSAGE
     
     async def close(self):
-        """Close the batcher"""
-        self._closed = True
-        
-        if self.batch_task and not self.batch_task.done():
-            self.batch_task.cancel()
-        
-        async with self.batch_lock:
-            while self.pending_requests:
-                req = self.pending_requests.popleft()
-                if not req.future.done():
-                    req.future.cancel()
-
-# Global batcher
-request_batcher = RequestBatcher() if ENABLE_REQUEST_BATCHING else None
+        """Close the client"""
+        # AsyncAnthropic handles cleanup internally
+        logger.info("ClaudeClient closed")
 
 # ============================================================================
 # SINGLETON MANAGEMENT
 # ============================================================================
 
-_client_instance: Optional[HuggingFaceClient] = None
-_client_lock = asyncio.Lock()
+_client_instance: Optional[ClaudeClient] = None
 
-async def get_singleton_client() -> HuggingFaceClient:
+async def get_singleton_client() -> ClaudeClient:
     """Get singleton client"""
     global _client_instance
     
-    async with _client_lock:
-        if _client_instance is None or _client_instance._closed:
-            _client_instance = HuggingFaceClient()
-        return _client_instance
+    if _client_instance is None:
+        _client_instance = ClaudeClient()
+    return _client_instance
 
-async def reset_singleton_client():
-    """Reset singleton client"""
-    global _client_instance
-    
-    async with _client_lock:
-        if _client_instance:
-            await _client_instance.reset()
+# ============================================================================
+# PUBLIC API FUNCTIONS
+# ============================================================================
+
+async def call_claude(
+    user_query: str,
+    context: str = "",
+    conversation_history: List[Dict[str, str]] = None
+) -> str:
+    """Main entry point for Claude calls"""
+    try:
+        client = await get_singleton_client()
+        return await client.generate_response(user_query, context, conversation_history)
+        
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        return NO_CONTEXT_FALLBACK_MESSAGE
+    except Exception as e:
+        logger.error(f"Unexpected error in call_claude: {e}", exc_info=True)
+        return NO_CONTEXT_FALLBACK_MESSAGE
 
 # ============================================================================
 # CLEANUP
@@ -559,116 +189,16 @@ async def reset_singleton_client():
 
 async def cleanup():
     """Cleanup resources"""
-    global _client_instance, request_batcher
+    global _client_instance
     
-    logger.info("Starting cleanup...")
-    
-    if request_batcher:
-        try:
-            await request_batcher.close()
-            logger.info("Closed batcher")
-        except Exception as e:
-            logger.warning(f"Error closing batcher: {e}")
+    logger.info("Starting Claude client cleanup...")
     
     if _client_instance:
         try:
             await _client_instance.close()
             _client_instance = None
-            logger.info("Closed client")
+            logger.info("Claude client closed")
         except Exception as e:
             logger.warning(f"Error closing client: {e}")
     
     logger.info("Cleanup completed")
-
-# ============================================================================
-# PUBLIC API FUNCTIONS
-# ============================================================================
-
-async def call_huggingface_with_retry(
-    prompt: str,
-    parameters: Optional[Dict[str, Any]] = None,
-    max_retries: int = MAX_RETRIES
-) -> str:
-    """Call HuggingFace with retry logic"""
-    last_error = None
-    
-    for attempt in range(max_retries):
-        try:
-            result = await call_huggingface(prompt, parameters)
-            
-            if result.startswith("Error:") and "Event loop" in result and attempt < max_retries - 1:
-                logger.warning("Event loop error, resetting")
-                await reset_singleton_client()
-                await asyncio.sleep(0.5)
-                continue
-            
-            return result
-            
-        except Exception as e:
-            last_error = e
-            if "Event loop" in str(e):
-                await reset_singleton_client()
-            
-            if attempt < max_retries - 1:
-                delay = min(RETRY_DELAY_BASE * (2 ** attempt), RETRY_DELAY_MAX)
-                logger.warning(f"Retry {attempt + 1}/{max_retries} after {delay}s")
-                await asyncio.sleep(delay)
-    
-    return f"Error: Failed after {max_retries} attempts"
-
-async def call_huggingface(
-    prompt: str,
-    parameters: Optional[Dict[str, Any]] = None
-) -> str:
-    """Main entry point for HuggingFace calls"""
-    try:
-        # Try batching for small requests
-        if request_batcher and ENABLE_REQUEST_BATCHING and not request_batcher._closed:
-            if parameters is None or parameters.get("max_new_tokens", 0) <= 100:
-                try:
-                    return await request_batcher.add_request(prompt, parameters or MODEL_PARAMS)
-                except RuntimeError as e:
-                    if "Event loop" in str(e):
-                        logger.warning("Batching failed, using direct call")
-                    else:
-                        raise
-        
-        # Direct call
-        client = await get_singleton_client()
-        return await client.generate_response(prompt, parameters)
-        
-    except ValueError as e:
-        logger.error(f"Configuration error: {e}")
-        return f"Error: Configuration issue"
-    except RuntimeError as e:
-        if "Event loop" in str(e):
-            logger.error("Event loop issue")
-            await reset_singleton_client()
-            return "Error: Event loop issue. Please try again."
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
-        return "Error: An unexpected error occurred"
-
-# Legacy functions for compatibility
-async def call_base_assistant(prompt: str) -> str:
-    """Call base assistant"""
-    base_params = MODEL_PARAMS.copy()
-    base_params.update({
-        "temperature": 0.7,
-        "top_p": 0.9,
-        "repetition_penalty": 1.1,
-        "max_new_tokens": 200,
-        "stop": ["\nUser:", "\nHuman:", "\nAssistant:", "###"]
-    })
-    return await call_huggingface_with_retry(prompt, base_params)
-
-async def call_guard_agent(prompt: str) -> str:
-    """Call guard agent"""
-    from config import GUARD_MODEL_PARAMS
-    return await call_huggingface(prompt, GUARD_MODEL_PARAMS)
-
-async def call_bridge_synthesizer(prompt: str) -> str:
-    """Call bridge synthesizer"""
-    from config import BRIDGE_SYNTHESIZER_PARAMS
-    return await call_huggingface_with_retry(prompt, BRIDGE_SYNTHESIZER_PARAMS)

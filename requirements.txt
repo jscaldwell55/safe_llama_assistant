@@ -1,36 +1,41 @@
-# Core AI/ML Dependencies
-transformers>=4.30.0
+# Core AI/ML
+anthropic>=0.18.0                    # Claude 3.5 Sonnet API
+sentence-transformers>=2.2.2         # Embedding generation
+faiss-cpu>=1.7.4                    # Vector similarity search
+torch>=2.2.0                         # Required by sentence-transformers
+numpy>=1.24.0,<2.0.0                # Numerical operations
 
+# Document Processing
+PyMuPDF>=1.23.0                     # PDF text extraction
+langchain-text-splitters>=0.0.1    # Advanced text chunking
 
+# NLP
+nltk>=3.8.1                         # Natural language processing
 
-# HTTP Requests
-requests>=2.31.0
-aiofiles>=23.2.0
+# Web Framework
+streamlit>=1.28.0                   # Web UI
 
-# Data Processing
-pandas>=2.0.0
+# Async Operations
+aiohttp>=3.9.0                      # Async HTTP client
 
-# Semantic Chunking
-langchain>=0.1.0
+# Utilities
+python-dotenv>=1.0.0               # Environment variables
 
-# Utility Libraries
-python-dotenv>=1.0.0
-typing-extensions>=4.5.0
+# ============================================================================
+# OPTIONAL - Development & Testing
+# Uncomment if needed for development
+# ============================================================================
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# black>=23.0.0
+# flake8>=6.0.0
+# mypy>=1.0.0
 
-# Development & Testing (optional)
-pytest>=7.4.0
-black>=23.0.0
-flake8>=6.0.0
-
-# Logging and Monitoring
-structlog>=23.1.0
-
-streamlit>=1.31
-aiohttp>=3.9
-PyMuPDF>=1.23
-faiss-cpu>=1.7.4
-sentence-transformers>=2.6
-torch>=2.2 ; sys_platform != "darwin" or platform_machine != "arm64"
-numpy>=1.26
-langchain-text-splitters>=0.0.1
-nltk>=3.8.1
+# ============================================================================
+# NOTES
+# ============================================================================
+# - Use Python 3.10+ for best compatibility
+# - Total install size: ~2GB (mainly PyTorch + models)
+# - First run will download embedding model (~25MB)
+# - FAISS-CPU used instead of GPU version for broader compatibility
+# - Numpy version pinned <2.0.0 for compatibility with older packages

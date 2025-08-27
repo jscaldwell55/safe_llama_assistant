@@ -1,14 +1,14 @@
-# conversation.py
+# conversation.py - Simplified Conversation Management
 
 import logging
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-import re
+
 from config import WELCOME_MESSAGE, MAX_CONVERSATION_TURNS, SESSION_TIMEOUT_MINUTES
 
 try:
-    import streamlit as st  # type: ignore
+    import streamlit as st
     HAS_STREAMLIT = True
 except Exception:
     st = None
@@ -18,147 +18,159 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ConversationTurn:
-    role: str
+    """Single conversation turn"""
+    role: str  # "user" or "assistant"
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
 
 @dataclass
 class ConversationContext:
+    """Conversation state"""
     turns: List[ConversationTurn] = field(default_factory=list)
-    active_entities: List[str] = field(default_factory=list)
-    last_activity: datetime = field(default_factory=datetime.now)  # Track actual activity
     session_started: datetime = field(default_factory=datetime.now)
+    last_activity: datetime = field(default_factory=datetime.now)
+    turn_count: int = 0
 
 class ConversationManager:
-    """Manages conversational state (memory) and context building."""
-    def __init__(
-        self,
-        max_turns: Optional[int] = None,
-        session_timeout_minutes: Optional[int] = None
-    ):
-        # Allow config-driven defaults; 0/None disables turn cap
-        self.max_turns = (MAX_CONVERSATION_TURNS if max_turns is None else max_turns) or 0
-        timeout = SESSION_TIMEOUT_MINUTES if session_timeout_minutes is None else session_timeout_minutes
-        self.session_timeout_minutes = timeout
-        self.session_timeout = timedelta(minutes=timeout) if timeout > 0 else None
+    """
+    Manages conversation state for Claude context
+    Simplified version focused on maintaining conversation history
+    """
+    
+    def __init__(self, max_turns: int = MAX_CONVERSATION_TURNS):
+        self.max_turns = max_turns
+        self.session_timeout = timedelta(minutes=SESSION_TIMEOUT_MINUTES) if SESSION_TIMEOUT_MINUTES > 0 else None
         
-        # Initialize conversation state from Streamlit session state if available
+        # Initialize conversation state
         if HAS_STREAMLIT and st is not None:
             if "conversation_context" not in st.session_state:
-                # First time initialization
                 self._init_new_conversation()
+                logger.info("Initialized new conversation in session state")
             else:
-                # Restore existing conversation
                 self.conversation = st.session_state["conversation_context"]
-                # Don't check timeout on init - it causes false positives
-                # Timeout should only be checked after actual user interaction
+                logger.debug(f"Restored conversation with {len(self.conversation.turns)} turns")
         else:
-            # Non-Streamlit context
             self._init_new_conversation()
-
+    
     def _init_new_conversation(self):
-        """Initialize a new conversation and store in session state if available"""
+        """Initialize a new conversation"""
         self.conversation = ConversationContext()
+        
+        # Add welcome message if configured
         if WELCOME_MESSAGE:
-            self.conversation.turns.append(ConversationTurn(role="assistant", content=WELCOME_MESSAGE))
+            self.conversation.turns.append(
+                ConversationTurn(role="assistant", content=WELCOME_MESSAGE)
+            )
+            logger.debug("Added welcome message to conversation")
         
         # Store in Streamlit session state
         if HAS_STREAMLIT and st is not None:
             st.session_state["conversation_context"] = self.conversation
         
         logger.info("Started new conversation")
-
-    def _check_timeout(self) -> bool:
-        """Check if session has timed out based on last activity"""
+    
+    def start_new_conversation(self):
+        """Explicitly start a new conversation"""
+        self._init_new_conversation()
+        logger.info("Conversation reset by user")
+    
+    def add_turn(self, role: str, content: str):
+        """Add a turn to the conversation"""
+        if not self.conversation:
+            self._init_new_conversation()
+        
+        # Create new turn
+        turn = ConversationTurn(role=role, content=content)
+        self.conversation.turns.append(turn)
+        self.conversation.turn_count += 1
+        self.conversation.last_activity = datetime.now()
+        
+        # Trim conversation if exceeds max turns (keep recent ones)
+        if self.max_turns > 0 and len(self.conversation.turns) > self.max_turns:
+            # Keep welcome message if it exists, then most recent turns
+            if self.conversation.turns[0].content == WELCOME_MESSAGE:
+                self.conversation.turns = [self.conversation.turns[0]] + self.conversation.turns[-(self.max_turns-1):]
+            else:
+                self.conversation.turns = self.conversation.turns[-self.max_turns:]
+            logger.debug(f"Trimmed conversation to {len(self.conversation.turns)} turns")
+        
+        # Update session state
+        if HAS_STREAMLIT and st is not None:
+            st.session_state["conversation_context"] = self.conversation
+        
+        logger.info(f"Added {role} turn (total turns: {self.conversation.turn_count})")
+    
+    def get_turns(self) -> List[Dict[str, str]]:
+        """Get all conversation turns as list of dicts"""
+        if not self.conversation:
+            return []
+        
+        # Convert to format expected by Claude API
+        turns = []
+        for turn in self.conversation.turns:
+            # Skip welcome message in history sent to Claude
+            if turn.content == WELCOME_MESSAGE and turn.role == "assistant":
+                continue
+            turns.append({
+                "role": turn.role,
+                "content": turn.content
+            })
+        
+        return turns
+    
+    def get_display_turns(self) -> List[Dict[str, str]]:
+        """Get turns for display (includes welcome message)"""
+        if not self.conversation:
+            return []
+        
+        return [
+            {"role": turn.role, "content": turn.content}
+            for turn in self.conversation.turns
+        ]
+    
+    def check_session_timeout(self) -> bool:
+        """Check if session has timed out"""
         if not self.session_timeout or not self.conversation:
             return False
         
         time_since_activity = datetime.now() - self.conversation.last_activity
-        return time_since_activity > self.session_timeout
-
-    def start_new_conversation(self):
-        """Explicitly start a new conversation"""
-        self._init_new_conversation()
-
-    def add_turn(self, role: str, content: str):
+        is_timeout = time_since_activity > self.session_timeout
+        
+        if is_timeout:
+            logger.warning(f"Session timeout detected ({time_since_activity.seconds}s since last activity)")
+        
+        return is_timeout
+    
+    def get_session_info(self) -> Dict[str, any]:
+        """Get session information for logging"""
         if not self.conversation:
-            self._init_new_conversation()
+            return {"status": "no_conversation"}
         
-        # Update last activity time
-        self.conversation.last_activity = datetime.now()
-        
-        # Add the turn
-        self.conversation.turns.append(ConversationTurn(role=role, content=content))
+        return {
+            "turn_count": self.conversation.turn_count,
+            "message_count": len(self.conversation.turns),
+            "session_duration": str(datetime.now() - self.conversation.session_started),
+            "last_activity": str(datetime.now() - self.conversation.last_activity) + " ago",
+            "is_timeout": self.check_session_timeout()
+        }
 
-        # Lightweight entity heuristic
-        entities = self._extract_entities(content)
-        for e in entities:
-            if e not in self.conversation.active_entities:
-                self.conversation.active_entities.append(e)
-        self.conversation.active_entities = self.conversation.active_entities[-5:]
+# ============================================================================
+# SINGLETON MANAGEMENT
+# ============================================================================
 
-        # Update session state
-        if HAS_STREAMLIT and st is not None:
-            st.session_state["conversation_context"] = self.conversation
-
-        logger.info(f"Added '{role}' turn.")
-
-    def get_turns(self) -> List[Dict[str, str]]:
-        if not self.conversation:
-            return []
-        return [{"role": t.role, "content": t.content} for t in self.conversation.turns]
-
-    def _extract_entities(self, text: str) -> List[str]:
-        return re.findall(r'\b[A-Z][a-z]{2,}\b', text)
-
-    def should_end_session(self) -> bool:
-        """Check if session should end due to turn limit or timeout"""
-        if not self.conversation:
-            return False
-        
-        # Check turn limit
-        if self.max_turns and len(self.conversation.turns) >= self.max_turns:
-            logger.warning("Session turn limit reached.")
-            return True
-        
-        # Check timeout based on last activity (not last turn)
-        if self.session_timeout:
-            if self._check_timeout():
-                logger.warning("Session timed out due to inactivity.")
-                return True
-        
-        return False
-
-    def get_formatted_history(self) -> str:
-        if not self.conversation or not self.conversation.turns:
-            return ""
-        recent = self.conversation.turns[-4:]  # last 2 user + 2 assistant turns
-        history = []
-        for turn in recent:
-            role_fmt = "Human" if turn.role == "user" else "Assistant"
-            history.append(f"{role_fmt}: {turn.content}")
-        return "\n".join(history)
-
-    def get_enhanced_query(self, original_query: str) -> str:
-        ql = original_query.lower()
-        is_follow_up = any(w in ql for w in ['it', 'that', 'they', 'them', 'more', 'also'])
-        if is_follow_up and self.conversation and self.conversation.active_entities:
-            context_entities = ", ".join(self.conversation.active_entities)
-            enhanced = f"{original_query} (related to: {context_entities})"
-            logger.info(f"Enhanced query for RAG: {enhanced}")
-            return enhanced
-        return original_query
-
-# Streamlit-session-scoped instance
-def get_conversation_manager():
+def get_conversation_manager() -> ConversationManager:
+    """Get singleton ConversationManager instance"""
     if HAS_STREAMLIT and st is not None:
         if "conversation_manager" not in st.session_state:
             st.session_state["conversation_manager"] = ConversationManager()
+            logger.debug("Created new ConversationManager in session state")
         return st.session_state["conversation_manager"]
+    
     # Fallback for non-Streamlit contexts
-    global _cm_singleton  # type: ignore
+    global _cm_singleton
     try:
         _cm_singleton
     except NameError:
-        _cm_singleton = ConversationManager()  # type: ignore
-    return _cm_singleton  # type: ignore
+        _cm_singleton = ConversationManager()
+        logger.debug("Created global ConversationManager singleton")
+    return _cm_singleton

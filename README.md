@@ -1,178 +1,243 @@
-Safe Enterprise Assistant (Pharma) – README
-System Overview
-Core Safety Principles
-
-100% Document Grounding – Responses ONLY from retrieved documentation, no external knowledge
-
-
-Comprehensive Threat Detection – Blocks violence, illegal drugs, harmful content
-
-Mandatory Validation – Every response validated before delivery
-
-Intelligent Query Classification – Distinguishes factual information requests from personal medical advice
-
-Key Updates (Version 3.2)
-
-Sentence-Level Grounding – Every generated sentence must meet the grounding threshold (0.50) individually
-
-Chunk Sanitizer – Automatically strips PII, metadata artifacts, timestamps, and irrelevant boilerplate during RAG preprocessing
-
-Improved Query Classification – Allows legitimate drug interaction information while blocking personal advice
-
-Enhanced Output Cleaning – Removes metadata, timestamps, and prompt artifacts
-
-Adjusted Grounding Sensitivity – Better balance between safety and information access
-
-Fixed Drug Interaction Queries – "What can I not take with Journvax?" now properly answered
-
-Metadata Leakage Prevention – Enhanced cleaning of document IDs and timestamps
-
-Safety Architecture
-1. Query Pre-Screening
-
-Allowed Information Requests:
-
-Drug interactions and contraindications
-
-Who can/cannot take the medication
-
-Food and drink restrictions
-
-General safety information and side effects
-
-Dosing information from documentation
-
-Blocked Personal/Harmful Queries:
-
-Personal medical advice
-
-Violence/self-harm/suicide references
-
-Illegal drugs (cocaine, heroin, “speedball”, etc.)
-
-Creative content requests (stories, poems, fiction)
-
-Off-topic queries (physics, weather, recipes)
-
-Off-label use for specific individuals
-
-Standard Responses:
-
-Safety violations: "I'm sorry, I cannot discuss that. Would you like to talk about something else?"
-
-No information: "I'm sorry, I don't seem to have any information on that. Would you like to talk about something else?"
-
-2. Document Grounding (STRICT)
-
-Similarity Threshold: 0.50
-
-Chunk Sanitizer: Pre-cleans chunks before embedding, removing irrelevant metadata, timestamps, and document artifacts
-
-Sentence-Level Grounding: Each sentence in the response is validated against retrieved chunks; ungrounded sentences are automatically dropped
-
-No Context = No Response: Returns standard refusal if no documentation retrieved
-
-Unsupported Claims Detection: Balanced to avoid false positives on legitimate information
-
-3. Response Generation
-
-Strict Prompting Rules:
-
-ONLY use explicitly stated information from documentation
-
-NEVER add general knowledge or training data
-
-NEVER create narratives or stories
-
-No meta-commentary about the response process
-
-Always return standard refusal if information unavailable
-
-4. Mandatory Validation
-
-Every Response Validated For:
-
-Sentence-level document grounding (≥ 0.50)
-
-Regulatory compliance (6 critical categories)
-
-Creative content detection
-
-Off-topic detection
-
-Violence/illegal content
-
-Metadata leakage
-
-5. Critical Regulatory Categories
-
-Off-Label/Unapproved Use – Unapproved populations or indications
-
-Medical Advice – Personal medical recommendations (not general information)
-
-Cross-Product References – Misleading brand associations
-
-Administration Misuse – Dangerous administration methods
-
-Inaccurate Claims – False or unsupported product claims
-
-Inadequate Risk Communication – Missing safety warnings
-
-Example Interactions
-User Query	System Response	Category
-"what are the side effects?"	Lists side effects from documentation + disclaimer	✅ Allowed
-"who can take journvax?"	"Adults with moderate to severe acute pain..."	✅ Allowed
-"what can I not take with journvax?"	Lists drug/food interactions from documentation	✅ Allowed
-"can I take journvax with warfarin?"	"I'm sorry, I cannot discuss that..."	❌ Personal advice
-"can I take journvax with a speedball?"	"I'm sorry, I cannot discuss that..."	❌ Illegal drug
-"tell me a story about journvax"	"I'm sorry, I don't seem to have any information..."	❌ Creative content
-"tell me about gravity"	"I'm sorry, I don't seem to have any information..."	❌ Off-topic
-"my child has pain, can they take it?"	"I'm sorry, I cannot discuss that..."	❌ Personal advice
-File Structure
-File	Purpose	Version 3.2 Changes
-app.py	Streamlit UI with chat interface	No changes
-guard.py	Safety validation system	UPDATE: Sentence-level validation enforcement
-conversational_agent.py	Response orchestrator	UPDATE: Integrates per-sentence grounding filter
-prompts.py	Generation prompts	UPDATE: Explicit sentence-grounding enforcement
-llm_client.py	Output cleaning	MAJOR UPDATE: Enhanced metadata/artifact removal
-rag.py	FAISS vector search	UPDATE: Adds Chunk Sanitizer preprocessing
-config.py	Configuration	Maintained at SEMANTIC_SIMILARITY_THRESHOLD = 0.50
-Other files	Various utilities	Minor updates
-Configuration
-
-Required config.py settings:
-
-# Grounding threshold
-SEMANTIC_SIMILARITY_THRESHOLD = 0.50
-
-# Sentence-level validation
-ENABLE_SENTENCE_GROUNDING = True
-
-# Enable chunk sanitizer
-ENABLE_CHUNK_SANITIZER = True
-
-# Guard settings
-ENABLE_GUARD = True
-ENABLE_RESPONSE_CACHE = True
-USE_LLM_GUARD = False
-
-Known Issues & Limitations
-Current Issues Being Addressed
-
-Occasional false negatives – Sentence-level filter may remove borderline but legitimate content
-
-Chunk Sanitizer aggressiveness – Sometimes strips out clinically relevant footnotes if not tuned correctly
-
-Response Latency – Sentence-by-sentence grounding adds 0.5–1.0s per response
-
-System Limitations
-
-No streaming responses (all-at-once delivery)
-
-Single document source (PDFs only)
-
-No conversation memory in RAG retrieval
-
-Fixed embedding model (all-MiniLM-L6-v2)
-
-Context window limitations for very long documents
+# Pharma Enterprise Assistant - Claude 3.5 Sonnet Edition
+
+A document-grounded pharmaceutical information assistant powered by Claude 3.5 Sonnet, featuring RAG (Retrieval-Augmented Generation) with strict safety through system design.
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Python 3.10+
+- Anthropic API key
+- 100-200 pages of PDF documentation
+
+### Installation
+
+1. **Clone the repository**
+```bash
+git clone <your-repo-url>
+cd pharma-assistant
+
+Create virtual environment
+
+bashpython -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+Install dependencies
+
+bashpip install -r requirements.txt
+
+Configure API key
+
+bash# Create .streamlit directory
+mkdir .streamlit
+
+# Add your API key to secrets.toml
+echo 'ANTHROPIC_API_KEY = "sk-ant-api03-YOUR-KEY"' > .streamlit/secrets.toml
+
+Add your PDFs
+
+bash# Create data directory and add PDFs
+mkdir data
+cp /path/to/your/*.pdf data/
+
+Build the FAISS index
+
+bashpython build_index.py
+
+Run the application
+
+bashstreamlit run app.py
+📁 Project Structure
+pharma-assistant/
+├── app.py                     # Streamlit UI with chat interface
+├── llm_client.py             # Claude 3.5 Sonnet integration
+├── guard.py                  # Semantic grounding validator
+├── conversational_agent.py  # Response orchestrator with caching
+├── rag.py                    # FAISS-based retrieval system
+├── config.py                 # Configuration settings
+├── conversation.py           # Conversation state management
+├── semantic_chunker.py       # Document chunking strategies
+├── embeddings.py             # Embedding model management
+├── context_formatter.py      # Context formatting utilities
+├── prompts.py               # Legacy compatibility
+├── build_index.py           # Index builder script
+├── requirements.txt         # Python dependencies
+├── data/                    # PDF documents (create this)
+│   ├── document1.pdf
+│   └── document2.pdf
+├── faiss_index/             # Generated index files
+│   ├── faiss.index
+│   └── metadata.pkl
+└── .streamlit/              # Streamlit configuration
+    └── secrets.toml         # API keys (never commit!)
+🔄 Workflow
+Initial Setup (One-time)
+mermaidgraph LR
+    A[Add PDFs to data/] --> B[Run build_index.py]
+    B --> C[Index created in faiss_index/]
+    C --> D[Configure API key]
+    D --> E[Run streamlit app]
+Document Updates
+When you need to update documents:
+
+Add new PDFs to data/ folder
+Rebuild index locally:
+bashpython build_index.py --rebuild
+
+Clear cache in the app UI
+Test with relevant queries
+
+Daily Usage
+
+Start the app: streamlit run app.py
+Ask questions about Journvax
+Use "New Conversation" to reset context
+Use "Clear Cache" for fresh responses
+
+🏗️ Architecture
+Safety Design (Simplified)
+User Query
+    ↓
+RAG Retrieval (Top 5 chunks)
+    ↓
+Claude 3.5 Sonnet (System prompt enforced)
+    ↓
+Grounding Check (0.60 threshold)
+    ↓
+Response or Fallback
+Key Components
+ComponentPurposeKey FeaturesClaude IntegrationResponse generationStrong system prompt, conversation contextRAG SystemDocument retrievalFAISS flat index, semantic chunkingGrounding GuardSafety validationCosine similarity check (0.60 threshold)Response CachePerformanceLRU cache for 100 responsesConversation ManagerContext tracking20-turn history for Claude
+📊 Performance Metrics
+Expected Latencies
+
+Cached Response: <50ms
+RAG Retrieval: 100-300ms
+Claude Generation: 1-2s
+Grounding Check: 50-100ms
+Total (uncached): 1.5-2.5s
+
+Resource Usage
+
+Memory: ~2GB (with model loaded)
+Index Size: ~50-100MB (for 100-200 pages)
+Cache Size: ~5MB (100 responses)
+
+🚀 Deployment
+Streamlit Cloud
+
+Build index locally first:
+bashpython build_index.py
+
+Push to GitHub:
+bashgit add .
+git commit -m "Add application with pre-built index"
+git push
+
+Deploy on Streamlit Cloud:
+
+Connect GitHub repository
+Add ANTHROPIC_API_KEY to secrets
+Deploy
+
+
+
+Docker (Optional)
+bash# Build image
+docker build -t pharma-assistant .
+
+# Run container
+docker run -p 8501:8501 \
+  -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/faiss_index:/app/faiss_index \
+  pharma-assistant
+🔧 Configuration
+Key settings in config.py:
+python# Model settings
+CLAUDE_MODEL = "claude-3-5-sonnet-20241022"
+TEMPERATURE = 0.3  # Lower = more consistent
+
+# RAG settings (optimized for 100-200 pages)
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 200
+TOP_K_RETRIEVAL = 5
+
+# Safety settings
+SEMANTIC_SIMILARITY_THRESHOLD = 0.60
+📈 Monitoring
+Logs
+
+Console: Real-time in terminal
+File: app.log for persistent logging
+Format: Timestamp, module, level, file:line, message
+
+Key Log Patterns
+[REQ_xxx]  - Request tracking
+[PERF]     - Performance warnings
+[STATS]    - System statistics
+Debug Commands
+python# Check index stats
+from rag import get_index_stats
+print(get_index_stats())
+
+# Test retrieval
+from rag import get_rag_system
+rag = get_rag_system()
+results = rag.retrieve("side effects")
+
+# View cache stats
+from conversational_agent import get_orchestrator
+orch = get_orchestrator()
+print(orch.get_stats())
+🎯 Potential Improvements
+Short-term (Easy)
+
+Add query suggestions - Common questions as buttons
+Export conversation - Save chat as PDF/text
+Feedback system - Thumbs up/down for responses
+Response streaming - Show Claude's response as it generates
+Dark mode - UI theme toggle
+
+Medium-term (Moderate)
+
+Multi-document highlighting - Show which PDF each chunk comes from
+Query expansion - Use synonyms for better retrieval
+Reranking - Add a reranker for better chunk selection
+Custom embeddings - Fine-tune embeddings on pharma domain
+Analytics dashboard - Track usage patterns
+
+Long-term (Complex)
+
+Multi-modal support - Process images/tables from PDFs
+Citation system - Link responses to specific PDF pages
+A/B testing - Compare different prompts/thresholds
+Active learning - Learn from user feedback
+Multi-language - Support for non-English documents
+
+Performance Optimizations
+
+Async RAG - Parallel chunk retrieval
+Redis cache - Distributed caching for scale
+Vector DB - Replace FAISS with Pinecone/Weaviate for scale
+Batch processing - Process multiple queries simultaneously
+Edge caching - CDN for static assets
+
+Safety Enhancements
+
+Dual validation - Add factual accuracy check
+Confidence scoring - Show confidence levels
+Audit logging - Track all queries/responses
+Content filtering - Additional PII/PHI detection
+Fallback models - Backup if Claude is unavailable
+
+🐛 Troubleshooting
+Common Issues
+IssueSolution"No index found"Run python build_index.py"API key not configured"Add to .streamlit/secrets.tomlSlow responsesCheck internet connection, API statusPoor retrievalAdjust chunk size, rebuild indexMemory errorsReduce batch size, use smaller embedding model
+Health Checks
+bash# Test system components
+python test_system.py
+
+# Check index only
+python build_index.py --check-only
+
+# Rebuild if corrupted
+python build_index.py --rebuild
