@@ -24,7 +24,7 @@ class OptimizedRAGSystem:
     
     def __init__(self):
         self.embedding_model = get_embedding_model()
-        self.semantic_chunker = SemanticChunker()
+        self.semantic_chunker = SemanticChunker() # semantic_chunker now directly uses config values
         self.index = None
         self.texts: List[str] = []
         self.metadata: List[Dict[str, Any]] = []
@@ -98,7 +98,7 @@ class OptimizedRAGSystem:
             semantic_chunks = self.semantic_chunker.semantic_chunk(
                 text, 
                 strategy=CHUNKING_STRATEGY, 
-                max_tokens=MAX_CHUNK_TOKENS
+                max_tokens=MAX_CHUNK_TOKENS # Use MAX_CHUNK_TOKENS from config
             )
             
             for i, (chunk_text, chunk_metadata) in enumerate(semantic_chunks):
@@ -141,12 +141,13 @@ class OptimizedRAGSystem:
         return text.strip()
     
     def _fallback_chunking(self, text: str, source: str) -> List[Tuple[str, Dict[str, Any]]]:
-        """Simple overlapping chunk strategy as fallback"""
+        """Simple overlapping chunk strategy as fallback, using config values"""
         chunks = []
-        step = CHUNK_SIZE - CHUNK_OVERLAP
+        # Use CHUNK_SIZE from config for fallback
+        step = CHUNK_SIZE - CHUNK_OVERLAP 
         
         for i in range(0, len(text), step):
-            chunk_text = text[i:i + CHUNK_SIZE].strip()
+            chunk_text = text[i:i + CHUNK_SIZE].strip() # Use CHUNK_SIZE from config
             if len(chunk_text) > 100:
                 metadata = {
                     "source": source,
@@ -185,7 +186,7 @@ class OptimizedRAGSystem:
                     embeddings.append(batch_embeddings)
                     
                     # Log progress
-                    if i % 20 == 0:
+                    if i % 100 == 0 and i > 0: # Log less frequently for large datasets
                         logger.info(f"Processed {i}/{len(chunks)} chunks")
                 
                 # Concatenate all embeddings

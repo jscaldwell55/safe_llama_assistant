@@ -38,14 +38,14 @@ MAX_CACHE_SIZE = 100  # Maximum cached responses
 # ============================================================================
 
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-EMBEDDING_BATCH_SIZE = 32  # Reduced for smaller dataset
-CHUNK_SIZE = 800  # Increased for better context
+EMBEDDING_BATCH_SIZE = 32
+CHUNK_SIZE = 800  # Primary chunk size for RAG and semantic chunker
 CHUNK_OVERLAP = 200  # More overlap for coherence
 TOP_K_RETRIEVAL = 5  # Get top 5 most relevant chunks
 INDEX_PATH = "faiss_index"
 PDF_DATA_PATH = "data"
 CHUNKING_STRATEGY = "hybrid"
-MAX_CHUNK_TOKENS = 1000  # Larger chunks for better context
+MAX_CHUNK_TOKENS = CHUNK_SIZE # Aligning max tokens for semantic chunker with RAG chunk size
 MAX_CONTEXT_LENGTH = 4000  # Can be larger with Claude
 
 # ============================================================================
@@ -53,7 +53,7 @@ MAX_CONTEXT_LENGTH = 4000  # Can be larger with Claude
 # ============================================================================
 
 ENABLE_GUARD = True
-SEMANTIC_SIMILARITY_THRESHOLD = 0.60  # Slightly higher for Claude's responses
+SEMANTIC_SIMILARITY_THRESHOLD = 0.45  # Adjusted for less strict grounding - was 0.60
 GUARD_FALLBACK_MESSAGE = "I'm sorry, I can't discuss that. Can we talk about something else?"
 NO_CONTEXT_FALLBACK_MESSAGE = "I'm sorry, I don't have any information on that. Can I assist you with something else?"
 

@@ -5,6 +5,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import re
 import logging
 
+# Import MAX_CHUNK_TOKENS from config to ensure consistency for RecursiveCharacterTextSplitter if it's used directly
+from config import MAX_CHUNK_TOKENS, CHUNK_OVERLAP
+
 logger = logging.getLogger(__name__)
 
 # Ensure required NLTK data (canonical IDs)
@@ -26,9 +29,10 @@ class SemanticChunker:
     """
     def __init__(self):
         self.sent_tokenizer = nltk.tokenize.PunktSentenceTokenizer()
+        # Initialize RecursiveCharacterTextSplitter with values from config for consistency
         self.recursive_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=600,
-            chunk_overlap=100,
+            chunk_size=MAX_CHUNK_TOKENS, # Use MAX_CHUNK_TOKENS from config
+            chunk_overlap=CHUNK_OVERLAP, # Use CHUNK_OVERLAP from config
             length_function=len,
             separators=["\n\n", "\n", ". ", " ", ""]
         )
@@ -74,7 +78,7 @@ class SemanticChunker:
             sections.append({'section': 'document', 'content': text.strip(), 'type': 'document'})
         return sections
 
-    def chunk_by_sentences(self, text: str, max_tokens: int = 600) -> List[str]:
+    def chunk_by_sentences(self, text: str, max_tokens: int) -> List[str]: # max_tokens passed from semantic_chunk
         if not text.strip():
             return []
         try:
@@ -98,7 +102,7 @@ class SemanticChunker:
             chunks.append(' '.join(current_chunk))
         return chunks
 
-    def chunk_by_paragraphs(self, text: str, max_tokens: int = 600) -> List[str]:
+    def chunk_by_paragraphs(self, text: str, max_tokens: int) -> List[str]: # max_tokens passed from semantic_chunk
         if not text.strip():
             return []
         paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
@@ -110,7 +114,7 @@ class SemanticChunker:
                 if current_chunk:
                     chunks.append('\n\n'.join(current_chunk))
                     current_chunk, current_length = [], 0
-                chunks.extend(self.chunk_by_sentences(paragraph, max_tokens))
+                chunks.extend(self.chunk_by_sentences(paragraph, max_tokens)) # Pass max_tokens here
             elif current_length + plen > max_tokens and current_chunk:
                 chunks.append('\n\n'.join(current_chunk))
                 current_chunk, current_length = [paragraph], plen
@@ -121,12 +125,12 @@ class SemanticChunker:
             chunks.append('\n\n'.join(current_chunk))
         return chunks
 
-    def semantic_chunk(self, text: str, strategy: str = "hybrid", max_tokens: int = 600) -> List[Tuple[str, Dict[str, Any]]]:
+    def semantic_chunk(self, text: str, strategy: str = "hybrid", max_tokens: int = MAX_CHUNK_TOKENS) -> List[Tuple[str, Dict[str, Any]]]:
         chunks_with_metadata: List[Tuple[str, Dict[str, Any]]] = []
         if strategy == "sections":
             sections = self.extract_sections(text)
             for section in sections:
-                sec_chunks = self.chunk_by_paragraphs(section['content'], max_tokens)
+                sec_chunks = self.chunk_by_paragraphs(section['content'], max_tokens) # Pass max_tokens
                 for i, chunk in enumerate(sec_chunks):
                     chunks_with_metadata.append((chunk, {
                         'strategy': 'sections',
@@ -136,19 +140,20 @@ class SemanticChunker:
                         'total_chunks': len(sec_chunks)
                     }))
         elif strategy == "paragraphs":
-            chunks = self.chunk_by_paragraphs(text, max_tokens)
+            chunks = self.chunk_by_paragraphs(text, max_tokens) # Pass max_tokens
             for i, chunk in enumerate(chunks):
                 chunks_with_metadata.append((chunk, {
                     'strategy': 'paragraphs', 'chunk_index': i, 'total_chunks': len(chunks)
                 }))
         elif strategy == "sentences":
-            chunks = self.chunk_by_sentences(text, max_tokens)
+            chunks = self.chunk_by_sentences(text, max_tokens) # Pass max_tokens
             for i, chunk in enumerate(chunks):
                 chunks_with_metadata.append((chunk, {
                     'strategy': 'sentences', 'chunk_index': i, 'total_chunks': len(chunks)
                 }))
         elif strategy == "recursive":
-            chunks = self.recursive_splitter.split_text(text)
+            # recursive_splitter is initialized with MAX_CHUNK_TOKENS and CHUNK_OVERLAP from config
+            chunks = self.recursive_splitter.split_text(text) 
             for i, chunk in enumerate(chunks):
                 chunks_with_metadata.append((chunk, {
                     'strategy': 'recursive', 'chunk_index': i, 'total_chunks': len(chunks)
@@ -157,7 +162,7 @@ class SemanticChunker:
             sections = self.extract_sections(text)
             if len(sections) > 1:
                 for section in sections:
-                    sec_chunks = self.chunk_by_paragraphs(section['content'], max_tokens)
+                    sec_chunks = self.chunk_by_paragraphs(section['content'], max_tokens) # Pass max_tokens
                     for i, chunk in enumerate(sec_chunks):
                         chunks_with_metadata.append((chunk, {
                             'strategy': 'hybrid_sections',
@@ -167,7 +172,7 @@ class SemanticChunker:
                             'section_total_chunks': len(sec_chunks)
                         }))
             else:
-                chunks = self.chunk_by_paragraphs(text, max_tokens)
+                chunks = self.chunk_by_paragraphs(text, max_tokens) # Pass max_tokens
                 for i, chunk in enumerate(chunks):
                     chunks_with_metadata.append((chunk, {
                         'strategy': 'hybrid_paragraphs', 'chunk_index': i, 'total_chunks': len(chunks)

@@ -12,7 +12,7 @@ from config import (
     CLAUDE_MODEL,
     MAX_TOKENS,
     TEMPERATURE,
-    NO_CONTEXT_FALLBACK_MESSAGE
+    NO_CONTEXT_FALLBACK_MESSAGE # Make sure this is consistently used
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -24,14 +24,14 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a pharmaceutical information assistant for Journvax. Your responses must follow these critical rules:
 
-1. **ONLY use information from the provided context** - Never use external knowledge
-2. **If no context is provided or the context is empty**, respond exactly with: "I'm sorry, I don't have any information on that. Can I assist you with something else?"
-3. **Never generate creative content** like stories, poems, or fictional scenarios
-4. **Never provide personal medical advice** - Only share factual information from the documentation
-5. **Always stay focused on Journvax** - Don't discuss unrelated topics
-6. **Be concise and factual** - Present information as direct statements from the documentation
+1. **ONLY use facts and information DERIVED from the provided context** - Do not use any external or prior knowledge.
+2. **If no context is provided, the context is empty, or the context does not contain the answer**, respond EXACTLY with: "I'm sorry, I don't have any information on that. Can I assist you with something else?"
+3. **Never generate creative content** like stories, poems, or fictional scenarios.
+4. **Never provide personal medical advice** - Only share factual information from the documentation.
+5. **Always stay focused on Journvax** - Do not discuss unrelated topics.
+6. **Be concise and factual** - Present information as direct statements or clear summaries from the documentation.
 
-Remember: You can ONLY discuss what is explicitly stated in the context provided. If information isn't in the context, you must use the fallback message."""
+Remember: You can ONLY discuss what is explicitly stated or can be directly inferred from the context provided. If information isn't in the context, you must use the specified fallback message."""
 
 # ============================================================================
 # CLAUDE CLIENT
@@ -63,6 +63,7 @@ class ClaudeClient:
         self.request_count += 1
         
         # Build the user message with context
+        # Use a more explicit check for "sufficient" context, align with guard.py's len(context.strip()) < 50
         if context and len(context.strip()) > 50:
             user_message = f"""Context from Journvax documentation:
 {context}
@@ -71,12 +72,12 @@ User Question: {user_query}
 
 Please answer using ONLY the information provided in the context above."""
         else:
-            # No context - should trigger fallback
-            user_message = f"""No documentation context available.
+            # No context - instruct Claude to use the fallback message
+            user_message = f"""No documentation context available or context is irrelevant.
 
 User Question: {user_query}
 
-Since no context is provided, please respond with the appropriate fallback message."""
+As per your instructions, please respond with the exact fallback message for no context: "{NO_CONTEXT_FALLBACK_MESSAGE}" """
         
         # Build messages list
         messages = []
@@ -86,10 +87,14 @@ Since no context is provided, please respond with the appropriate fallback messa
             # Take last 10 messages to stay within context limits
             recent_history = conversation_history[-10:]
             for msg in recent_history:
-                messages.append({
-                    "role": msg.get("role", "user"),
-                    "content": msg.get("content", "")
-                })
+                # Ensure the system's WELCOME_MESSAGE is not passed to Claude here
+                # as it's already handled by the SYSTEM_PROMPT.
+                # Only pass user/assistant turns that are not the welcome message.
+                if msg.get("content") != NO_CONTEXT_FALLBACK_MESSAGE: # or config.WELCOME_MESSAGE if needed, but llm_client only gets turns from conversation_manager.get_turns() which already strips welcome message
+                    messages.append({
+                        "role": msg.get("role", "user"),
+                        "content": msg.get("content", "")
+                    })
         
         # Add current query
         messages.append({

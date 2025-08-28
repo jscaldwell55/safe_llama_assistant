@@ -8,9 +8,9 @@ from enum import Enum
 
 from config import (
     ENABLE_GUARD,
-    SEMANTIC_SIMILARITY_THRESHOLD,
+    SEMANTIC_SIMILARITY_THRESHOLD, # Will be 0.45 now
     GUARD_FALLBACK_MESSAGE,
-    NO_CONTEXT_FALLBACK_MESSAGE
+    NO_CONTEXT_FALLBACK_MESSAGE    # Will be used for exact comparison
 )
 
 logger = logging.getLogger(__name__)
@@ -110,25 +110,34 @@ class SimpleGroundingGuard:
                 reasoning="Guard disabled"
             )
         
-        # Check for standard fallback messages (always approve these)
-        response_lower = response.lower().strip()
-        if "i'm sorry" in response_lower and "don't have any information" in response_lower:
-            logger.debug("Standard fallback message detected - approving")
+        # Check for standard fallback messages from config (always approve these for robustness)
+        # Using strip() and lower() for a slightly more flexible comparison
+        if response.strip().lower() == NO_CONTEXT_FALLBACK_MESSAGE.strip().lower() or \
+           response.strip().lower() == GUARD_FALLBACK_MESSAGE.strip().lower():
+            logger.debug("Recognized standard fallback message - approving without further grounding check")
             return ValidationDecision(
                 result=ValidationResult.APPROVED,
                 final_response=response,
-                grounding_score=1.0,
-                reasoning="Standard fallback message"
+                grounding_score=1.0, # Assign a high score as it's an intended fallback
+                reasoning="Recognized standard fallback message"
             )
         
-        # If no context, response should be the fallback
-        if not context or len(context.strip()) < 50:
-            logger.warning("No context available - response should be fallback")
+        # If no context, the response should ideally be the NO_CONTEXT_FALLBACK_MESSAGE
+        # If it's not, we'll still reject it and provide the official fallback.
+        if not context or len(context.strip()) < 50: # Check for minimal context length
+            logger.warning("No sufficient context available - response should be fallback")
+            # If the response is not the expected NO_CONTEXT_FALLBACK_MESSAGE, replace it
+            if response.strip().lower() != NO_CONTEXT_FALLBACK_MESSAGE.strip().lower():
+                final_response = NO_CONTEXT_FALLBACK_MESSAGE
+                logger.debug(f"Replacing ungrounded response with '{NO_CONTEXT_FALLBACK_MESSAGE}'")
+            else:
+                final_response = response
+            
             return ValidationDecision(
-                result=ValidationResult.REJECTED,
-                final_response=NO_CONTEXT_FALLBACK_MESSAGE,
+                result=ValidationResult.REJECTED, # Even if it's the fallback, it's a rejection of the query
+                final_response=final_response,
                 grounding_score=0.0,
-                reasoning="No context available"
+                reasoning="No sufficient context available"
             )
         
         # Calculate grounding score
@@ -149,7 +158,7 @@ class SimpleGroundingGuard:
             logger.warning(f"Response REJECTED - insufficient grounding: {grounding_score:.3f}")
             return ValidationDecision(
                 result=ValidationResult.REJECTED,
-                final_response=GUARD_FALLBACK_MESSAGE,
+                final_response=GUARD_FALLBACK_MESSAGE, # Always use the official guard fallback
                 grounding_score=grounding_score,
                 reasoning=f"Insufficient grounding score: {grounding_score:.3f}"
             )
