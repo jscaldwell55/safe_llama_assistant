@@ -1,4 +1,4 @@
-# conversational_agent.py - Simplified Response Orchestrator (Non-streaming)
+# conversational_agent.py - Response Orchestrator with Query Pre-screening
 
 import logging
 import time
@@ -11,7 +11,9 @@ from config import (
     ENABLE_RESPONSE_CACHE,
     MAX_CACHE_SIZE,
     NO_CONTEXT_FALLBACK_MESSAGE,
-    LOG_SLOW_REQUESTS_THRESHOLD_MS
+    PERSONAL_MEDICAL_ADVICE_MESSAGE,
+    LOG_SLOW_REQUESTS_THRESHOLD_MS,
+    MIN_RETRIEVAL_SCORE
 )
 
 logger = logging.getLogger(__name__)
@@ -21,10 +23,11 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 class ResponseStrategy(Enum):
-    GENERATED = "generated"          # Response generated from context
-    CACHED = "cached"                # Previously cached response
-    FALLBACK = "fallback"            # No context available
-    ERROR = "error"                  # Error occurred
+    GENERATED = "generated"
+    CACHED = "cached"
+    FALLBACK = "fallback"
+    BLOCKED = "blocked"
+    ERROR = "error"
 
 @dataclass
 class ResponseDecision:
@@ -37,6 +40,7 @@ class ResponseDecision:
     was_validated: bool = False
     validation_result: str = ""
     cache_hit: bool = False
+    blocked_reason: str = ""
 
 # ============================================================================
 # RESPONSE CACHE
@@ -60,20 +64,16 @@ class ResponseCache:
         """Get cached response"""
         if key in self.cache:
             self.hits += 1
-            logger.debug(f"Cache HIT for key: {key[:8]}... (hit rate: {self.get_hit_rate():.1%})")
+            logger.debug(f"Cache HIT for key: {key[:8]}...")
             return self.cache[key]
         self.misses += 1
-        logger.debug(f"Cache MISS for key: {key[:8]}...")
         return None
     
     def put(self, key: str, value: str):
         """Store validated response in cache"""
         if len(self.cache) >= self.max_size:
-            # Remove oldest entry (FIFO)
             first_key = next(iter(self.cache))
             del self.cache[first_key]
-            logger.debug(f"Cache full - evicted oldest entry")
-        
         self.cache[key] = value
         logger.debug(f"Cached response for key: {key[:8]}...")
     
@@ -90,24 +90,21 @@ class ResponseCache:
         return self.hits / total if total > 0 else 0.0
 
 # ============================================================================
-# SIMPLIFIED ORCHESTRATOR
+# ORCHESTRATOR WITH PRE-SCREENING
 # ============================================================================
 
-class SimpleOrchestrator:
+class SafeOrchestrator:
     """
-    Simplified orchestrator that:
-    1. Retrieves context from RAG
-    2. Generates response using Claude
-    3. Validates grounding
-    4. Caches approved responses
+    Production orchestrator with query pre-screening and safe thresholds
     """
     
     def __init__(self):
         self.cache = ResponseCache() if ENABLE_RESPONSE_CACHE else None
         self.total_requests = 0
         self.fallback_count = 0
+        self.blocked_count = 0
         
-        logger.info(f"SimpleOrchestrator initialized (cache: {ENABLE_RESPONSE_CACHE})")
+        logger.info(f"SafeOrchestrator initialized (cache: {ENABLE_RESPONSE_CACHE})")
     
     async def orchestrate_response(
         self, 
@@ -115,15 +112,31 @@ class SimpleOrchestrator:
         conversation_history: List[Dict[str, str]] = None
     ) -> ResponseDecision:
         """
-        Main orchestration pipeline - NON-STREAMING VERSION
+        Main orchestration with query pre-screening
         """
         start_time = time.time()
         self.total_requests += 1
         
-        logger.info(f"[Request #{self.total_requests}] Processing query: '{query[:50]}...'")
+        logger.info(f"[Request #{self.total_requests}] Processing: '{query[:50]}...'")
         
         try:
-            # Step 1: Check cache
+            # Step 1: Pre-screen query for personal medical advice
+            from guard import query_validator
+            
+            if query_validator.check_personal_medical(query):
+                self.blocked_count += 1
+                latency = int((time.time() - start_time) * 1000)
+                logger.info(f"[Request #{self.total_requests}] Query blocked - personal medical advice")
+                
+                return ResponseDecision(
+                    final_response=PERSONAL_MEDICAL_ADVICE_MESSAGE,
+                    strategy_used=ResponseStrategy.BLOCKED,
+                    latency_ms=latency,
+                    validation_result="blocked_personal_medical",
+                    blocked_reason="personal_medical_advice"
+                )
+            
+            # Step 2: Check cache
             cache_key = None
             if self.cache:
                 cache_key = self.cache.get_key(query)
@@ -138,96 +151,101 @@ class SimpleOrchestrator:
                         latency_ms=latency
                     )
             
-            # Step 2: Retrieve context from RAG
-            logger.info(f"[Request #{self.total_requests}] Retrieving context from RAG...")
+            # Step 3: Retrieve context from RAG
+            logger.info(f"[Request #{self.total_requests}] Retrieving context...")
             rag_start = time.time()
             
-            from rag import retrieve_and_format_context
+            from rag import retrieve_and_format_context, get_rag_system
+            rag_system = get_rag_system()
+            
+            # Get raw retrieval results to check quality
+            results = rag_system.retrieve(query)
+            
+            # Check retrieval quality
+            if results:
+                avg_score = sum(r["score"] for r in results) / len(results)
+                if avg_score < MIN_RETRIEVAL_SCORE:
+                    logger.warning(f"[Request #{self.total_requests}] Poor retrieval quality: {avg_score:.3f} < {MIN_RETRIEVAL_SCORE}")
+                    self.fallback_count += 1
+                    return ResponseDecision(
+                        final_response=NO_CONTEXT_FALLBACK_MESSAGE,
+                        strategy_used=ResponseStrategy.FALLBACK,
+                        latency_ms=int((time.time() - start_time) * 1000),
+                        validation_result="poor_retrieval"
+                    )
+            
+            # Format context
             context = retrieve_and_format_context(query)
             
             rag_latency = int((time.time() - rag_start) * 1000)
-            logger.info(f"[Request #{self.total_requests}] RAG retrieval completed in {rag_latency}ms - retrieved {len(context)} chars")
+            logger.info(f"[Request #{self.total_requests}] RAG completed in {rag_latency}ms - {len(context)} chars")
             
-            # Step 3: Generate response using Claude (NON-STREAMING)
-            logger.info(f"[Request #{self.total_requests}] Generating response with Claude...")
+            # Step 4: Generate response
+            if not context or len(context) < 50:
+                logger.info(f"[Request #{self.total_requests}] No context - using fallback")
+                self.fallback_count += 1
+                return ResponseDecision(
+                    final_response=NO_CONTEXT_FALLBACK_MESSAGE,
+                    strategy_used=ResponseStrategy.FALLBACK,
+                    latency_ms=int((time.time() - start_time) * 1000),
+                    validation_result="no_context"
+                )
+            
+            logger.info(f"[Request #{self.total_requests}] Generating response...")
             gen_start = time.time()
             
             from llm_client import call_claude
             response = await call_claude(query, context, conversation_history)
             
             gen_latency = int((time.time() - gen_start) * 1000)
-            logger.info(f"[Request #{self.total_requests}] Claude generation completed in {gen_latency}ms")
+            logger.info(f"[Request #{self.total_requests}] Generation completed in {gen_latency}ms")
             
-            # Step 4: Validate grounding (if context exists)
-            validation_result = "not_needed"
-            grounding_score = 0.0
-            was_validated = False
+            # Step 5: Validate grounding
+            logger.info(f"[Request #{self.total_requests}] Validating grounding...")
+            val_start = time.time()
             
-            if context and len(context) > 50:
-                logger.info(f"[Request #{self.total_requests}] Validating response grounding...")
-                val_start = time.time()
+            from guard import grounding_validator
+            validation = grounding_validator.validate_response(response, context)
+            
+            val_latency = int((time.time() - val_start) * 1000)
+            
+            if validation.result.value == "approved":
+                logger.info(f"[Request #{self.total_requests}] APPROVED: {validation.reasoning}")
                 
-                from guard import grounding_guard
-                validation = grounding_guard.validate_response(response, context)
+                # Cache approved responses
+                if self.cache and cache_key:
+                    self.cache.put(cache_key, response)
                 
-                val_latency = int((time.time() - val_start) * 1000)
-                was_validated = True
-                grounding_score = validation.grounding_score
-                
-                if validation.result.value == "approved":
-                    logger.info(f"[Request #{self.total_requests}] Response APPROVED with score {grounding_score:.3f} in {val_latency}ms")
-                    validation_result = "approved"
-                    
-                    # Cache approved responses
-                    if self.cache and cache_key:
-                        self.cache.put(cache_key, response)
-                else:
-                    logger.warning(f"[Request #{self.total_requests}] Response REJECTED with score {grounding_score:.3f} - using fallback")
-                    response = validation.final_response
-                    validation_result = "rejected"
-                    self.fallback_count += 1
+                validation_result = "approved"
             else:
-                # No context case
-                logger.info(f"[Request #{self.total_requests}] No context retrieved - using fallback")
-                response = NO_CONTEXT_FALLBACK_MESSAGE
+                logger.warning(f"[Request #{self.total_requests}] REJECTED: {validation.reasoning}")
+                response = validation.final_response
                 self.fallback_count += 1
-                validation_result = "no_context"
+                validation_result = "rejected"
             
             # Calculate total latency
             total_latency = int((time.time() - start_time) * 1000)
             
-            # Log performance warning if slow
             if total_latency > LOG_SLOW_REQUESTS_THRESHOLD_MS:
-                logger.warning(f"[PERF] Slow request #{self.total_requests}: {total_latency}ms (RAG: {rag_latency}ms, Gen: {gen_latency}ms)")
-            else:
-                logger.info(f"[Request #{self.total_requests}] Completed in {total_latency}ms")
-            
-            # Determine strategy
-            if not context:
-                strategy = ResponseStrategy.FALLBACK
-            else:
-                strategy = ResponseStrategy.GENERATED
+                logger.warning(f"[PERF] Slow request #{self.total_requests}: {total_latency}ms")
             
             return ResponseDecision(
                 final_response=response,
-                strategy_used=strategy,
+                strategy_used=ResponseStrategy.GENERATED,
                 context_used=context,
-                grounding_score=grounding_score,
+                grounding_score=validation.grounding_score,
                 latency_ms=total_latency,
-                was_validated=was_validated,
-                validation_result=validation_result,
-                cache_hit=False
+                was_validated=True,
+                validation_result=validation_result
             )
             
         except Exception as e:
-            logger.error(f"[Request #{self.total_requests}] Orchestration failed: {e}", exc_info=True)
-            
-            total_latency = int((time.time() - start_time) * 1000)
+            logger.error(f"[Request #{self.total_requests}] Failed: {e}", exc_info=True)
             
             return ResponseDecision(
                 final_response=NO_CONTEXT_FALLBACK_MESSAGE,
                 strategy_used=ResponseStrategy.ERROR,
-                latency_ms=total_latency,
+                latency_ms=int((time.time() - start_time) * 1000),
                 validation_result="error"
             )
     
@@ -236,7 +254,9 @@ class SimpleOrchestrator:
         stats = {
             "total_requests": self.total_requests,
             "fallback_count": self.fallback_count,
-            "fallback_rate": self.fallback_count / self.total_requests if self.total_requests > 0 else 0
+            "blocked_count": self.blocked_count,
+            "fallback_rate": self.fallback_count / self.total_requests if self.total_requests > 0 else 0,
+            "blocked_rate": self.blocked_count / self.total_requests if self.total_requests > 0 else 0
         }
         
         if self.cache:
@@ -253,14 +273,14 @@ class SimpleOrchestrator:
 # SINGLETON MANAGEMENT
 # ============================================================================
 
-_orchestrator_instance: Optional[SimpleOrchestrator] = None
+_orchestrator_instance: Optional[SafeOrchestrator] = None
 
-def get_orchestrator() -> SimpleOrchestrator:
+def get_orchestrator() -> SafeOrchestrator:
     """Get singleton orchestrator instance"""
     global _orchestrator_instance
     if _orchestrator_instance is None:
-        _orchestrator_instance = SimpleOrchestrator()
-        logger.info("Created SimpleOrchestrator singleton")
+        _orchestrator_instance = SafeOrchestrator()
+        logger.info("Created SafeOrchestrator singleton")
     return _orchestrator_instance
 
 def reset_orchestrator():
@@ -270,9 +290,5 @@ def reset_orchestrator():
         orchestrator.cache.clear()
     orchestrator.total_requests = 0
     orchestrator.fallback_count = 0
+    orchestrator.blocked_count = 0
     logger.info("Orchestrator state reset")
-
-# Legacy compatibility
-def get_persona_conductor():
-    """Legacy compatibility"""
-    return get_orchestrator()
