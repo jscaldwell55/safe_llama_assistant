@@ -1,4 +1,4 @@
-# app.py - Simplified Streamlit UI with Extensive Logging (with streaming support)
+# app.py - Simplified Streamlit UI with Extensive Logging
 
 import os
 import streamlit as st
@@ -7,7 +7,7 @@ import sys
 import asyncio
 import time
 import atexit
-from typing import Dict, Any, AsyncGenerator
+from typing import Dict, Any
 
 # ============================================================================
 # CONFIGURE EXTENSIVE LOGGING
@@ -41,7 +41,7 @@ def load_dependencies():
     
     try:
         from config import APP_TITLE, WELCOME_MESSAGE
-        from conversational_agent import get_orchestrator, reset_orchestrator, ResponseDecision, ResponseStrategy
+        from conversational_agent import get_orchestrator, reset_orchestrator
         from conversation import get_conversation_manager
         from rag import get_rag_system, get_index_stats
         
@@ -53,8 +53,6 @@ def load_dependencies():
             "get_conversation_manager": get_conversation_manager,
             "get_rag_system": get_rag_system,
             "get_index_stats": get_index_stats,
-            "ResponseDecision": ResponseDecision, # Pass dataclass for type checking
-            "ResponseStrategy": ResponseStrategy, # Pass enum for type checking
         }
         
         logger.info("All dependencies loaded successfully")
@@ -133,9 +131,6 @@ st.title(deps["APP_TITLE"])
 # Get singletons
 conversation_manager = deps["get_conversation_manager"]()
 orchestrator = deps["get_orchestrator"]()
-ResponseDecision = deps["ResponseDecision"] # Get dataclass from deps
-ResponseStrategy = deps["ResponseStrategy"] # Get enum from deps
-
 
 # ============================================================================
 # ASYNC EXECUTION HELPER
@@ -157,11 +152,11 @@ def run_async(coro):
         return asyncio.run(coro)
 
 # ============================================================================
-# QUERY HANDLER (now returns a decision object that might contain a generator)
+# QUERY HANDLER
 # ============================================================================
 
 async def handle_query(query: str) -> Dict[str, Any]:
-    """Handle user query with extensive logging and return generator for streaming"""
+    """Handle user query with extensive logging"""
     start_time = time.time()
     request_id = f"REQ_{int(start_time)}_{hash(query) % 10000}"
     
@@ -171,24 +166,26 @@ async def handle_query(query: str) -> Dict[str, Any]:
         # Get conversation history for context
         conversation_history = conversation_manager.get_turns()
         
-        # Orchestrate response - this will now return a ResponseDecision object.
-        # If the strategy is GENERATED, decision.final_response will be an AsyncGenerator.
-        # Otherwise, it will be a string (cached, fallback, error).
+        # Orchestrate response
         logger.info(f"[{request_id}] Calling orchestrator...")
         decision = await orchestrator.orchestrate_response(query, conversation_history)
         
-        # Log initial decision details (before full streaming completes if applicable)
-        logger.info(f"[{request_id}] Response Decision (initial):")
+        # Log decision details
+        logger.info(f"[{request_id}] Response Decision:")
         logger.info(f"  - Strategy: {decision.strategy_used.value}")
         logger.info(f"  - Context chars: {len(decision.context_used)}")
         logger.info(f"  - Grounding score: {decision.grounding_score:.3f}")
         logger.info(f"  - Validated: {decision.was_validated}")
         logger.info(f"  - Validation result: {decision.validation_result}")
         logger.info(f"  - Cache hit: {decision.cache_hit}")
-        logger.info(f"  - Latency (up to LLM init): {decision.latency_ms}ms")
+        logger.info(f"  - Latency: {decision.latency_ms}ms")
         
-        total_time_initial = time.time() - start_time
-        logger.info(f"[{request_id}] END Request initial processing completed in {total_time_initial:.2f}s")
+        # Update conversation history
+        conversation_manager.add_turn("user", query)
+        conversation_manager.add_turn("assistant", decision.final_response)
+        
+        total_time = time.time() - start_time
+        logger.info(f"[{request_id}] END Request completed in {total_time:.2f}s")
         
         # Get orchestrator stats for logging
         stats = orchestrator.get_stats()
@@ -196,26 +193,31 @@ async def handle_query(query: str) -> Dict[str, Any]:
         
         return {
             "success": True,
-            "decision": decision # Pass the entire decision object
+            "response": decision.final_response,
+            "strategy": decision.strategy_used.value,
+            "grounding_score": decision.grounding_score,
+            "latency_ms": decision.latency_ms,
+            "cache_hit": decision.cache_hit,
+            "validation_result": decision.validation_result
         }
         
     except Exception as e:
         logger.error(f"[{request_id}] ERROR: {e}", exc_info=True)
         
-        total_time_error = time.time() - start_time
-        logger.info(f"[{request_id}] END Request failed after {total_time_error:.2f}s")
+        total_time = time.time() - start_time
+        logger.info(f"[{request_id}] END Request failed after {total_time:.2f}s")
         
         return {
             "success": False,
             "response": "I'm sorry, I don't have any information on that. Can I assist you with something else?",
             "strategy": "error",
             "grounding_score": 0.0,
-            "latency_ms": int(total_time_error * 1000),
+            "latency_ms": int(total_time * 1000),
             "error": str(e)
         }
 
 # ============================================================================
-# SIDEBAR
+# SIDEBAR - SIMPLIFIED
 # ============================================================================
 
 with st.sidebar:
@@ -238,27 +240,24 @@ with st.sidebar:
     
     st.divider()
     
-    # Display system stats
-    st.subheader("📊 System Stats")
+    # Simplified system status
+    st.subheader("📊 System Status")
     
-    # RAG stats
+    # Essential status
     rag_stats = deps["get_index_stats"]()
     if rag_stats["index_loaded"]:
-        st.success("✅ RAG Index Loaded")
-        st.metric("Documents", rag_stats["documents"])
-        st.metric("Total Chunks", rag_stats["total_chunks"])
+        st.success("✅ Ready")
+        st.caption(f"{rag_stats['documents']} documents loaded")
     else:
-        st.error("❌ RAG Index Not Loaded")
+        st.error("❌ Index Not Loaded")
     
-    # Orchestrator stats
+    # Optional: Performance metric
     orch_stats = orchestrator.get_stats()
     if orch_stats["total_requests"] > 0:
-        st.metric("Total Requests", orch_stats["total_requests"])
-        st.metric("Cache Hit Rate", f"{orch_stats.get('cache_hit_rate', 0):.1%}")
-        st.metric("Fallback Rate", f"{orch_stats.get('fallback_rate', 0):.1%}")
+        st.caption(f"Sessions today: {orch_stats['total_requests']}")
 
 # ============================================================================
-# MAIN CHAT UI (updated for streaming)
+# MAIN CHAT UI
 # ============================================================================
 
 st.markdown("### 💬 Ask me anything about Journvax")
@@ -277,80 +276,32 @@ if query := st.chat_input("Type your question..."):
     
     # Process assistant response
     with st.chat_message("assistant"):
-        status_placeholder = st.empty()
-        status_placeholder.write("Thinking...") # Show thinking state
+        # Process query with spinner
+        with st.spinner("Thinking..."):
+            result = run_async(handle_query(query))
         
-        result = run_async(handle_query(query))
-        
+        # Handle result
         if result["success"]:
-            decision: ResponseDecision = result["decision"]
-            final_assistant_response_content = ""
-
-            if decision.strategy_used == ResponseStrategy.GENERATED and isinstance(decision.final_response, AsyncGenerator):
-                # Live generation, stream the response
-                logger.info("[UI] Streaming LLM response...")
-                full_streamed_response = st.write_stream(decision.final_response)
-                final_assistant_response_content = full_streamed_response
-                # After streaming, decision._full_generated_response_text will hold the *guarded* text
-                # and _final_validation_result will hold the actual result.
-                # Use these for history update if the orchestrator's post-stream processor has updated them.
-                # NOTE: A slight race condition might exist if these are accessed immediately after st.write_stream
-                # as the generator might still be finishing its post-processing.
-                # For safety and consistency, we ensure the orchestrator populates these fields.
-                
-                # Check if post-stream validation results are available on the decision object
-                # (This relies on the orchestrator's _post_stream_processor updating the decision object)
-                if decision._full_generated_response_text:
-                    logger.debug("[UI] Using post-stream validated text for history.")
-                    final_assistant_response_content = decision._full_generated_response_text
-                else:
-                    logger.warning("[UI] Post-stream validated text not found on decision object. Using raw streamed text for history.")
-
-            else:
-                # Cached, fallback, or error responses (non-streaming)
-                st.write(decision.final_response)
-                final_assistant_response_content = decision.final_response
+            # Display response
+            st.write(result["response"])
             
-            # Remove thinking message now that content is shown (or streamed)
-            status_placeholder.empty()
-
-            # Update conversation history with the *full* final response
-            conversation_manager.add_turn("user", query)
-            conversation_manager.add_turn("assistant", final_assistant_response_content)
-            
-            # Show performance metrics in tooltip
+            # Show minimal performance metrics
             metrics = []
-            if decision.cache_hit:
+            if result.get("cache_hit"):
                 metrics.append("📌 Cached")
-            else:
-                # For streaming, the grounding score and validation result are from post-stream
-                grounding_score_display = decision._final_grounding_score if hasattr(decision, '_final_grounding_score') and decision._final_grounding_score else decision.grounding_score
-                validation_result_display = decision._final_validation_result if hasattr(decision, '_final_validation_result') and decision._final_validation_result else decision.validation_result
-                
-                if grounding_score_display > 0 and validation_result_display == "approved":
-                    metrics.append(f"🎯 Grounding: {grounding_score_display:.2f}")
-                elif validation_result_display == "rejected":
-                     metrics.append(f"⚠️ Guard Rejected ({grounding_score_display:.2f})")
-                elif validation_result_display == "no_context":
-                     metrics.append(f"❌ No Context")
-                elif validation_result_display == "pending":
-                     metrics.append(f"⏳ Validating...") # Still validating or validation failed to update
+            elif result.get("grounding_score", 0) > 0:
+                metrics.append(f"Score: {result['grounding_score']:.2f}")
             
-            # Latency from decision object is up to LLM initiation, not full stream.
-            # The full duration is logged in orchestrator.
-            metrics.append(f"⚡ {decision.latency_ms}ms (initial)") 
+            if result.get("latency_ms"):
+                metrics.append(f"⚡ {result['latency_ms']}ms")
             
             if metrics:
                 st.caption(" | ".join(metrics))
             
-            logger.info(f"[UI] Response delivered successfully (streamed or direct)")
+            logger.info(f"[UI] Response delivered successfully")
         else:
-            # Handle error (non-streaming)
-            status_placeholder.empty() # Clear thinking message
+            # Handle error
             st.error(result["response"])
-            # The orchestrator's error path will add fallback to conversation history
-            conversation_manager.add_turn("user", query)
-            conversation_manager.add_turn("assistant", result["response"])
             logger.error(f"[UI] Response error: {result.get('error', 'Unknown')}")
 
 # Footer with instructions
