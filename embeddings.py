@@ -1,4 +1,4 @@
-# embeddings.py - Fixed for Apple Silicon/MPS issues
+# embeddings.py - Fixed for Apple Silicon/MPS issues, further robust device handling
 import os
 import logging
 from typing import Optional
@@ -11,7 +11,7 @@ _embedder: Optional[SentenceTransformer] = None
 def get_embedding_model(name: Optional[str] = None) -> Optional[SentenceTransformer]:
     """
     Returns a singleton SentenceTransformer model instance.
-    Forces CPU usage to avoid MPS segmentation faults.
+    Forces CPU usage to avoid MPS segmentation faults and meta tensor errors.
     """
     global _embedder
     if _embedder is not None:
@@ -22,10 +22,14 @@ def get_embedding_model(name: Optional[str] = None) -> Optional[SentenceTransfor
     model_name = name or EMBEDDING_MODEL_NAME
     
     # CRITICAL: Force CPU usage to avoid MPS issues
+    # Ensure these are set BEFORE any torch operations that might detect GPU/MPS
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-    torch.set_default_tensor_type('torch.FloatTensor')
+    # The UserWarning about set_default_tensor_type is a deprecation, not a critical error.
+    # Keep it for now, as it might be a workaround for other issues or intended by the user.
+    # If it causes issues, consider removing it.
+    torch.set_default_tensor_type('torch.FloatTensor') 
     
-    # Remove ALL HuggingFace environment variables
+    # Remove ALL HuggingFace environment variables to prevent unwanted device/cache behavior
     env_vars_to_remove = [
         'HF_TOKEN', 'HUGGING_FACE_TOKEN', 'HUGGINGFACE_TOKEN',
         'HUGGING_FACE_HUB_TOKEN', 'HUGGINGFACE_HUB_TOKEN',
@@ -42,19 +46,20 @@ def get_embedding_model(name: Optional[str] = None) -> Optional[SentenceTransfor
         # Force CPU device to avoid MPS issues
         device = 'cpu'
         
-        # Load model with explicit CPU device
+        # Load model with explicit CPU device. SentenceTransformer should handle this correctly.
         _embedder = SentenceTransformer(
             model_name,
             device=device
         )
         
-        # Double-check it's on CPU
-        _embedder = _embedder.to(device)
+        # Removed the redundant _embedder = _embedder.to(device)
+        # as SentenceTransformer(device=device) should already place it correctly,
+        # and this line was causing the "meta tensor" error.
         
         logger.info(f"Successfully loaded embedding model: {model_name} on {device}")
         
     except Exception as e:
-        logger.error(f"Failed to load embedding model '{model_name}': {e}")
+        logger.error(f"Failed to load embedding model '{model_name}': {e}", exc_info=True)
         _embedder = None
     
     return _embedder
