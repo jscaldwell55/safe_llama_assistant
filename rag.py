@@ -1,4 +1,4 @@
-# rag.py - Optimized RAG for 100-200 page documents
+# rag.py - Optimized RAG for 100-200 page documents with Apple Silicon fixes
 
 import os
 import pickle
@@ -7,6 +7,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import faiss
 import fitz  # PyMuPDF
 import numpy as np
+import torch
 
 from embeddings import get_embedding_model
 from semantic_chunker import SemanticChunker
@@ -32,7 +33,7 @@ class OptimizedRAGSystem:
         self._load_index()
     
     def _load_index(self):
-        """Load existing FAISS index if available"""
+        """Load existing FAISS index if available - FIXED for compatibility"""
         index_file = os.path.join(INDEX_PATH, "faiss.index")
         metadata_file = os.path.join(INDEX_PATH, "metadata.pkl")
         
@@ -41,15 +42,32 @@ class OptimizedRAGSystem:
                 self.index = faiss.read_index(index_file)
                 with open(metadata_file, "rb") as f:
                     saved_data = pickle.load(f)
-                    self.texts = saved_data["texts"]
-                    self.metadata = saved_data["metadata"]
-                    self.doc_count = saved_data.get("doc_count", 0)
+                    
+                    # Handle both old tuple format and new dict format
+                    if isinstance(saved_data, tuple):
+                        # Old format: (texts, metadata)
+                        logger.info("Loading old format index (tuple)")
+                        self.texts, self.metadata = saved_data
+                        self.doc_count = 0  # Unknown in old format
+                    elif isinstance(saved_data, dict):
+                        # New format: {"texts": ..., "metadata": ..., "doc_count": ...}
+                        logger.info("Loading new format index (dict)")
+                        self.texts = saved_data["texts"]
+                        self.metadata = saved_data["metadata"]
+                        self.doc_count = saved_data.get("doc_count", 0)
+                    else:
+                        raise ValueError(f"Unknown saved data format: {type(saved_data)}")
+                    
                     self.total_chunks = len(self.texts)
                 
                 logger.info(f"Loaded RAG index: {self.doc_count} documents, {self.total_chunks} chunks")
             except Exception as e:
                 logger.error(f"Failed to load index: {e}", exc_info=True)
                 self.index = None
+                self.texts = []
+                self.metadata = []
+                self.doc_count = 0
+                self.total_chunks = 0
         else:
             logger.warning("No existing index found. Run build_index() to create one.")
     
@@ -140,6 +158,50 @@ class OptimizedRAGSystem:
         
         return chunks
     
+    def _generate_embeddings_safe(self, chunks: List[str]) -> np.ndarray:
+        """Generate embeddings with multiple fallback strategies"""
+        logger.info(f"Generating embeddings for {len(chunks)} chunks...")
+        
+        # Try progressively smaller batch sizes
+        batch_sizes = [4, 2, 1]
+        
+        for batch_size in batch_sizes:
+            try:
+                logger.info(f"Attempting with batch_size={batch_size}")
+                
+                # Disable multiprocessing which can cause segfaults
+                torch.set_num_threads(1)
+                
+                embeddings = []
+                for i in range(0, len(chunks), batch_size):
+                    batch = chunks[i:i+batch_size]
+                    batch_embeddings = self.embedding_model.encode(
+                        batch,
+                        show_progress_bar=False,  # Disable progress bar for batch processing
+                        convert_to_tensor=False,
+                        device='cpu',
+                        normalize_embeddings=False
+                    )
+                    embeddings.append(batch_embeddings)
+                    
+                    # Log progress
+                    if i % 20 == 0:
+                        logger.info(f"Processed {i}/{len(chunks)} chunks")
+                
+                # Concatenate all embeddings
+                embeddings = np.vstack(embeddings).astype('float32')
+                logger.info(f"Successfully generated embeddings with batch_size={batch_size}")
+                return embeddings
+                
+            except Exception as e:
+                logger.error(f"Failed with batch_size={batch_size}: {e}")
+                if batch_size == 1:
+                    # If even batch_size=1 fails, we have a bigger problem
+                    raise
+                continue
+        
+        raise RuntimeError("Could not generate embeddings with any batch size")
+    
     def build_index(self, pdf_directory: str = PDF_DATA_PATH, force_rebuild: bool = False):
         """Build optimized FAISS index for 100-200 pages"""
         if self.index is not None and not force_rebuild:
@@ -184,15 +246,8 @@ class OptimizedRAGSystem:
             logger.error("No chunks created from PDFs")
             return
         
-        logger.info(f"Generating embeddings for {len(all_chunks)} chunks...")
-        
-        # Generate embeddings in batches
-        embeddings = self.embedding_model.encode(
-            all_chunks,
-            show_progress_bar=True,
-            batch_size=EMBEDDING_BATCH_SIZE,
-            convert_to_tensor=False
-        ).astype('float32')
+        # Generate embeddings using safe method
+        embeddings = self._generate_embeddings_safe(all_chunks)
         
         # Normalize for cosine similarity
         faiss.normalize_L2(embeddings)
@@ -210,7 +265,7 @@ class OptimizedRAGSystem:
         self.doc_count = len(pdf_files)
         self.total_chunks = len(all_chunks)
         
-        # Save to disk
+        # Save to disk - NEW FORMAT
         os.makedirs(INDEX_PATH, exist_ok=True)
         
         faiss.write_index(self.index, os.path.join(INDEX_PATH, "faiss.index"))
@@ -234,8 +289,12 @@ class OptimizedRAGSystem:
         try:
             logger.debug(f"Retrieving top {k} chunks for query: '{query[:50]}...'")
             
-            # Encode query
-            query_vec = self.embedding_model.encode([query]).astype('float32')
+            # Encode query with CPU device
+            query_vec = self.embedding_model.encode(
+                [query],
+                device='cpu',
+                convert_to_tensor=False
+            ).astype('float32')
             faiss.normalize_L2(query_vec)
             
             # Search
