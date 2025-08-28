@@ -21,8 +21,8 @@ except (ImportError, FileNotFoundError, AttributeError):
 # ============================================================================
 
 CLAUDE_MODEL = "claude-3-5-sonnet-20241022"
-MAX_TOKENS = 500
-TEMPERATURE = 0.3  # Lower for consistency
+MAX_TOKENS = 1000
+TEMPERATURE = 0.4  # Lower for consistency
 
 # ============================================================================
 # SAFETY THRESHOLDS - CORRECTED FOR PRODUCTION
