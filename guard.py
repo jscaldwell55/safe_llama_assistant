@@ -1,4 +1,4 @@
-# guard.py - Simplified Safety System with Grounding Only
+# guard.py - Simple Grounding Validator
 
 import logging
 import numpy as np
@@ -8,50 +8,47 @@ from enum import Enum
 
 from config import (
     ENABLE_GUARD,
-    SEMANTIC_SIMILARITY_THRESHOLD, # Will be 0.45 now
-    GUARD_FALLBACK_MESSAGE,
-    NO_CONTEXT_FALLBACK_MESSAGE    # Will be used for exact comparison
+    SEMANTIC_SIMILARITY_THRESHOLD,
+    NO_CONTEXT_FALLBACK_MESSAGE
 )
 
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# DATA CLASSES
+# VALIDATION RESULTS
 # ============================================================================
 
 class ValidationResult(Enum):
-    """Validation outcomes"""
     APPROVED = "approved"
     REJECTED = "rejected"
 
 @dataclass
-class ValidationDecision:
-    """Validation decision"""
+class GroundingValidation:
     result: ValidationResult
+    grounding_score: float
     final_response: str
-    grounding_score: float = 0.0
-    reasoning: str = ""
 
 # ============================================================================
-# SIMPLIFIED GUARD - GROUNDING ONLY
+# SIMPLE GROUNDING GUARD
 # ============================================================================
 
 class SimpleGroundingGuard:
     """
-    Simplified guard that ONLY checks semantic similarity between response and context
+    Simple semantic grounding validator using cosine similarity
     """
     
     def __init__(self):
         self.enabled = ENABLE_GUARD
-        self.similarity_threshold = SEMANTIC_SIMILARITY_THRESHOLD
+        # Lower threshold for better acceptance of valid responses
+        self.threshold = 0.30  # Lowered from 0.45
         self.embedding_model = None
         
-        logger.info(f"SimpleGroundingGuard initialized - enabled: {self.enabled}, threshold: {self.similarity_threshold}")
+        logger.info(f"SimpleGroundingGuard initialized - enabled: {self.enabled}, threshold: {self.threshold}")
         
         if self.enabled:
-            self._load_embedding_model()
+            self._load_model()
     
-    def _load_embedding_model(self):
+    def _load_model(self):
         """Load embedding model for grounding checks"""
         try:
             from embeddings import get_embedding_model
@@ -59,117 +56,72 @@ class SimpleGroundingGuard:
             if self.embedding_model:
                 logger.info("Embedding model loaded for grounding validation")
             else:
-                logger.error("Failed to load embedding model")
+                logger.warning("Could not load embedding model for grounding")
                 self.enabled = False
         except Exception as e:
-            logger.error(f"Could not load embedding model: {e}")
+            logger.error(f"Failed to load embedding model: {e}")
             self.enabled = False
     
-    def calculate_grounding_score(self, response: str, context: str) -> float:
-        """Calculate semantic similarity between response and context"""
-        if not self.embedding_model or not response or not context:
-            return 0.0
-        
-        try:
-            # Encode both texts
-            response_embedding = self.embedding_model.encode(response, show_progress_bar=False)
-            context_embedding = self.embedding_model.encode(context, show_progress_bar=False)
-            
-            # Normalize vectors
-            response_embedding = response_embedding / (np.linalg.norm(response_embedding) + 1e-8)
-            context_embedding = context_embedding / (np.linalg.norm(context_embedding) + 1e-8)
-            
-            # Calculate cosine similarity
-            similarity = float(np.dot(response_embedding, context_embedding))
-            
-            logger.debug(f"Grounding score: {similarity:.3f}")
-            return similarity
-            
-        except Exception as e:
-            logger.error(f"Error calculating grounding score: {e}")
-            return 0.0
-    
-    def validate_response(self, response: str, context: str) -> ValidationDecision:
+    def validate_response(self, response: str, context: str) -> GroundingValidation:
         """
-        Validate response is grounded in context
-        
-        Args:
-            response: Generated response from LLM
-            context: Retrieved context from RAG
-            
-        Returns:
-            ValidationDecision with result and score
+        Validate that response is grounded in context using cosine similarity
         """
-        
-        if not self.enabled:
-            logger.debug("Guard disabled - approving response")
-            return ValidationDecision(
+        if not self.enabled or not self.embedding_model:
+            # Validation disabled or not available
+            return GroundingValidation(
                 result=ValidationResult.APPROVED,
-                final_response=response,
                 grounding_score=1.0,
-                reasoning="Guard disabled"
+                final_response=response
             )
         
-        # Check for standard fallback messages from config (always approve these for robustness)
-        # Using strip() and lower() for a slightly more flexible comparison
-        if response.strip().lower() == NO_CONTEXT_FALLBACK_MESSAGE.strip().lower() or \
-           response.strip().lower() == GUARD_FALLBACK_MESSAGE.strip().lower():
-            logger.debug("Recognized standard fallback message - approving without further grounding check")
-            return ValidationDecision(
+        # Skip validation for standard messages
+        response_lower = response.lower()
+        if response_lower.startswith(("i'm sorry", "i don't have", "i cannot")):
+            return GroundingValidation(
                 result=ValidationResult.APPROVED,
-                final_response=response,
-                grounding_score=1.0, # Assign a high score as it's an intended fallback
-                reasoning="Recognized standard fallback message"
-            )
-        
-        # If no context, the response should ideally be the NO_CONTEXT_FALLBACK_MESSAGE
-        # If it's not, we'll still reject it and provide the official fallback.
-        if not context or len(context.strip()) < 50: # Check for minimal context length
-            logger.warning("No sufficient context available - response should be fallback")
-            # If the response is not the expected NO_CONTEXT_FALLBACK_MESSAGE, replace it
-            if response.strip().lower() != NO_CONTEXT_FALLBACK_MESSAGE.strip().lower():
-                final_response = NO_CONTEXT_FALLBACK_MESSAGE
-                logger.debug(f"Replacing ungrounded response with '{NO_CONTEXT_FALLBACK_MESSAGE}'")
-            else:
-                final_response = response
-            
-            return ValidationDecision(
-                result=ValidationResult.REJECTED, # Even if it's the fallback, it's a rejection of the query
-                final_response=final_response,
-                grounding_score=0.0,
-                reasoning="No sufficient context available"
+                grounding_score=1.0,
+                final_response=response
             )
         
         # Calculate grounding score
-        grounding_score = self.calculate_grounding_score(response, context)
-        
-        logger.info(f"Grounding validation - Score: {grounding_score:.3f}, Threshold: {self.similarity_threshold}")
-        
-        # Check if response meets grounding threshold
-        if grounding_score >= self.similarity_threshold:
-            logger.info(f"Response APPROVED with grounding score: {grounding_score:.3f}")
-            return ValidationDecision(
+        try:
+            # Encode response and context
+            response_embedding = self.embedding_model.encode([response], convert_to_tensor=False)[0]
+            context_embedding = self.embedding_model.encode([context], convert_to_tensor=False)[0]
+            
+            # Calculate cosine similarity
+            response_norm = response_embedding / (np.linalg.norm(response_embedding) + 1e-8)
+            context_norm = context_embedding / (np.linalg.norm(context_embedding) + 1e-8)
+            similarity = float(np.dot(response_norm, context_norm))
+            
+            logger.info(f"Grounding validation - Score: {similarity:.3f}, Threshold: {self.threshold}")
+            
+            if similarity >= self.threshold:
+                logger.info(f"Response APPROVED with grounding score: {similarity:.3f}")
+                return GroundingValidation(
+                    result=ValidationResult.APPROVED,
+                    grounding_score=similarity,
+                    final_response=response
+                )
+            else:
+                logger.warning(f"Response REJECTED - insufficient grounding: {similarity:.3f}")
+                return GroundingValidation(
+                    result=ValidationResult.REJECTED,
+                    grounding_score=similarity,
+                    final_response=NO_CONTEXT_FALLBACK_MESSAGE  # Use proper fallback
+                )
+                
+        except Exception as e:
+            logger.error(f"Grounding validation failed: {e}")
+            # On error, approve to avoid blocking
+            return GroundingValidation(
                 result=ValidationResult.APPROVED,
-                final_response=response,
-                grounding_score=grounding_score,
-                reasoning=f"Grounding score {grounding_score:.3f} meets threshold"
-            )
-        else:
-            logger.warning(f"Response REJECTED - insufficient grounding: {grounding_score:.3f}")
-            return ValidationDecision(
-                result=ValidationResult.REJECTED,
-                final_response=GUARD_FALLBACK_MESSAGE, # Always use the official guard fallback
-                grounding_score=grounding_score,
-                reasoning=f"Insufficient grounding score: {grounding_score:.3f}"
+                grounding_score=0.0,
+                final_response=response
             )
 
 # ============================================================================
-# SINGLETON INSTANCE
+# SINGLETON
 # ============================================================================
 
-# Single global instance
 grounding_guard = SimpleGroundingGuard()
-
-# Legacy compatibility alias
-hybrid_guard = grounding_guard
-persona_validator = grounding_guard

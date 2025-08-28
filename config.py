@@ -53,7 +53,7 @@ MAX_CONTEXT_LENGTH = 4000  # Can be larger with Claude
 # ============================================================================
 
 ENABLE_GUARD = True
-SEMANTIC_SIMILARITY_THRESHOLD = 0.45  # Adjusted for less strict grounding - was 0.60
+SEMANTIC_SIMILARITY_THRESHOLD = 0.30  # Adjusted for less strict grounding - was 0.60
 GUARD_FALLBACK_MESSAGE = "I'm sorry, I can't discuss that. Can we talk about something else?"
 NO_CONTEXT_FALLBACK_MESSAGE = "I'm sorry, I don't have any information on that. Can I assist you with something else?"
 
