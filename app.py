@@ -304,14 +304,4 @@ if query := st.chat_input("Type your question..."):
             st.error(result["response"])
             logger.error(f"[UI] Response error: {result.get('error', 'Unknown')}")
 
-# Footer with instructions
-with st.expander("ℹ️ How to use"):
-    st.markdown("""
-    - **Ask questions** about Journvax medication, dosage, side effects, interactions, etc.
-    - **New Conversation** clears the chat history to start fresh
-    - **Clear Cache** removes cached responses to force fresh generation
-    - The assistant only provides information from uploaded documentation
-    - If information isn't available, you'll receive a polite fallback message
-    """)
-
 logger.info("[UI] Page render complete")
