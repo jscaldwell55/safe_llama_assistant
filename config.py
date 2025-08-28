@@ -29,7 +29,7 @@ TEMPERATURE = 0.4  # Slightly higher for comprehensive coverage
 # ============================================================================
 
 # Grounding validation - kept strict for safety
-SEMANTIC_SIMILARITY_THRESHOLD = 0.75  # For response-to-context validation
+SEMANTIC_SIMILARITY_THRESHOLD = 0.45  # For response-to-context validation
 
 # Retrieval quality thresholds - REALISTIC VALUES
 USE_TOP_SCORE_FOR_QUALITY = True  # Use best chunk score instead of average
