@@ -13,7 +13,9 @@ from config import (
     NO_CONTEXT_FALLBACK_MESSAGE,
     PERSONAL_MEDICAL_ADVICE_MESSAGE,
     LOG_SLOW_REQUESTS_THRESHOLD_MS,
-    MIN_RETRIEVAL_SCORE
+    MIN_RETRIEVAL_SCORE,
+    USE_TOP_SCORE_FOR_QUALITY,  # Add this
+    MIN_TOP_SCORE  # Add this
 )
 
 logger = logging.getLogger(__name__)
@@ -163,16 +165,30 @@ class SafeOrchestrator:
             
             # Check retrieval quality
             if results:
-                avg_score = sum(r["score"] for r in results) / len(results)
-                if avg_score < MIN_RETRIEVAL_SCORE:
-                    logger.warning(f"[Request #{self.total_requests}] Poor retrieval quality: {avg_score:.3f} < {MIN_RETRIEVAL_SCORE}")
-                    self.fallback_count += 1
-                    return ResponseDecision(
-                        final_response=NO_CONTEXT_FALLBACK_MESSAGE,
-                        strategy_used=ResponseStrategy.FALLBACK,
-                        latency_ms=int((time.time() - start_time) * 1000),
-                        validation_result="poor_retrieval"
-                    )
+                if USE_TOP_SCORE_FOR_QUALITY:
+                    # Use the best chunk's score
+                    top_score = results[0]["score"] if results else 0
+                    if top_score < MIN_TOP_SCORE:
+                        logger.warning(f"[Request #{self.total_requests}] Poor retrieval quality: top score {top_score:.3f} < {MIN_TOP_SCORE}")
+                        self.fallback_count += 1
+                        return ResponseDecision(
+                            final_response=NO_CONTEXT_FALLBACK_MESSAGE,
+                            strategy_used=ResponseStrategy.FALLBACK,
+                            latency_ms=int((time.time() - start_time) * 1000),
+                            validation_result="poor_retrieval"
+                        )
+                else:
+                    # Use average score
+                    avg_score = sum(r["score"] for r in results) / len(results)
+                    if avg_score < MIN_RETRIEVAL_SCORE:
+                        logger.warning(f"[Request #{self.total_requests}] Poor retrieval quality: {avg_score:.3f} < {MIN_RETRIEVAL_SCORE}")
+                        self.fallback_count += 1
+                        return ResponseDecision(
+                            final_response=NO_CONTEXT_FALLBACK_MESSAGE,
+                            strategy_used=ResponseStrategy.FALLBACK,
+                            latency_ms=int((time.time() - start_time) * 1000),
+                            validation_result="poor_retrieval"
+                        )
             
             # Format context
             context = retrieve_and_format_context(query)

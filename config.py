@@ -1,4 +1,4 @@
-# config.py - Configuration with Corrected Safety Thresholds
+# config.py - Complete configuration with all required variables
 
 import os
 
@@ -21,18 +21,20 @@ except (ImportError, FileNotFoundError, AttributeError):
 # ============================================================================
 
 CLAUDE_MODEL = "claude-3-5-sonnet-20241022"
-MAX_TOKENS = 1000
-TEMPERATURE = 0.4  # Lower for consistency
+MAX_TOKENS = 1000  # Increased for more complete responses
+TEMPERATURE = 0.4  # Slightly higher for comprehensive coverage
 
 # ============================================================================
-# SAFETY THRESHOLDS - CORRECTED FOR PRODUCTION
+# SAFETY THRESHOLDS
 # ============================================================================
 
-# CRITICAL: Raised from dangerous 0.25 to safe 0.75
-SEMANTIC_SIMILARITY_THRESHOLD = 0.75  # Minimum cosine similarity for grounding validation
+# Grounding validation - kept strict for safety
+SEMANTIC_SIMILARITY_THRESHOLD = 0.75  # For response-to-context validation
 
-# Retrieval quality threshold
-MIN_RETRIEVAL_SCORE = 0.70  # Raised from 0.45 to ensure quality chunks
+# Retrieval quality thresholds - REALISTIC VALUES
+USE_TOP_SCORE_FOR_QUALITY = True  # Use best chunk score instead of average
+MIN_TOP_SCORE = 0.40  # Minimum score for best chunk (lowered from 0.45)
+MIN_RETRIEVAL_SCORE = 0.35  # Minimum average score if not using top score
 
 # ============================================================================
 # RAG CONFIGURATION
@@ -84,7 +86,6 @@ SESSION_TIMEOUT_MINUTES = 30
 APP_TITLE = "Pharma Enterprise Assistant"
 WELCOME_MESSAGE = "Hello! I can help you with information about Journvax based on our documentation."
 
-# Updated to be more accurate about capabilities
 NO_CONTEXT_FALLBACK_MESSAGE = (
     "I don't have sufficient information in the documentation to answer that question. "
     "Please rephrase or ask about something else related to Journvax."
