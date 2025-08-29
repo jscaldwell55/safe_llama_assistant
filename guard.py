@@ -62,7 +62,7 @@ class QueryValidator:
         'overdose', 'overdosing', 'OD',
         'poisoned', 'poison',
         'heart attack', 'stroke',
-        'seizure', 'seizing',
+        'seizure', 'seizing', 'suicide' , 'kill myself',
         'bleeding out', 'severe bleeding',
         'can\'t breathe', 'cannot breathe',
         'anaphylaxis', 'allergic reaction'
@@ -103,55 +103,59 @@ class QueryValidator:
         """Check if query is asking for personal medical advice"""
         query_lower = query.lower()
         
-      
-        
-        # Allow general interaction/safety questions
-        interaction_terms = [
-            'interaction', 'interact with', 
-            'mixing', 'combine', 'together with',
-            'alcohol', 'other medication', 'other drugs',
-            'food', 'grapefruit', 'caffeine'
+        # FIRST check if it's a general information query (these are OK)
+        general_info_indicators = [
+            'what is the standard',
+            'what are the side effects',
+            'what are the warnings',
+            'how is it stored',
+            'what is the mechanism',
+            'clinical trials show',
+            'studies indicate',
+            'fda approval',
+            'general population',
+            'typically prescribed'
         ]
         
-        if any(term in query_lower for term in interaction_terms):
-            logger.debug(f"Interaction query allowed: '{query[:50]}...'")
-            return False  # Let it through to check documentation
+        # If it's clearly asking for general information, allow it
+        for indicator in general_info_indicators:
+            if indicator in query_lower:
+                return False  # Not personal medical advice
         
-        # Allow general safety/usage questions
-        general_terms = [
-            'what is the dose',
-            'how often',
-            'how to take',
-            'side effects',
-            'warnings',
-            'contraindications',
-            'is it safe for pregnant',  # General population questions
-            'is it safe for elderly',
-            'is it safe for children'
-        ]
-        
-        if any(term in query_lower for term in general_terms):
-            return False
-        
-        # Check for truly personal medical advice
+        # Check for personal medical advice patterns
         personal_medical_phrases = [
             'should i take',
             'can i take',
-            'i should take',
+            'is it safe for me',
             'my condition',
-            'my symptoms', 
+            'my symptoms',
             'my disease',
             'i have been diagnosed',
             'my doctor',
             'in my case',
             'for me personally',
-            'my medical history'
+            'my medical history',
+            'i am taking',
+            'i take',
+            'my medication',
+            'my grandmother',
+            'my child',
+            'my mother',
+            'my father'
         ]
         
-        if any(phrase in query_lower for phrase in personal_medical_phrases):
-            logger.warning(f"Personal medical advice query detected: '{query[:50]}...'")
-            return True
-            
+        # Check for personal medical advice
+        for phrase in personal_medical_phrases:
+            if phrase in query_lower:
+                # Check for interaction queries specifically
+                if any(term in query_lower for term in ['interact', 'mix', 'combine', 'together', 'alcohol']):
+                    # Even interaction questions with "my" or "I" are personal medical advice
+                    logger.warning(f"Personal medical advice (interaction) detected: '{query[:50]}...'")
+                    return True
+                else:
+                    logger.warning(f"Personal medical advice detected: '{query[:50]}...'")
+                    return True
+        
         return False
     
     @staticmethod
