@@ -48,3 +48,5 @@ python-dotenv>=1.0.0               # Environment variables
 # - Numpy version pinned <2.0.0 for compatibility
 # - Pinecone handles vector indexing in the cloud (no local storage)
 # - Supports serverless scaling and concurrent queries
+
+
