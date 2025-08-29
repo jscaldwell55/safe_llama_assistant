@@ -1,4 +1,4 @@
-# conversational_agent.py - Response Orchestrator (Simplified - No Query Pre-screening)
+# conversational_agent.py - Response Orchestrator with Crisis Detection
 
 import logging
 import time
@@ -27,6 +27,7 @@ class ResponseStrategy(Enum):
     GENERATED = "generated"
     CACHED = "cached"
     FALLBACK = "fallback"
+    CRISIS = "crisis"  # Added for crisis responses
     ERROR = "error"
 
 @dataclass
@@ -40,6 +41,7 @@ class ResponseDecision:
     was_validated: bool = False
     validation_result: str = ""
     cache_hit: bool = False
+    crisis_detected: bool = False  # Track if crisis was detected
 
 # ============================================================================
 # RESPONSE CACHE
@@ -89,18 +91,19 @@ class ResponseCache:
         return self.hits / total if total > 0 else 0.0
 
 # ============================================================================
-# SIMPLIFIED ORCHESTRATOR
+# ORCHESTRATOR WITH CRISIS DETECTION
 # ============================================================================
 
 class SafeOrchestrator:
     """
-    Simplified orchestrator without query pre-screening
+    Orchestrator with crisis detection as first priority
     """
     
     def __init__(self):
         self.cache = ResponseCache() if ENABLE_RESPONSE_CACHE else None
         self.total_requests = 0
         self.fallback_count = 0
+        self.crisis_count = 0  # Track crisis detections
         
         logger.info(f"SafeOrchestrator initialized (cache: {ENABLE_RESPONSE_CACHE})")
     
@@ -110,7 +113,7 @@ class SafeOrchestrator:
         conversation_history: List[Dict[str, str]] = None
     ) -> ResponseDecision:
         """
-        Main orchestration without query pre-screening
+        Main orchestration with crisis detection as first check
         """
         start_time = time.time()
         self.total_requests += 1
@@ -118,7 +121,25 @@ class SafeOrchestrator:
         logger.info(f"[Request #{self.total_requests}] Processing: '{query[:50]}...'")
         
         try:
-            # Step 1: Check cache
+            # Step 1: CRITICAL - Check for crisis/self-harm first
+            from guard import QueryValidator
+            is_crisis, crisis_message = QueryValidator.validate_query(query)
+            
+            if is_crisis:
+                self.crisis_count += 1
+                latency = int((time.time() - start_time) * 1000)
+                
+                logger.critical(f"[Request #{self.total_requests}] CRISIS DETECTED - Returning crisis response")
+                
+                return ResponseDecision(
+                    final_response=crisis_message,
+                    strategy_used=ResponseStrategy.CRISIS,
+                    latency_ms=latency,
+                    validation_result="crisis_detected",
+                    crisis_detected=True
+                )
+            
+            # Step 2: Check cache (only for non-crisis queries)
             cache_key = None
             if self.cache:
                 cache_key = self.cache.get_key(query)
@@ -133,7 +154,7 @@ class SafeOrchestrator:
                         latency_ms=latency
                     )
             
-            # Step 2: Retrieve context from RAG
+            # Step 3: Retrieve context from RAG
             logger.info(f"[Request #{self.total_requests}] Retrieving context...")
             rag_start = time.time()
             
@@ -176,7 +197,7 @@ class SafeOrchestrator:
             rag_latency = int((time.time() - rag_start) * 1000)
             logger.info(f"[Request #{self.total_requests}] RAG completed in {rag_latency}ms - {len(context)} chars")
             
-            # Step 3: Generate response
+            # Step 4: Generate response
             if not context or len(context) < 50:
                 logger.info(f"[Request #{self.total_requests}] No context - using fallback")
                 self.fallback_count += 1
@@ -196,7 +217,7 @@ class SafeOrchestrator:
             gen_latency = int((time.time() - gen_start) * 1000)
             logger.info(f"[Request #{self.total_requests}] Generation completed in {gen_latency}ms")
             
-            # Step 4: Validate grounding
+            # Step 5: Validate grounding
             logger.info(f"[Request #{self.total_requests}] Validating grounding...")
             val_start = time.time()
             
@@ -250,7 +271,9 @@ class SafeOrchestrator:
         stats = {
             "total_requests": self.total_requests,
             "fallback_count": self.fallback_count,
-            "fallback_rate": self.fallback_count / self.total_requests if self.total_requests > 0 else 0
+            "crisis_count": self.crisis_count,
+            "fallback_rate": self.fallback_count / self.total_requests if self.total_requests > 0 else 0,
+            "crisis_rate": self.crisis_count / self.total_requests if self.total_requests > 0 else 0
         }
         
         if self.cache:
@@ -284,4 +307,5 @@ def reset_orchestrator():
         orchestrator.cache.clear()
     orchestrator.total_requests = 0
     orchestrator.fallback_count = 0
+    orchestrator.crisis_count = 0
     logger.info("Orchestrator state reset")

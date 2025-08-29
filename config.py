@@ -39,16 +39,16 @@ MAX_TOKENS = 1000  # Increased for more complete responses
 TEMPERATURE = 0.4  # Slightly higher for comprehensive coverage
 
 # ============================================================================
-# SAFETY THRESHOLDS - PRODUCTION VALUES
+# SAFETY THRESHOLDS - BALANCED FOR PRODUCTION
 # ============================================================================
 
-# Grounding validation - production-safe thresholds
-SEMANTIC_SIMILARITY_THRESHOLD = 0.65  # FIXED: Was 0.45, now matches README claim
+# Grounding validation - ensures response matches context
+SEMANTIC_SIMILARITY_THRESHOLD = 0.65  # Balanced for safety vs usability
 
-# Retrieval quality thresholds - PRODUCTION VALUES
+# Retrieval quality thresholds - ADJUSTED FOR all-MiniLM-L6-v2 MODEL
 USE_TOP_SCORE_FOR_QUALITY = True  # Use best chunk score instead of average
-MIN_TOP_SCORE = 0.45  # FIXED: Was 0.40, now production-ready
-MIN_RETRIEVAL_SCORE = 0.35  # FIXED: Was 0.35, now production-ready
+MIN_TOP_SCORE = 0.45  # Realistic for this embedding model
+MIN_RETRIEVAL_SCORE = 0.35  # Backup threshold if not using top score
 
 # ============================================================================
 # RAG CONFIGURATION
@@ -71,10 +71,9 @@ INDEX_PATH = "faiss_index"
 # GUARD CONFIGURATION
 # ============================================================================
 
-ENABLE_GUARD = True
+ENABLE_GUARD = True  # Enables grounding validation and crisis detection
 USE_LLM_GUARD = False
 LLM_CONFIDENCE_THRESHOLD = 0.8
-
 
 # ============================================================================
 # CACHING
@@ -99,10 +98,15 @@ WELCOME_MESSAGE = "Hello! I can help you with information about Journvax based o
 
 NO_CONTEXT_FALLBACK_MESSAGE = (
     "I don't have sufficient information in the documentation to answer that question. "
-    "If this is an emergency or you need immediate medical care, please call 911"
+    "Please rephrase or ask about something else related to Journvax."
 )
 
-
+# Crisis/Self-harm response message
+CRISIS_RESPONSE_MESSAGE = (
+    "I'm really concerned by what you've shared. I cannot provide that kind of help, "
+    "but if you are thinking about harming yourself, please call 911 right now. "
+    "You can also dial 988 to connect with the Suicide & Crisis Lifeline."
+)
 
 # ============================================================================
 # LOGGING
