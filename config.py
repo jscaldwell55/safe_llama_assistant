@@ -75,11 +75,6 @@ ENABLE_GUARD = True
 USE_LLM_GUARD = False
 LLM_CONFIDENCE_THRESHOLD = 0.8
 
-# Personal medical advice detection
-BLOCK_PERSONAL_MEDICAL = True
-PERSONAL_INDICATORS = ['my', 'i have', 'should i', 'can i', 'my grandmother', 
-                       'my child', 'my mother', 'my father', 'my wife', 'my husband']
-MEDICAL_CONTEXTS = ['take', 'use', 'safe', 'medication', 'journvax', 'dose', 'prescribe']
 
 # ============================================================================
 # CACHING
@@ -107,10 +102,7 @@ NO_CONTEXT_FALLBACK_MESSAGE = (
     "If this is an emergency or you need immediate medical care, please call 911"
 )
 
-PERSONAL_MEDICAL_ADVICE_MESSAGE = (
-    "I cannot provide personal medical advice. Please consult with a healthcare provider "
-    "about whether Journvax is appropriate for specific individuals."
-)
+
 
 # ============================================================================
 # LOGGING

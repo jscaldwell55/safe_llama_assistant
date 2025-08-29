@@ -1,4 +1,4 @@
-# conversational_agent.py - Response Orchestrator with Query Pre-screening
+# conversational_agent.py - Response Orchestrator (Simplified - No Query Pre-screening)
 
 import logging
 import time
@@ -11,7 +11,6 @@ from config import (
     ENABLE_RESPONSE_CACHE,
     MAX_CACHE_SIZE,
     NO_CONTEXT_FALLBACK_MESSAGE,
-    PERSONAL_MEDICAL_ADVICE_MESSAGE,
     LOG_SLOW_REQUESTS_THRESHOLD_MS,
     MIN_RETRIEVAL_SCORE,
     USE_TOP_SCORE_FOR_QUALITY,
@@ -28,7 +27,6 @@ class ResponseStrategy(Enum):
     GENERATED = "generated"
     CACHED = "cached"
     FALLBACK = "fallback"
-    BLOCKED = "blocked"
     ERROR = "error"
 
 @dataclass
@@ -42,7 +40,6 @@ class ResponseDecision:
     was_validated: bool = False
     validation_result: str = ""
     cache_hit: bool = False
-    blocked_reason: str = ""
 
 # ============================================================================
 # RESPONSE CACHE
@@ -92,19 +89,18 @@ class ResponseCache:
         return self.hits / total if total > 0 else 0.0
 
 # ============================================================================
-# ORCHESTRATOR WITH PRE-SCREENING
+# SIMPLIFIED ORCHESTRATOR
 # ============================================================================
 
 class SafeOrchestrator:
     """
-    Production orchestrator with query pre-screening and safe thresholds
+    Simplified orchestrator without query pre-screening
     """
     
     def __init__(self):
         self.cache = ResponseCache() if ENABLE_RESPONSE_CACHE else None
         self.total_requests = 0
         self.fallback_count = 0
-        self.blocked_count = 0
         
         logger.info(f"SafeOrchestrator initialized (cache: {ENABLE_RESPONSE_CACHE})")
     
@@ -114,7 +110,7 @@ class SafeOrchestrator:
         conversation_history: List[Dict[str, str]] = None
     ) -> ResponseDecision:
         """
-        Main orchestration with query pre-screening
+        Main orchestration without query pre-screening
         """
         start_time = time.time()
         self.total_requests += 1
@@ -122,35 +118,7 @@ class SafeOrchestrator:
         logger.info(f"[Request #{self.total_requests}] Processing: '{query[:50]}...'")
         
         try:
-            # Step 1: Pre-screen query for emergencies and personal medical advice
-            from guard import QueryValidator
-            
-            # Call validate_query as a static method directly on the class
-            is_blocked, block_message = QueryValidator.validate_query(query)
-            
-            if is_blocked:
-                self.blocked_count += 1
-                latency = int((time.time() - start_time) * 1000)
-                
-                # Determine block reason
-                if "emergency" in block_message.lower() or "911" in block_message:
-                    block_reason = "emergency"
-                    validation_result = "blocked_emergency"
-                else:
-                    block_reason = "personal_medical_advice"
-                    validation_result = "blocked_personal_medical"
-                
-                logger.info(f"[Request #{self.total_requests}] Query blocked - {block_reason}")
-                
-                return ResponseDecision(
-                    final_response=block_message,
-                    strategy_used=ResponseStrategy.BLOCKED,
-                    latency_ms=latency,
-                    validation_result=validation_result,
-                    blocked_reason=block_reason
-                )
-            
-            # Step 2: Check cache
+            # Step 1: Check cache
             cache_key = None
             if self.cache:
                 cache_key = self.cache.get_key(query)
@@ -165,7 +133,7 @@ class SafeOrchestrator:
                         latency_ms=latency
                     )
             
-            # Step 3: Retrieve context from RAG
+            # Step 2: Retrieve context from RAG
             logger.info(f"[Request #{self.total_requests}] Retrieving context...")
             rag_start = time.time()
             
@@ -208,7 +176,7 @@ class SafeOrchestrator:
             rag_latency = int((time.time() - rag_start) * 1000)
             logger.info(f"[Request #{self.total_requests}] RAG completed in {rag_latency}ms - {len(context)} chars")
             
-            # Step 4: Generate response
+            # Step 3: Generate response
             if not context or len(context) < 50:
                 logger.info(f"[Request #{self.total_requests}] No context - using fallback")
                 self.fallback_count += 1
@@ -228,7 +196,7 @@ class SafeOrchestrator:
             gen_latency = int((time.time() - gen_start) * 1000)
             logger.info(f"[Request #{self.total_requests}] Generation completed in {gen_latency}ms")
             
-            # Step 5: Validate grounding
+            # Step 4: Validate grounding
             logger.info(f"[Request #{self.total_requests}] Validating grounding...")
             val_start = time.time()
             
@@ -282,9 +250,7 @@ class SafeOrchestrator:
         stats = {
             "total_requests": self.total_requests,
             "fallback_count": self.fallback_count,
-            "blocked_count": self.blocked_count,
-            "fallback_rate": self.fallback_count / self.total_requests if self.total_requests > 0 else 0,
-            "blocked_rate": self.blocked_count / self.total_requests if self.total_requests > 0 else 0
+            "fallback_rate": self.fallback_count / self.total_requests if self.total_requests > 0 else 0
         }
         
         if self.cache:
@@ -318,5 +284,4 @@ def reset_orchestrator():
         orchestrator.cache.clear()
     orchestrator.total_requests = 0
     orchestrator.fallback_count = 0
-    orchestrator.blocked_count = 0
     logger.info("Orchestrator state reset")
