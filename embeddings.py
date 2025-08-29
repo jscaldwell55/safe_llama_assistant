@@ -24,10 +24,9 @@ def get_embedding_model(name: Optional[str] = None) -> Optional[SentenceTransfor
     # CRITICAL: Force CPU usage to avoid MPS issues
     # Ensure these are set BEFORE any torch operations that might detect GPU/MPS
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-    # The UserWarning about set_default_tensor_type is a deprecation, not a critical error.
-    # Keep it for now, as it might be a workaround for other issues or intended by the user.
-    # If it causes issues, consider removing it.
-    torch.set_default_tensor_type('torch.FloatTensor') 
+    
+    # REMOVED deprecated torch.set_default_tensor_type() call
+    # This is no longer needed and causes warnings in PyTorch 2.0+
     
     # Remove ALL HuggingFace environment variables to prevent unwanted device/cache behavior
     env_vars_to_remove = [
@@ -46,15 +45,18 @@ def get_embedding_model(name: Optional[str] = None) -> Optional[SentenceTransfor
         # Force CPU device to avoid MPS issues
         device = 'cpu'
         
-        # Load model with explicit CPU device. SentenceTransformer should handle this correctly.
+        # Set default dtype for CPU operations if needed
+        if torch.cuda.is_available():
+            torch.cuda.is_available = lambda: False  # Force CPU even if CUDA available
+        
+        # Load model with explicit CPU device
         _embedder = SentenceTransformer(
             model_name,
             device=device
         )
         
-        # Removed the redundant _embedder = _embedder.to(device)
-        # as SentenceTransformer(device=device) should already place it correctly,
-        # and this line was causing the "meta tensor" error.
+        # Ensure model is on CPU (redundant but safe)
+        _embedder = _embedder.cpu()
         
         logger.info(f"Successfully loaded embedding model: {model_name} on {device}")
         

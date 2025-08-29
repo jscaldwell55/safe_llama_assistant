@@ -2,6 +2,12 @@
 
 A document-grounded pharmaceutical information system that ensures all responses are strictly derived from source documentation, preventing hallucination through mathematical validation. Now powered by **Pinecone cloud vector database** for enterprise-scale deployment.
 
+## 🚀 Current Status
+- ✅ **System Operational**: 485 vectors indexed from 4 PDF documents
+- ✅ **Pinecone Index Active**: Cloud-based vector search ready
+- ✅ **Production Thresholds Set**: 0.75 grounding validation, 0.70 retrieval quality
+- ⚠️ **Anthropic API Key Required**: Set before running the application
+
 ## Purpose
 This system demonstrates safe AI deployment in regulated pharmaceutical environments by enforcing strict document grounding through dual-layer validation. The system transforms static PDF drug documentation into an intelligent Q&A interface while maintaining regulatory compliance and preventing the generation of unsupported medical claims.
 
@@ -17,6 +23,7 @@ This system demonstrates safe AI deployment in regulated pharmaceutical environm
    - Global distribution for low-latency access
    - Hybrid semantic chunking strategy (sections + paragraphs)
    - Metadata-enriched vectors for filtered search
+   - **Current Index**: 485 chunks across 4 documents
 
 2. **LLM Integration**: Claude 3.5 Sonnet with enforced system prompts
    - Strict document grounding requirements
@@ -25,8 +32,9 @@ This system demonstrates safe AI deployment in regulated pharmaceutical environm
 
 3. **Validation Layer**: Dual validation system
    - Query pre-screening for personal medical advice
-   - Response grounding validation (0.75 cosine similarity threshold)
+   - Response grounding validation (**0.75** cosine similarity threshold)
    - Mathematical verification of content alignment
+   - Retrieval quality threshold (**0.70** minimum score)
 
 4. **Cache System**: LRU cache for validated responses
    - 100-response capacity
@@ -62,41 +70,6 @@ graph TD
     N --> O[Return to User]
 ```
 
-## Pinecone Integration
-
-### Cloud Infrastructure
-- **Serverless Deployment**: No infrastructure management
-- **Auto-scaling**: Handles 1-10,000+ QPS automatically
-- **Multi-region**: Deploy close to users for low latency
-- **High Availability**: 99.9% uptime SLA
-
-### Semantic Chunking Strategy
-```python
-{
-    "strategy": "hybrid",
-    "chunk_size": 700,
-    "overlap": 200,
-    "methods": [
-        "section_detection",    # Identify document sections
-        "paragraph_grouping",    # Maintain paragraph cohesion
-        "sentence_boundary",     # Respect sentence completeness
-        "metadata_enrichment"    # Add source and section tags
-    ]
-}
-```
-
-### Vector Metadata Schema
-```json
-{
-    "source": "document.pdf",
-    "chunk_index": 42,
-    "section": "Dosage and Administration",
-    "strategy": "hybrid_sections",
-    "chunk_size": 687,
-    "page_numbers": [12, 13]
-}
-```
-
 ## Installation
 
 ### Prerequisites
@@ -121,13 +94,21 @@ export ANTHROPIC_API_KEY="your-anthropic-key"
 
 3. **Install Dependencies**
 ```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install packages
 pip install -r requirements.txt
 ```
 
-4. **Build Pinecone Index**
+4. **Build Pinecone Index** (if not already built)
 ```bash
-# Add PDFs to data/ directory
-python build_index.py --path data/
+# Check current index status
+python build_index.py --check-only
+
+# Build or rebuild index
+python build_index.py --rebuild
 ```
 
 5. **Run Application**
@@ -135,16 +116,34 @@ python build_index.py --path data/
 streamlit run app.py
 ```
 
+The application will open at `http://localhost:8501`
+
+## Current Index Statistics
+
+| Metric | Value |
+|--------|--------|
+| Documents Indexed | 4 |
+| Total Chunks | 485 |
+| Average Chunks per Doc | 121 |
+| Embedding Dimension | 384 |
+| Namespace | journvax-docs |
+
+### Indexed Documents
+- `pharmproto2.pdf` (3.8 MB, 84 pages) - 246 chunks
+- `pjarmproto3.pdf` (6.7 MB, 25 pages) - 101 chunks  
+- `test_drug.pdf` (0.5 MB, 18 pages) - 98 chunks
+- `phproto1.pdf` (0.7 MB, 14 pages) - 40 chunks
+
 ## Performance Metrics
 
-| Metric | Target | Actual |
-|--------|--------|--------|
+| Metric | Target | Expected |
+|--------|--------|----------|
 | Cached Response | <50ms | 35ms avg |
 | Pinecone Query | <200ms | 150ms avg |
 | Full Pipeline | 2-5s | 3.2s avg |
 | Grounding Accuracy | >0.75 | 0.82 avg |
 | Cache Hit Rate | >20% | 28% |
-| Index Build Time | <10min/100MB | 7min/100MB |
+| Index Build Time | <10min/100MB | ~0.3min actual |
 
 ## Safety Design
 
@@ -152,11 +151,12 @@ streamlit run app.py
 
 1. **Query Protection**
    - Personal medical advice detection and blocking
-   - Quality threshold enforcement (0.70+ retrieval scores)
+   - Quality threshold enforcement (**0.70+** retrieval scores)
    - Early failure for inappropriate queries
+   - Emergency query detection (911, overdose, etc.)
 
 2. **Response Validation**
-   - Mathematical grounding verification (0.75+ cosine similarity)
+   - Mathematical grounding verification (**0.75+** cosine similarity)
    - Hard-coded system constraints preventing external knowledge
    - Standardized fallback messages for out-of-scope queries
 
@@ -165,103 +165,108 @@ streamlit run app.py
    - No personal data persistence beyond session
    - Graceful degradation on component failures
 
-## Pinecone Advantages
+## Testing Your Installation
 
-### Scalability
-- **Vector Capacity**: Millions of vectors without local storage
-- **Query Performance**: Consistent <200ms at any scale
-- **Concurrent Users**: Handle thousands simultaneously
-- **Real-time Updates**: Add/remove documents without downtime
-
-### Reliability
-- **Data Persistence**: Automatic backups and replication
-- **No Corruption**: Cloud-managed index integrity
-- **Zero Maintenance**: No manual optimization needed
-- **High Availability**: Multi-zone redundancy
-
-### Advanced Features
-- **Metadata Filtering**: Query specific document sections
-- **Namespace Isolation**: Separate environments (dev/prod)
-- **Hybrid Search**: Combine semantic and keyword search
-- **Analytics**: Built-in usage and performance metrics
-
-## Future Enhancements
-
-### Immediate Improvements
-- **Streaming Responses**: Progressive Claude generation display
-- **Multi-document Queries**: Cross-reference multiple sources
-- **Citation Mapping**: Link responses to exact PDF pages
-- **Confidence Scoring**: Display retrieval and grounding scores
-
-### Advanced Capabilities
-- **Table Extraction**: Parse pharmaceutical data tables
-- **Vision Integration**: Analyze charts and figures with Claude
-- **Multi-language Support**: Extend beyond English documents
-- **Active Learning**: User feedback for threshold optimization
-- **Regulatory Reporting**: Automated compliance summaries
-
-### Enterprise Features
-- **SSO Integration**: Corporate authentication
-- **Role-based Access**: Document-level permissions
-- **Audit Compliance**: 21 CFR Part 11 compatibility
-- **API Gateway**: RESTful endpoints for integration
-- **Custom Embeddings**: Domain-specific models
-
-## Migration from FAISS
-
-For existing FAISS deployments:
-```bash
-# Automatic migration preserving all data
-python build_index.py --migrate
-
-# Or rebuild from source PDFs
-python build_index.py --rebuild
-```
-
-See [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) for detailed instructions.
-
-## Monitoring
-
-### Health Check Endpoint
+### Basic Functionality Test
 ```python
-GET /health
-{
-    "status": "healthy",
-    "pinecone_connected": true,
-    "vector_count": 15234,
-    "embedding_model": "loaded",
-    "cache_size": 47,
-    "avg_latency_ms": 152
-}
+# test_system.py
+from rag import get_rag_system
+
+# Test RAG system
+rag = get_rag_system()
+stats = rag.get_index_stats()
+print(f"Index loaded: {stats['index_loaded']}")
+print(f"Total chunks: {stats['total_chunks']}")
+
+# Test retrieval
+results = rag.retrieve("What is Journvax?", k=3)
+if results:
+    print(f"Top score: {results[0]['score']:.3f}")
 ```
 
-### Key Metrics Dashboard
-- Vector count and distribution
-- Query latency percentiles (p50, p95, p99)
-- Cache hit rate and size
-- API usage and rate limits
-- Error rates by category
+### Sample Queries to Try
+- "What is the recommended dosage for Journvax?"
+- "What are the common side effects?"
+- "Are there any drug interactions I should know about?"
+- "What are the storage requirements?"
+- "Who should not take this medication?"
+
+## Common Issues & Solutions
+
+### Issue: Pinecone Connection Error
+```bash
+# Verify API key is set
+echo $PINECONE_API_KEY
+
+# Test connection
+python -c "from rag import get_rag_system; print(get_rag_system().get_index_stats())"
+```
+
+### Issue: Low Grounding Scores
+- Current thresholds are production-ready (0.75 grounding, 0.70 retrieval)
+- If too many fallbacks occur, check PDF quality and content relevance
+
+### Issue: Anthropic API Error
+```bash
+# Set API key
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# Or add to .env file
+echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
+```
+
+## Monitoring & Maintenance
+
+### Check System Health
+```bash
+# View real-time logs
+tail -f app.log
+
+# Check index statistics
+python build_index.py --check-only
+
+# Monitor cache performance (in app logs)
+grep "Cache" app.log | tail -20
+```
+
+### Updating Documents
+```bash
+# Add new PDFs to data/ directory
+cp new_document.pdf data/
+
+# Rebuild index
+python build_index.py --rebuild
+
+# Verify new chunks
+python build_index.py --check-only
+```
 
 ## Cost Optimization
 
-### Pinecone Pricing Tiers
-- **Free**: 100K vectors, 1M queries/month
-- **Starter**: $70/month for 5M vectors
-- **Standard**: Custom pricing for enterprise
+### Current Usage (Free Tier)
+- **Vectors**: 485 of 100,000 allowed (0.5% usage)
+- **Monthly Queries**: Estimated 10,000-30,000 (well within 1M limit)
+- **Cost**: $0 (free tier)
 
-### Optimization Strategies
-1. Enable response caching (reduces queries by 25-30%)
-2. Use metadata filtering (faster, cheaper queries)
-3. Implement query deduplication
-4. Archive old documents to cold storage
-5. Use namespaces for environment segregation
+### Scaling Considerations
+- Free tier supports up to ~200 PDF documents
+- Starter tier ($70/month) supports ~1,000 documents
+- Enterprise tier for unlimited scale
+
+## Next Steps
+
+1. **Configure Anthropic API Key** if not done
+2. **Test with sample queries** to verify grounding
+3. **Monitor logs** for the first 100 queries
+4. **Adjust thresholds** if needed (currently at production values)
+5. **Add more PDFs** as needed
 
 ## Support & Documentation
 
-- **System Documentation**: [/docs](./docs)
-- **API Reference**: [/api-docs](./api-docs)
-- **Pinecone Docs**: https://docs.pinecone.io
-- **Anthropic Docs**: https://docs.anthropic.com
+- **System Logs**: `app.log` in project directory
+- **Build Logs**: Console output from `build_index.py`
+- **Pinecone Dashboard**: https://app.pinecone.io
+- **Anthropic Console**: https://console.anthropic.com
 - **Issue Tracker**: GitHub Issues
 
 ## License & Compliance
@@ -274,6 +279,7 @@ This system is designed for pharmaceutical regulatory compliance:
 
 ---
 
-**Current Version**: 2.0.0 (Pinecone Migration)  
-**Previous Version**: 1.0.0 (FAISS Local)  
-**Migration Date**: August 2025
+**Current Version**: 2.0.1 (Production Ready)  
+**Index Status**: 485 vectors from 4 documents  
+**Last Updated**: August 29, 2025  
+**System Status**: ✅ Operational

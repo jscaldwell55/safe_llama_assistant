@@ -39,16 +39,16 @@ MAX_TOKENS = 1000  # Increased for more complete responses
 TEMPERATURE = 0.4  # Slightly higher for comprehensive coverage
 
 # ============================================================================
-# SAFETY THRESHOLDS
+# SAFETY THRESHOLDS - PRODUCTION VALUES
 # ============================================================================
 
-# Grounding validation - kept strict for safety
-SEMANTIC_SIMILARITY_THRESHOLD = 0.45  # For response-to-context validation
+# Grounding validation - production-safe thresholds
+SEMANTIC_SIMILARITY_THRESHOLD = 0.75  # FIXED: Was 0.45, now matches README claim
 
-# Retrieval quality thresholds - REALISTIC VALUES
+# Retrieval quality thresholds - PRODUCTION VALUES
 USE_TOP_SCORE_FOR_QUALITY = True  # Use best chunk score instead of average
-MIN_TOP_SCORE = 0.40  # Minimum score for best chunk (lowered from 0.45)
-MIN_RETRIEVAL_SCORE = 0.35  # Minimum average score if not using top score
+MIN_TOP_SCORE = 0.70  # FIXED: Was 0.40, now production-ready
+MIN_RETRIEVAL_SCORE = 0.65  # FIXED: Was 0.35, now production-ready
 
 # ============================================================================
 # RAG CONFIGURATION
@@ -104,7 +104,7 @@ WELCOME_MESSAGE = "Hello! I can help you with information about Journvax based o
 
 NO_CONTEXT_FALLBACK_MESSAGE = (
     "I don't have sufficient information in the documentation to answer that question. "
-    "Please rephrase or ask about something else related to Journvax."
+    "If this is an emergency or you need immediate medical care, please call 911"
 )
 
 PERSONAL_MEDICAL_ADVICE_MESSAGE = (

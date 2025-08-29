@@ -78,7 +78,10 @@ def download_nltk_data():
             nltk.data.find(path)
         except LookupError:
             logger.info(f"Downloading NLTK data: {name}")
-            nltk.download(name)
+            try:
+                nltk.download(name, quiet=True)
+            except Exception as e:
+                logger.warning(f"Failed to download {name}: {e}")
 
 def validate_pdf_directory(pdf_dir: str) -> list:
     """Validate PDF directory and return list of PDF files"""
@@ -267,19 +270,42 @@ def build_index(pdf_directory: str, force_rebuild: bool = False):
         logger.info(f"Time taken: {elapsed_time/60:.1f} minutes")
         logger.info("="*60)
         
-        # Display statistics
+        # Display statistics with better error handling
         stats = get_index_stats()
         logger.info("")
         logger.info("Index Statistics:")
-        logger.info(f"  📚 Documents: {stats['documents']}")
-        logger.info(f"  📄 Total chunks: {stats['total_chunks']}")
-        logger.info(f"  📊 Avg chunks per doc: {stats['avg_chunks_per_doc']:.1f}")
-        logger.info(f"  🌐 Cloud Region: {stats.get('namespaces', ['default'])[0]}")
-        logger.info(f"  📏 Embedding Dimension: {stats.get('dimension', 384)}")
+        logger.info(f"  📚 Documents: {stats.get('documents', 0)}")
+        logger.info(f"  📄 Total chunks: {stats.get('total_chunks', 0)}")
+        
+        # Safely handle average calculation
+        if stats.get('documents', 0) > 0:
+            avg_chunks = stats.get('total_chunks', 0) / stats.get('documents', 1)
+            logger.info(f"  📊 Avg chunks per doc: {avg_chunks:.1f}")
+        else:
+            logger.info(f"  📊 Avg chunks per doc: 0")
+        
+        # Safely handle namespaces display
+        namespaces = stats.get('namespaces', [])
+        if namespaces:
+            if isinstance(namespaces, list) and len(namespaces) > 0:
+                logger.info(f"  🌐 Namespace: {namespaces[0]}")
+            elif isinstance(namespaces, dict):
+                # Sometimes Pinecone returns namespaces as a dict
+                namespace_names = list(namespaces.keys())
+                if namespace_names:
+                    logger.info(f"  🌐 Namespace: {namespace_names[0]}")
+            else:
+                logger.info(f"  🌐 Namespace: default")
+        else:
+            logger.info(f"  🌐 Namespace: default")
+        
+        # Display dimension if available
+        if 'dimension' in stats:
+            logger.info(f"  🔢 Embedding Dimension: {stats['dimension']}")
         
         logger.info("")
         logger.info("✨ Pinecone index is ready to use!")
-        logger.info("You can now deploy your application.")
+        logger.info("You can now run the application with: streamlit run app.py")
         
     except Exception as e:
         logger.error(f"Failed to build index: {e}", exc_info=True)
