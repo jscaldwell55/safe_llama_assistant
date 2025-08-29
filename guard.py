@@ -101,9 +101,7 @@ class QueryValidator:
         """Check if query is asking for personal medical advice"""
         query_lower = query.lower()
         
-        # First check if it's an emergency - don't block emergencies
-        if QueryValidator.check_emergency(query):
-            return False  # Let emergency handler deal with it
+      
         
         # Allow general interaction/safety questions
         interaction_terms = [
