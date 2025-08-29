@@ -437,6 +437,7 @@ def enhance_query_for_retrieval(query: str, conversation_history: List[Dict[str,
     
     return query
 
+
 def retrieve_and_format_context(query: str, k: int = TOP_K_RETRIEVAL, 
                                 conversation_history: List[Dict[str, str]] = None) -> str:
     """Retrieve and format context for query with follow-up handling"""
