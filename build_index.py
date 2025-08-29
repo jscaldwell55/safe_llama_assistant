@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Utility script to build or rebuild the FAISS index for the Pharma Enterprise Assistant.
+Utility script to build or rebuild the Pinecone index for the Pharma Enterprise Assistant.
 Run this after adding new PDFs to the data directory.
 
 Usage:
     python build_index.py                  # Build index from data/ folder
     python build_index.py --rebuild        # Force rebuild even if index exists
     python build_index.py --path /custom   # Use custom PDF directory
+    python build_index.py --migrate       # Migrate from FAISS to Pinecone
 """
 
 import os
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 def check_dependencies():
     """Check that all required dependencies are installed"""
     required_modules = [
-        'faiss',
+        'pinecone',
         'sentence_transformers',
         'fitz',
         'nltk',
@@ -46,6 +47,20 @@ def check_dependencies():
         sys.exit(1)
     
     logger.info("All dependencies verified")
+
+def check_api_keys():
+    """Check that required API keys are configured"""
+    from config import PINECONE_API_KEY, ANTHROPIC_API_KEY
+    
+    if not PINECONE_API_KEY:
+        logger.error("PINECONE_API_KEY not configured!")
+        logger.error("Please set PINECONE_API_KEY environment variable or add to .env file")
+        sys.exit(1)
+    
+    if not ANTHROPIC_API_KEY:
+        logger.warning("ANTHROPIC_API_KEY not configured - needed for runtime but not index building")
+    
+    logger.info("API keys verified")
 
 def download_nltk_data():
     """Download required NLTK data if not present"""
@@ -93,40 +108,118 @@ def validate_pdf_directory(pdf_dir: str) -> list:
     
     return pdf_files
 
-def check_existing_index() -> bool:
-    """Check if an index already exists"""
-    from config import INDEX_PATH
+def check_existing_pinecone_index() -> int:
+    """Check if Pinecone index already exists and return vector count"""
+    try:
+        from rag import get_rag_system
+        rag_system = get_rag_system()
+        
+        if rag_system.pinecone_index:
+            stats = rag_system.get_index_stats()
+            vector_count = stats.get("total_chunks", 0)
+            
+            if vector_count > 0:
+                logger.info(f"Existing Pinecone index found with {vector_count} vectors")
+                return vector_count
+    except Exception as e:
+        logger.debug(f"Could not check existing index: {e}")
     
-    index_file = Path(INDEX_PATH) / "faiss.index"
+    return 0
+
+def migrate_from_faiss():
+    """Migrate existing FAISS index to Pinecone"""
+    from config import INDEX_PATH
+    import pickle
+    
+    faiss_index_file = Path(INDEX_PATH) / "faiss.index"
     metadata_file = Path(INDEX_PATH) / "metadata.pkl"
     
-    if index_file.exists() and metadata_file.exists():
-        index_size_mb = index_file.stat().st_size / (1024 * 1024)
-        metadata_size_mb = metadata_file.stat().st_size / (1024 * 1024)
-        
-        logger.info(f"Existing index found:")
-        logger.info(f"  - Index: {index_size_mb:.1f} MB")
-        logger.info(f"  - Metadata: {metadata_size_mb:.1f} MB")
-        return True
+    if not (faiss_index_file.exists() and metadata_file.exists()):
+        logger.error("No FAISS index found to migrate")
+        return False
     
-    return False
+    logger.info("Found FAISS index to migrate")
+    
+    try:
+        # Load FAISS metadata
+        with open(metadata_file, "rb") as f:
+            saved_data = pickle.load(f)
+        
+        if isinstance(saved_data, tuple):
+            texts, metadata = saved_data
+            logger.info(f"Loaded {len(texts)} chunks from FAISS index")
+        elif isinstance(saved_data, dict):
+            texts = saved_data["texts"]
+            metadata = saved_data["metadata"]
+            logger.info(f"Loaded {len(texts)} chunks from FAISS index")
+        else:
+            logger.error("Unknown FAISS metadata format")
+            return False
+        
+        # Initialize Pinecone RAG system
+        from rag import get_rag_system
+        rag_system = get_rag_system()
+        
+        if not rag_system.pinecone_index:
+            logger.error("Failed to initialize Pinecone")
+            return False
+        
+        # Generate embeddings and upload to Pinecone
+        logger.info("Migrating chunks to Pinecone...")
+        
+        from config import PINECONE_BATCH_SIZE, PINECONE_NAMESPACE
+        import hashlib
+        
+        # Generate embeddings
+        embeddings = rag_system._generate_embeddings_batch(texts)
+        
+        # Prepare vectors
+        vectors = []
+        for i, (text, meta, embedding) in enumerate(zip(texts, metadata, embeddings)):
+            # Generate ID
+            chunk_id = f"migrated_{i}_{hashlib.md5(text.encode()).hexdigest()[:8]}"
+            
+            vector = {
+                "id": chunk_id,
+                "values": embedding.tolist(),
+                "metadata": {
+                    **meta,
+                    "text": text[:1000],  # Store first 1000 chars
+                    "migrated_from_faiss": True
+                }
+            }
+            vectors.append(vector)
+        
+        # Upsert in batches
+        for i in range(0, len(vectors), PINECONE_BATCH_SIZE):
+            batch = vectors[i:i+PINECONE_BATCH_SIZE]
+            rag_system.pinecone_index.upsert(vectors=batch, namespace=PINECONE_NAMESPACE)
+            logger.info(f"Migrated batch {i//PINECONE_BATCH_SIZE + 1}")
+        
+        logger.info(f"Successfully migrated {len(vectors)} vectors to Pinecone")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Migration failed: {e}", exc_info=True)
+        return False
 
 def estimate_processing_time(pdf_files: list) -> float:
     """Estimate processing time based on file sizes"""
     total_size_mb = sum(f.stat().st_size for f in pdf_files) / (1024 * 1024)
     
     # Rough estimates based on typical processing speeds
-    # ~10 MB/minute for PDF extraction + embedding generation
-    estimated_minutes = total_size_mb / 10
+    # ~5 MB/minute for PDF extraction + embedding generation + Pinecone upload
+    estimated_minutes = total_size_mb / 5
     
     return max(1.0, estimated_minutes)
 
 def build_index(pdf_directory: str, force_rebuild: bool = False):
-    """Build the FAISS index"""
+    """Build the Pinecone index"""
     
     # Check if index exists
-    if check_existing_index() and not force_rebuild:
-        logger.warning("Index already exists!")
+    vector_count = check_existing_pinecone_index()
+    if vector_count > 0 and not force_rebuild:
+        logger.warning(f"Index already exists with {vector_count} vectors!")
         logger.info("Use --rebuild flag to force rebuild")
         response = input("Do you want to rebuild anyway? (y/N): ")
         if response.lower() != 'y':
@@ -151,15 +244,15 @@ def build_index(pdf_directory: str, force_rebuild: bool = False):
     
     # Build index
     logger.info("="*60)
-    logger.info("BUILDING FAISS INDEX")
+    logger.info("BUILDING PINECONE INDEX")
     logger.info("="*60)
     logger.info("This may take several minutes...")
     logger.info("Processing steps:")
     logger.info("  1. Extracting text from PDFs")
-    logger.info("  2. Creating semantic chunks")
+    logger.info("  2. Creating semantic chunks (hybrid strategy)")
     logger.info("  3. Generating embeddings")
-    logger.info("  4. Building FAISS index")
-    logger.info("  5. Saving to disk")
+    logger.info("  4. Uploading to Pinecone cloud")
+    logger.info("  5. Verifying index")
     logger.info("")
     
     start_time = time.time()
@@ -181,39 +274,27 @@ def build_index(pdf_directory: str, force_rebuild: bool = False):
         logger.info(f"  📚 Documents: {stats['documents']}")
         logger.info(f"  📄 Total chunks: {stats['total_chunks']}")
         logger.info(f"  📊 Avg chunks per doc: {stats['avg_chunks_per_doc']:.1f}")
-        
-        # Verify index files
-        from config import INDEX_PATH
-        index_path = Path(INDEX_PATH)
-        index_file = index_path / "faiss.index"
-        metadata_file = index_path / "metadata.pkl"
-        
-        if index_file.exists() and metadata_file.exists():
-            index_size = index_file.stat().st_size / (1024 * 1024)
-            metadata_size = metadata_file.stat().st_size / (1024 * 1024)
-            
-            logger.info("")
-            logger.info("Created files:")
-            logger.info(f"  📁 {index_file}: {index_size:.1f} MB")
-            logger.info(f"  📁 {metadata_file}: {metadata_size:.1f} MB")
+        logger.info(f"  🌐 Cloud Region: {stats.get('namespaces', ['default'])[0]}")
+        logger.info(f"  📏 Embedding Dimension: {stats.get('dimension', 384)}")
         
         logger.info("")
-        logger.info("✨ Index is ready to use!")
+        logger.info("✨ Pinecone index is ready to use!")
         logger.info("You can now deploy your application.")
         
     except Exception as e:
         logger.error(f"Failed to build index: {e}", exc_info=True)
         logger.error("")
         logger.error("Common issues:")
+        logger.error("  - Invalid Pinecone API key")
+        logger.error("  - Network connectivity issues")
         logger.error("  - Corrupted PDF files")
         logger.error("  - Insufficient memory")
-        logger.error("  - Missing dependencies")
         sys.exit(1)
 
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description='Build FAISS index for Pharma Enterprise Assistant',
+        description='Build Pinecone index for Pharma Enterprise Assistant',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -221,6 +302,7 @@ Examples:
   python build_index.py --rebuild          # Force rebuild
   python build_index.py --path docs/       # Use custom directory
   python build_index.py --check-only       # Only check if index exists
+  python build_index.py --migrate          # Migrate from FAISS to Pinecone
         """
     )
     
@@ -242,25 +324,46 @@ Examples:
         help='Only check if index exists, don\'t build'
     )
     
+    parser.add_argument(
+        '--migrate',
+        action='store_true',
+        help='Migrate existing FAISS index to Pinecone'
+    )
+    
     args = parser.parse_args()
     
     logger.info("="*60)
-    logger.info("PHARMA ENTERPRISE ASSISTANT - INDEX BUILDER")
+    logger.info("PHARMA ENTERPRISE ASSISTANT - PINECONE INDEX BUILDER")
     logger.info("="*60)
     
     # Check dependencies
     check_dependencies()
     
+    # Check API keys
+    check_api_keys()
+    
     # Download NLTK data if needed
     download_nltk_data()
     
-    # Check only mode
-    if args.check_only:
-        if check_existing_index():
-            logger.info("✅ Index exists and is ready to use")
+    # Migrate mode
+    if args.migrate:
+        logger.info("Starting FAISS to Pinecone migration...")
+        success = migrate_from_faiss()
+        if success:
+            logger.info("✅ Migration completed successfully")
             sys.exit(0)
         else:
-            logger.warning("❌ No index found - need to build")
+            logger.error("❌ Migration failed")
+            sys.exit(1)
+    
+    # Check only mode
+    if args.check_only:
+        vector_count = check_existing_pinecone_index()
+        if vector_count > 0:
+            logger.info(f"✅ Pinecone index exists with {vector_count} vectors")
+            sys.exit(0)
+        else:
+            logger.warning("❌ No vectors found in Pinecone index")
             sys.exit(1)
     
     # Build index

@@ -1,4 +1,4 @@
-# config.py - Complete configuration with all required variables
+# config.py - Complete configuration with Pinecone integration
 
 import os
 
@@ -13,8 +13,22 @@ os.environ["HUGGINGFACE_HUB_URL"] = "https://huggingface.co"
 try:
     import streamlit as st
     ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_API_KEY"))
+    PINECONE_API_KEY = st.secrets.get("PINECONE_API_KEY", os.getenv("PINECONE_API_KEY"))
+    PINECONE_ENVIRONMENT = st.secrets.get("PINECONE_ENVIRONMENT", os.getenv("PINECONE_ENVIRONMENT", "us-east-1"))
 except (ImportError, FileNotFoundError, AttributeError):
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+    PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+    PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
+
+# ============================================================================
+# PINECONE CONFIGURATION
+# ============================================================================
+
+PINECONE_INDEX_NAME = "pharma-assistant"
+PINECONE_DIMENSION = 384  # Dimension for all-MiniLM-L6-v2
+PINECONE_METRIC = "cosine"
+PINECONE_BATCH_SIZE = 100  # Batch size for upserts
+PINECONE_NAMESPACE = "journvax-docs"  # Namespace for document segregation
 
 # ============================================================================
 # MODEL CONFIGURATION
@@ -45,11 +59,13 @@ EMBEDDING_BATCH_SIZE = 8
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 200
 TOP_K_RETRIEVAL = 5
-INDEX_PATH = "faiss_index"
 PDF_DATA_PATH = "data"
 CHUNKING_STRATEGY = "hybrid"
 MAX_CHUNK_TOKENS = 700
 MAX_CONTEXT_LENGTH = 4000
+
+# Legacy FAISS paths (for migration purposes)
+INDEX_PATH = "faiss_index"
 
 # ============================================================================
 # GUARD CONFIGURATION

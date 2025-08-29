@@ -1,75 +1,78 @@
-# rag.py - Optimized RAG for 100-200 page documents with Apple Silicon fixes
+# rag.py - Pinecone-based RAG for scalable document retrieval
 
 import os
-import pickle
 import logging
-from typing import List, Tuple, Dict, Any, Optional
-import faiss
-import fitz  # PyMuPDF
+import hashlib
+from typing import List, Dict, Any, Optional
 import numpy as np
 import torch
+import fitz  # PyMuPDF
+from pinecone import Pinecone, ServerlessSpec
 
 from embeddings import get_embedding_model
 from semantic_chunker import SemanticChunker
 from context_formatter import format_retrieved_context
 from config import (
-    INDEX_PATH, PDF_DATA_PATH, CHUNK_SIZE, CHUNK_OVERLAP, TOP_K_RETRIEVAL,
-    CHUNKING_STRATEGY, MAX_CHUNK_TOKENS, EMBEDDING_BATCH_SIZE, MAX_CONTEXT_LENGTH
+    PINECONE_API_KEY, PINECONE_ENVIRONMENT, PINECONE_INDEX_NAME,
+    PINECONE_DIMENSION, PINECONE_METRIC, PINECONE_BATCH_SIZE,
+    PINECONE_NAMESPACE, PDF_DATA_PATH, CHUNK_SIZE, CHUNK_OVERLAP,
+    TOP_K_RETRIEVAL, CHUNKING_STRATEGY, MAX_CHUNK_TOKENS,
+    EMBEDDING_BATCH_SIZE, MAX_CONTEXT_LENGTH
 )
 
 logger = logging.getLogger(__name__)
 
-class OptimizedRAGSystem:
-    """RAG system optimized for 100-200 page documents"""
+class PineconeRAGSystem:
+    """RAG system using Pinecone for scalable vector search"""
     
     def __init__(self):
         self.embedding_model = get_embedding_model()
-        self.semantic_chunker = SemanticChunker() # semantic_chunker now directly uses config values
-        self.index = None
-        self.texts: List[str] = []
-        self.metadata: List[Dict[str, Any]] = []
+        self.semantic_chunker = SemanticChunker()
+        self.pinecone_index = None
+        self.pc = None
         self.doc_count = 0
         self.total_chunks = 0
-        self._load_index()
+        self._initialize_pinecone()
     
-    def _load_index(self):
-        """Load existing FAISS index if available - FIXED for compatibility"""
-        index_file = os.path.join(INDEX_PATH, "faiss.index")
-        metadata_file = os.path.join(INDEX_PATH, "metadata.pkl")
+    def _initialize_pinecone(self):
+        """Initialize Pinecone client and index"""
+        if not PINECONE_API_KEY:
+            logger.error("PINECONE_API_KEY not configured")
+            return
         
-        if os.path.exists(index_file) and os.path.exists(metadata_file):
-            try:
-                self.index = faiss.read_index(index_file)
-                with open(metadata_file, "rb") as f:
-                    saved_data = pickle.load(f)
-                    
-                    # Handle both old tuple format and new dict format
-                    if isinstance(saved_data, tuple):
-                        # Old format: (texts, metadata)
-                        logger.info("Loading old format index (tuple)")
-                        self.texts, self.metadata = saved_data
-                        self.doc_count = 0  # Unknown in old format
-                    elif isinstance(saved_data, dict):
-                        # New format: {"texts": ..., "metadata": ..., "doc_count": ...}
-                        logger.info("Loading new format index (dict)")
-                        self.texts = saved_data["texts"]
-                        self.metadata = saved_data["metadata"]
-                        self.doc_count = saved_data.get("doc_count", 0)
-                    else:
-                        raise ValueError(f"Unknown saved data format: {type(saved_data)}")
-                    
-                    self.total_chunks = len(self.texts)
-                
-                logger.info(f"Loaded RAG index: {self.doc_count} documents, {self.total_chunks} chunks")
-            except Exception as e:
-                logger.error(f"Failed to load index: {e}", exc_info=True)
-                self.index = None
-                self.texts = []
-                self.metadata = []
-                self.doc_count = 0
-                self.total_chunks = 0
-        else:
-            logger.warning("No existing index found. Run build_index() to create one.")
+        try:
+            # Initialize Pinecone
+            self.pc = Pinecone(api_key=PINECONE_API_KEY)
+            
+            # Check if index exists, create if not
+            existing_indexes = [index.name for index in self.pc.list_indexes()]
+            
+            if PINECONE_INDEX_NAME not in existing_indexes:
+                logger.info(f"Creating Pinecone index: {PINECONE_INDEX_NAME}")
+                self.pc.create_index(
+                    name=PINECONE_INDEX_NAME,
+                    dimension=PINECONE_DIMENSION,
+                    metric=PINECONE_METRIC,
+                    spec=ServerlessSpec(
+                        cloud='aws',
+                        region=PINECONE_ENVIRONMENT
+                    )
+                )
+            
+            # Connect to index
+            self.pinecone_index = self.pc.Index(PINECONE_INDEX_NAME)
+            
+            # Get index stats
+            stats = self.pinecone_index.describe_index_stats()
+            self.total_chunks = stats.total_vector_count
+            
+            logger.info(f"Connected to Pinecone index: {PINECONE_INDEX_NAME}")
+            logger.info(f"Total vectors in index: {self.total_chunks}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Pinecone: {e}", exc_info=True)
+            self.pinecone_index = None
+            self.pc = None
     
     def extract_text_from_pdf(self, pdf_path: str) -> str:
         """Extract text from PDF with better formatting preservation"""
@@ -89,16 +92,16 @@ class OptimizedRAGSystem:
             logger.error(f"Failed to extract text from {pdf_path}: {e}", exc_info=True)
             return ""
     
-    def chunk_document(self, text: str, source: str) -> List[Tuple[str, Dict[str, Any]]]:
-        """Create optimized chunks for retrieval"""
-        chunks: List[Tuple[str, Dict[str, Any]]] = []
+    def chunk_document(self, text: str, source: str) -> List[Dict[str, Any]]:
+        """Create optimized chunks for retrieval with semantic chunking"""
+        chunks: List[Dict[str, Any]] = []
         
         try:
             # Use semantic chunking for better context preservation
             semantic_chunks = self.semantic_chunker.semantic_chunk(
                 text, 
                 strategy=CHUNKING_STRATEGY, 
-                max_tokens=MAX_CHUNK_TOKENS # Use MAX_CHUNK_TOKENS from config
+                max_tokens=MAX_CHUNK_TOKENS
             )
             
             for i, (chunk_text, chunk_metadata) in enumerate(semantic_chunks):
@@ -109,17 +112,26 @@ class OptimizedRAGSystem:
                 # Clean and normalize chunk text
                 chunk_text = self._clean_chunk_text(chunk_text)
                 
-                # Create metadata
-                metadata = {
-                    "source": source,
-                    "chunk_id": i,
-                    "chunk_size": len(chunk_text),
-                    **chunk_metadata
+                # Generate unique ID for chunk
+                chunk_id = self._generate_chunk_id(source, i, chunk_text)
+                
+                # Create chunk data
+                chunk_data = {
+                    "id": chunk_id,
+                    "text": chunk_text,
+                    "metadata": {
+                        "source": source,
+                        "chunk_index": i,
+                        "chunk_size": len(chunk_text),
+                        "strategy": chunk_metadata.get("strategy", CHUNKING_STRATEGY),
+                        "section": chunk_metadata.get("section", "unknown"),
+                        **chunk_metadata
+                    }
                 }
                 
-                chunks.append((chunk_text, metadata))
+                chunks.append(chunk_data)
                 
-            logger.info(f"Created {len(chunks)} chunks from {source}")
+            logger.info(f"Created {len(chunks)} chunks from {source} using {CHUNKING_STRATEGY} strategy")
             
         except Exception as e:
             logger.warning(f"Semantic chunking failed: {e}. Using fallback.")
@@ -130,8 +142,8 @@ class OptimizedRAGSystem:
     
     def _clean_chunk_text(self, text: str) -> str:
         """Clean chunk text for better retrieval"""
-        # Remove excessive whitespace
         import re
+        # Remove excessive whitespace
         text = re.sub(r'\s+', ' ', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         
@@ -140,78 +152,86 @@ class OptimizedRAGSystem:
         
         return text.strip()
     
-    def _fallback_chunking(self, text: str, source: str) -> List[Tuple[str, Dict[str, Any]]]:
-        """Simple overlapping chunk strategy as fallback, using config values"""
+    def _generate_chunk_id(self, source: str, index: int, text: str) -> str:
+        """Generate unique ID for chunk"""
+        # Create deterministic ID based on source, index, and content hash
+        content_hash = hashlib.md5(text.encode()).hexdigest()[:8]
+        return f"{source}_{index}_{content_hash}"
+    
+    def _fallback_chunking(self, text: str, source: str) -> List[Dict[str, Any]]:
+        """Simple overlapping chunk strategy as fallback"""
         chunks = []
-        # Use CHUNK_SIZE from config for fallback
-        step = CHUNK_SIZE - CHUNK_OVERLAP 
+        step = CHUNK_SIZE - CHUNK_OVERLAP
         
         for i in range(0, len(text), step):
-            chunk_text = text[i:i + CHUNK_SIZE].strip() # Use CHUNK_SIZE from config
+            chunk_text = text[i:i + CHUNK_SIZE].strip()
             if len(chunk_text) > 100:
-                metadata = {
-                    "source": source,
-                    "chunk_id": i // step,
-                    "strategy": "fallback",
-                    "chunk_size": len(chunk_text)
+                chunk_id = self._generate_chunk_id(source, i // step, chunk_text)
+                chunk_data = {
+                    "id": chunk_id,
+                    "text": chunk_text,
+                    "metadata": {
+                        "source": source,
+                        "chunk_index": i // step,
+                        "strategy": "fallback",
+                        "chunk_size": len(chunk_text)
+                    }
                 }
-                chunks.append((chunk_text, metadata))
+                chunks.append(chunk_data)
         
         return chunks
     
-    def _generate_embeddings_safe(self, chunks: List[str]) -> np.ndarray:
-        """Generate embeddings with multiple fallback strategies"""
-        logger.info(f"Generating embeddings for {len(chunks)} chunks...")
+    def _generate_embeddings_batch(self, texts: List[str]) -> np.ndarray:
+        """Generate embeddings in batches for efficiency"""
+        logger.info(f"Generating embeddings for {len(texts)} texts...")
         
-        # Try progressively smaller batch sizes
-        batch_sizes = [4, 2, 1]
+        if not self.embedding_model:
+            raise ValueError("Embedding model not loaded")
         
-        for batch_size in batch_sizes:
-            try:
-                logger.info(f"Attempting with batch_size={batch_size}")
-                
-                # Disable multiprocessing which can cause segfaults
-                torch.set_num_threads(1)
-                
-                embeddings = []
-                for i in range(0, len(chunks), batch_size):
-                    batch = chunks[i:i+batch_size]
-                    batch_embeddings = self.embedding_model.encode(
-                        batch,
-                        show_progress_bar=False,  # Disable progress bar for batch processing
-                        convert_to_tensor=False,
-                        device='cpu',
-                        normalize_embeddings=False
-                    )
-                    embeddings.append(batch_embeddings)
-                    
-                    # Log progress
-                    if i % 100 == 0 and i > 0: # Log less frequently for large datasets
-                        logger.info(f"Processed {i}/{len(chunks)} chunks")
-                
-                # Concatenate all embeddings
-                embeddings = np.vstack(embeddings).astype('float32')
-                logger.info(f"Successfully generated embeddings with batch_size={batch_size}")
-                return embeddings
-                
-            except Exception as e:
-                logger.error(f"Failed with batch_size={batch_size}: {e}")
-                if batch_size == 1:
-                    # If even batch_size=1 fails, we have a bigger problem
-                    raise
-                continue
+        # Disable multiprocessing for stability
+        torch.set_num_threads(1)
         
-        raise RuntimeError("Could not generate embeddings with any batch size")
+        embeddings = []
+        for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+            batch = texts[i:i+EMBEDDING_BATCH_SIZE]
+            batch_embeddings = self.embedding_model.encode(
+                batch,
+                show_progress_bar=False,
+                convert_to_tensor=False,
+                device='cpu',
+                normalize_embeddings=True  # Normalize for cosine similarity
+            )
+            embeddings.append(batch_embeddings)
+            
+            # Log progress
+            if i % 100 == 0 and i > 0:
+                logger.info(f"Processed {i}/{len(texts)} embeddings")
+        
+        # Concatenate all embeddings
+        embeddings = np.vstack(embeddings).astype('float32')
+        logger.info(f"Generated {len(embeddings)} embeddings")
+        return embeddings
     
     def build_index(self, pdf_directory: str = PDF_DATA_PATH, force_rebuild: bool = False):
-        """Build optimized FAISS index for 100-200 pages"""
-        if self.index is not None and not force_rebuild:
-            logger.info("Index already exists. Use force_rebuild=True to rebuild.")
+        """Build Pinecone index from PDF documents"""
+        if not self.pinecone_index:
+            logger.error("Pinecone not initialized. Cannot build index.")
             return
         
         if self.embedding_model is None:
             logger.error("Cannot build index: embedding model not loaded.")
             return
+        
+        # Check if index already has data
+        stats = self.pinecone_index.describe_index_stats()
+        if stats.total_vector_count > 0 and not force_rebuild:
+            logger.info(f"Index already contains {stats.total_vector_count} vectors. Use force_rebuild=True to rebuild.")
+            return
+        
+        # Clear index if force rebuild
+        if force_rebuild and stats.total_vector_count > 0:
+            logger.info("Clearing existing vectors from index...")
+            self.pinecone_index.delete(delete_all=True, namespace=PINECONE_NAMESPACE)
         
         # Find PDF files
         pdf_files = []
@@ -225,7 +245,6 @@ class OptimizedRAGSystem:
         
         # Process each PDF
         all_chunks = []
-        all_metadata = []
         
         for pdf_file in pdf_files:
             pdf_path = os.path.join(pdf_directory, pdf_file)
@@ -237,80 +256,89 @@ class OptimizedRAGSystem:
                 logger.warning(f"No text extracted from {pdf_file}")
                 continue
             
-            # Create chunks
+            # Create chunks with semantic chunking
             chunks = self.chunk_document(text, pdf_file)
-            for chunk_text, metadata in chunks:
-                all_chunks.append(chunk_text)
-                all_metadata.append(metadata)
+            all_chunks.extend(chunks)
         
         if not all_chunks:
             logger.error("No chunks created from PDFs")
             return
         
-        # Generate embeddings using safe method
-        embeddings = self._generate_embeddings_safe(all_chunks)
+        logger.info(f"Created {len(all_chunks)} total chunks from {len(pdf_files)} documents")
         
-        # Normalize for cosine similarity
-        faiss.normalize_L2(embeddings)
+        # Prepare vectors for Pinecone
+        chunk_texts = [chunk["text"] for chunk in all_chunks]
+        embeddings = self._generate_embeddings_batch(chunk_texts)
         
-        # Create optimized index for small dataset
-        dimension = embeddings.shape[1]
+        # Prepare data for upsert
+        vectors = []
+        for i, (chunk, embedding) in enumerate(zip(all_chunks, embeddings)):
+            vector = {
+                "id": chunk["id"],
+                "values": embedding.tolist(),
+                "metadata": {
+                    **chunk["metadata"],
+                    "text": chunk["text"][:1000]  # Store first 1000 chars in metadata for retrieval
+                }
+            }
+            vectors.append(vector)
         
-        # For 100-200 pages, use simple flat index (most accurate)
-        self.index = faiss.IndexFlatIP(dimension)  # Inner product = cosine similarity after normalization
-        self.index.add(embeddings)
+        # Upsert to Pinecone in batches
+        logger.info(f"Upserting {len(vectors)} vectors to Pinecone...")
+        for i in range(0, len(vectors), PINECONE_BATCH_SIZE):
+            batch = vectors[i:i+PINECONE_BATCH_SIZE]
+            self.pinecone_index.upsert(vectors=batch, namespace=PINECONE_NAMESPACE)
+            logger.info(f"Upserted batch {i//PINECONE_BATCH_SIZE + 1}/{(len(vectors)-1)//PINECONE_BATCH_SIZE + 1}")
         
-        # Store data
-        self.texts = all_chunks
-        self.metadata = all_metadata
+        # Update stats
         self.doc_count = len(pdf_files)
         self.total_chunks = len(all_chunks)
-        
-        # Save to disk - NEW FORMAT
-        os.makedirs(INDEX_PATH, exist_ok=True)
-        
-        faiss.write_index(self.index, os.path.join(INDEX_PATH, "faiss.index"))
-        
-        with open(os.path.join(INDEX_PATH, "metadata.pkl"), "wb") as f:
-            pickle.dump({
-                "texts": self.texts,
-                "metadata": self.metadata,
-                "doc_count": self.doc_count
-            }, f)
         
         logger.info(f"Index built successfully: {self.doc_count} documents, {self.total_chunks} chunks")
         logger.info(f"Average chunks per document: {self.total_chunks / self.doc_count:.1f}")
     
     def retrieve(self, query: str, k: int = TOP_K_RETRIEVAL) -> List[Dict[str, Any]]:
-        """Retrieve most relevant chunks for query"""
-        if self.index is None or self.embedding_model is None:
-            logger.warning("Cannot retrieve: index or embedding model not available")
+        """Retrieve most relevant chunks for query from Pinecone"""
+        if not self.pinecone_index or not self.embedding_model:
+            logger.warning("Cannot retrieve: Pinecone or embedding model not available")
             return []
         
         try:
             logger.debug(f"Retrieving top {k} chunks for query: '{query[:50]}...'")
             
-            # Encode query with CPU device
-            query_vec = self.embedding_model.encode(
+            # Encode query
+            query_embedding = self.embedding_model.encode(
                 [query],
                 device='cpu',
-                convert_to_tensor=False
-            ).astype('float32')
-            faiss.normalize_L2(query_vec)
+                convert_to_tensor=False,
+                normalize_embeddings=True
+            ).astype('float32')[0]
             
-            # Search
-            distances, indices = self.index.search(query_vec, k)
+            # Search in Pinecone
+            response = self.pinecone_index.query(
+                vector=query_embedding.tolist(),
+                top_k=k,
+                include_metadata=True,
+                namespace=PINECONE_NAMESPACE
+            )
             
             # Build results
             results = []
-            for i, idx in enumerate(indices[0]):
-                if 0 <= idx < len(self.texts):
-                    results.append({
-                        "text": self.texts[idx],
-                        "metadata": self.metadata[idx],
-                        "score": float(distances[0][i]),
-                        "rank": i + 1
-                    })
+            for match in response.matches:
+                # Retrieve full text from metadata or reconstruct if needed
+                text = match.metadata.get("text", "")
+                
+                results.append({
+                    "text": text,
+                    "metadata": {
+                        "source": match.metadata.get("source", "unknown"),
+                        "chunk_index": match.metadata.get("chunk_index", 0),
+                        "strategy": match.metadata.get("strategy", "unknown"),
+                        "section": match.metadata.get("section", "unknown")
+                    },
+                    "score": float(match.score),
+                    "rank": len(results) + 1
+                })
             
             # Log retrieval quality
             if results:
@@ -326,12 +354,27 @@ class OptimizedRAGSystem:
             return []
     
     def get_index_stats(self) -> Dict[str, Any]:
-        """Get statistics about the index"""
+        """Get statistics about the Pinecone index"""
+        if self.pinecone_index:
+            try:
+                stats = self.pinecone_index.describe_index_stats()
+                return {
+                    "documents": self.doc_count,
+                    "total_chunks": stats.total_vector_count,
+                    "avg_chunks_per_doc": stats.total_vector_count / self.doc_count if self.doc_count > 0 else 0,
+                    "index_loaded": True,
+                    "embedding_model": self.embedding_model is not None,
+                    "namespaces": list(stats.namespaces.keys()),
+                    "dimension": stats.dimension
+                }
+            except Exception as e:
+                logger.error(f"Failed to get index stats: {e}")
+        
         return {
-            "documents": self.doc_count,
-            "total_chunks": self.total_chunks,
-            "avg_chunks_per_doc": self.total_chunks / self.doc_count if self.doc_count > 0 else 0,
-            "index_loaded": self.index is not None,
+            "documents": 0,
+            "total_chunks": 0,
+            "avg_chunks_per_doc": 0,
+            "index_loaded": False,
             "embedding_model": self.embedding_model is not None
         }
 
@@ -339,14 +382,14 @@ class OptimizedRAGSystem:
 # PUBLIC API
 # ============================================================================
 
-_rag_instance: Optional[OptimizedRAGSystem] = None
+_rag_instance: Optional[PineconeRAGSystem] = None
 
-def get_rag_system() -> OptimizedRAGSystem:
+def get_rag_system() -> PineconeRAGSystem:
     """Get singleton RAG system"""
     global _rag_instance
     if _rag_instance is None:
-        logger.info("Initializing OptimizedRAGSystem...")
-        _rag_instance = OptimizedRAGSystem()
+        logger.info("Initializing PineconeRAGSystem...")
+        _rag_instance = PineconeRAGSystem()
     return _rag_instance
 
 def retrieve_and_format_context(query: str, k: int = TOP_K_RETRIEVAL) -> str:
@@ -366,8 +409,12 @@ def retrieve_and_format_context(query: str, k: int = TOP_K_RETRIEVAL) -> str:
         source = res['metadata'].get('source', 'Unknown')
         chunk_text = res['text']
         
-        # Add source attribution
-        formatted_chunk = f"[Source: {source}]\n{chunk_text}"
+        # Add source attribution and section if available
+        section = res['metadata'].get('section', '')
+        if section and section != 'unknown':
+            formatted_chunk = f"[Source: {source} - {section}]\n{chunk_text}"
+        else:
+            formatted_chunk = f"[Source: {source}]\n{chunk_text}"
         chunks.append(formatted_chunk)
     
     # Use formatter to clean and concatenate
