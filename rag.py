@@ -379,6 +379,107 @@ class PineconeRAGSystem:
         }
 
 # ============================================================================
+# FOLLOW-UP QUERY RESOLUTION
+# ============================================================================
+
+def refers_to_previous(query: str) -> bool:
+    """Check if query refers to previous conversation"""
+    query_lower = query.lower()
+    
+    # Pronouns and references that indicate follow-up
+    reference_indicators = [
+        "which ones", "which one", "what about", "those", "they", "them", "these",
+        "the ones", "the one", "ones", "it", "that", "this",
+        "most common", "most severe", "worst", "best", "serious",
+        "more about", "tell me more", "explain further"
+    ]
+    
+    return any(indicator in query_lower for indicator in reference_indicators)
+
+def extract_topic_from_message(message: str) -> str:
+    """Extract the main medical topic from a message"""
+    message_lower = message.lower()
+    
+    # Priority topics to look for
+    if "side effect" in message_lower or "adverse" in message_lower:
+        return "side effects"
+    elif "dosage" in message_lower or "dose" in message_lower or "how much" in message_lower:
+        return "dosage"
+    elif "interaction" in message_lower or "interact" in message_lower:
+        return "drug interactions"
+    elif "contraindication" in message_lower or "should not" in message_lower:
+        return "contraindications"
+    elif "warning" in message_lower or "precaution" in message_lower:
+        return "warnings and precautions"
+    elif "storage" in message_lower or "store" in message_lower:
+        return "storage"
+    elif "pregnancy" in message_lower or "pregnant" in message_lower:
+        return "pregnancy"
+    elif "journvax" in message_lower or "journavx" in message_lower:
+        return "Journvax"
+    
+    return ""
+
+def rewrite_with_context(query: str, last_context: List[Dict[str, str]]) -> str:
+    """Rewrite query with context from previous messages"""
+    if not last_context:
+        return query
+    
+    # Find the topic from recent messages
+    topic = ""
+    for msg in last_context[-4:]:  # Last 2 exchanges
+        if msg.get("role") == "assistant":
+            topic = extract_topic_from_message(msg.get("content", ""))
+            if topic:
+                break
+    
+    if not topic:
+        # Try to find from user messages
+        for msg in last_context[-4:]:
+            if msg.get("role") == "user":
+                topic = extract_topic_from_message(msg.get("content", ""))
+                if topic:
+                    break
+    
+    # Rewrite the query with context
+    query_lower = query.lower()
+    
+    if topic:
+        if "which ones" in query_lower or "which one" in query_lower:
+            if "common" in query_lower:
+                return f"{query} (referring to the most common {topic} of Journvax)"
+            elif "severe" in query_lower or "serious" in query_lower or "worst" in query_lower:
+                return f"{query} (referring to the most severe {topic} of Journvax)"
+            else:
+                return f"{query} (referring to {topic} of Journvax)"
+        elif "tell me more" in query_lower or "more about" in query_lower:
+            return f"{query} (about {topic} of Journvax)"
+        elif "what about" in query_lower:
+            return f"{query} (asking about {topic} of Journvax)"
+        else:
+            # Generic enhancement
+            return f"{query} Journvax {topic}"
+    
+    # If no topic found but still seems like follow-up, add Journvax at least
+    if refers_to_previous(query):
+        return f"{query} Journvax"
+    
+    return query
+
+def resolve_followup(user_query: str, conversation_history: List[Dict[str, str]] = None) -> str:
+    """Main function to resolve follow-up questions"""
+    if not conversation_history:
+        return user_query
+    
+    if refers_to_previous(user_query):
+        resolved = rewrite_with_context(user_query, conversation_history)
+        if resolved != user_query:
+            logger.info(f"Resolved follow-up: '{user_query}' -> '{resolved}'")
+        return resolved
+    
+    return user_query
+
+# ============================================================================
 # PUBLIC API
 # ============================================================================
 
@@ -392,66 +493,23 @@ def get_rag_system() -> PineconeRAGSystem:
         _rag_instance = PineconeRAGSystem()
     return _rag_instance
 
-def enhance_query_for_retrieval(query: str, conversation_history: List[Dict[str, str]] = None) -> str:
-    """
-    Simple query enhancement for better retrieval of follow-up questions
-    """
-    query_lower = query.lower()
-    
-    # Check if this looks like a follow-up
-    follow_up_indicators = [
-        "which ones", "what about", "those", "they", "them", 
-        "most common", "most severe", "worst", "best", "serious"
-    ]
-    
-    is_followup = any(indicator in query_lower for indicator in follow_up_indicators)
-    
-    if not is_followup or not conversation_history:
-        return query
-    
-    # Look for recent medical topics in the last few messages
-    medical_keywords = []
-    for msg in conversation_history[-4:]:  # Last 2 exchanges
-        content = msg.get("content", "").lower()
-        if "side effect" in content:
-            medical_keywords.append("side effects")
-        if "dosage" in content or "dose" in content:
-            medical_keywords.append("dosage")
-        if "interaction" in content:
-            medical_keywords.append("interactions")
-        if "journvax" in content:
-            medical_keywords.append("Journvax")
-    
-    # If we found relevant context, enhance the query
-    if medical_keywords:
-        # Add the most relevant keyword to the query
-        if "side effect" in " ".join(medical_keywords):
-            enhanced = f"{query} Journvax side effects"
-        elif "dosage" in " ".join(medical_keywords):
-            enhanced = f"{query} Journvax dosage"
-        else:
-            enhanced = f"{query} Journvax"
-        
-        logger.info(f"Enhanced query for retrieval: '{query}' -> '{enhanced}'")
-        return enhanced
-    
-    return query
-
-
 def retrieve_and_format_context(query: str, k: int = TOP_K_RETRIEVAL, 
                                 conversation_history: List[Dict[str, str]] = None) -> str:
-    """Retrieve and format context for query with follow-up handling"""
+    """Retrieve and format context for query with follow-up resolution"""
     rag_system = get_rag_system()
     
-    # Enhance query if it looks like a follow-up
-    enhanced_query = enhance_query_for_retrieval(query, conversation_history)
+    # Resolve follow-up references
+    resolved_query = resolve_followup(query, conversation_history)
     
-    # Retrieve chunks using enhanced query
-    results = rag_system.retrieve(enhanced_query, k)
+    # Retrieve chunks using resolved query
+    results = rag_system.retrieve(resolved_query, k)
     
     if not results:
-        logger.warning("No results retrieved from RAG")
+        logger.warning(f"No results retrieved for query: '{resolved_query}'")
         return ""
+    
+    # Log retrieval success
+    logger.info(f"Retrieved {len(results)} chunks for resolved query")
     
     # Format chunks for context
     chunks = []
