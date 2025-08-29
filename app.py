@@ -195,6 +195,13 @@ async def handle_query(query: str) -> Dict[str, Any]:
         logger.info(f"  - Validation result: {decision.validation_result}")
         logger.info(f"  - Cache hit: {decision.cache_hit}")
         logger.info(f"  - Latency: {decision.latency_ms}ms")
+        
+        # Log entities if found
+        if hasattr(decision, 'entities_found') and decision.entities_found:
+            logger.info(f"  - Entities found: {len(decision.entities_found)}")
+            for entity in decision.entities_found[:3]:
+                logger.debug(f"    • {entity['type']}: {entity['text']}")
+        
         logger.info(f"  - Raw (first 200): {str(raw_out)[:200]!r}")
         logger.info(f"  - Cleaned (first 200): {cleaned[:200]!r}")
 
@@ -217,6 +224,8 @@ async def handle_query(query: str) -> Dict[str, Any]:
             "latency_ms": decision.latency_ms,
             "cache_hit": decision.cache_hit,
             "validation_result": decision.validation_result,
+            "entities_found": getattr(decision, 'entities_found', []),  # Pass medical entities if available
+            "clarification_needed": getattr(decision, 'clarification_needed', False),  # Pass clarification flag if available
         }
 
     except Exception as e:
@@ -290,18 +299,57 @@ if query := st.chat_input("Type your question..."):
             # Display response
             st.write(result["response"])
             
-            # Show minimal performance metrics
-            metrics = []
+            # Show metadata in subtle caption format
+            metadata_parts = []
+            
+            # Add cache indicator
             if result.get("cache_hit"):
-                metrics.append("📌 Cached")
-            elif result.get("grounding_score", 0) > 0:
-                metrics.append(f"Score: {result['grounding_score']:.2f}")
+                metadata_parts.append("📌 Cached")
             
+            # Add medical entities if found
+            if result.get("entities_found"):
+                # Extract unique entity texts (max 3 for display)
+                entity_texts = []
+                seen = set()
+                for e in result["entities_found"]:
+                    if e["text"].lower() not in seen:
+                        entity_texts.append(e["text"])
+                        seen.add(e["text"].lower())
+                    if len(entity_texts) >= 3:
+                        break
+                
+                if entity_texts:
+                    entities_str = ", ".join(entity_texts)
+                    metadata_parts.append(f"🏷️ {entities_str}")
+            
+            # Add performance metric
             if result.get("latency_ms"):
-                metrics.append(f"⚡ {result['latency_ms']}ms")
+                metadata_parts.append(f"⚡ {result['latency_ms']}ms")
             
-            if metrics:
-                st.caption(" | ".join(metrics))
+            # Add grounding score if not cached
+            if not result.get("cache_hit") and result.get("grounding_score", 0) > 0:
+                metadata_parts.append(f"Score: {result['grounding_score']:.2f}")
+            
+            # Display metadata if any
+            if metadata_parts:
+                st.caption(" | ".join(metadata_parts))
+            
+            # Optional: Expandable details for power users
+            if result.get("entities_found") and len(result["entities_found"]) > 0:
+                with st.expander("🔍 Detected Medical Terms", expanded=False):
+                    # Group entities by type
+                    entities_by_type = {}
+                    for entity in result["entities_found"]:
+                        entity_type = entity.get("type", "unknown")
+                        if entity_type not in entities_by_type:
+                            entities_by_type[entity_type] = []
+                        if entity["text"] not in entities_by_type[entity_type]:
+                            entities_by_type[entity_type].append(entity["text"])
+                    
+                    # Display grouped entities
+                    for entity_type, texts in entities_by_type.items():
+                        type_label = entity_type.replace("_", " ").title()
+                        st.caption(f"**{type_label}**: {', '.join(texts)}")
             
             logger.info(f"[UI] Response delivered successfully")
         else:

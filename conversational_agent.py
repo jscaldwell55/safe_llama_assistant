@@ -1,4 +1,4 @@
-# conversational_agent.py - Response Orchestrator with Crisis Detection
+# conversational_agent.py - Enhanced Orchestrator with Medical NER and Conversation Flows
 
 import logging
 import time
@@ -27,12 +27,13 @@ class ResponseStrategy(Enum):
     GENERATED = "generated"
     CACHED = "cached"
     FALLBACK = "fallback"
-    CRISIS = "crisis"  # Added for crisis responses
+    CRISIS = "crisis"
+    CLARIFICATION = "clarification"  # For clarification requests
     ERROR = "error"
 
 @dataclass
 class ResponseDecision:
-    """Response orchestration decision"""
+    """Enhanced response orchestration decision"""
     final_response: str = ""
     strategy_used: ResponseStrategy = ResponseStrategy.GENERATED
     context_used: str = ""
@@ -41,7 +42,9 @@ class ResponseDecision:
     was_validated: bool = False
     validation_result: str = ""
     cache_hit: bool = False
-    crisis_detected: bool = False  # Track if crisis was detected
+    crisis_detected: bool = False
+    entities_found: List[Dict] = field(default_factory=list)  # Medical entities
+    clarification_needed: bool = False  # Clarification flag
 
 # ============================================================================
 # RESPONSE CACHE
@@ -91,21 +94,42 @@ class ResponseCache:
         return self.hits / total if total > 0 else 0.0
 
 # ============================================================================
-# ORCHESTRATOR WITH CRISIS DETECTION
+# ENHANCED ORCHESTRATOR
 # ============================================================================
 
-class SafeOrchestrator:
+class EnhancedOrchestrator:
     """
-    Orchestrator with crisis detection as first priority
+    Enhanced orchestrator with medical NER, conversation flows, and confidence scoring
     """
     
     def __init__(self):
         self.cache = ResponseCache() if ENABLE_RESPONSE_CACHE else None
         self.total_requests = 0
         self.fallback_count = 0
-        self.crisis_count = 0  # Track crisis detections
+        self.crisis_count = 0
+        self.clarification_count = 0
         
-        logger.info(f"SafeOrchestrator initialized (cache: {ENABLE_RESPONSE_CACHE})")
+        # Initialize new components
+        self._init_enhanced_features()
+        
+        logger.info(f"EnhancedOrchestrator initialized with medical NER and conversation flows")
+    
+    def _init_enhanced_features(self):
+        """Initialize enhanced features"""
+        try:
+            from medical_entity_recognizer import get_medical_recognizer
+            from conversation_flow import get_flow_manager
+            
+            self.medical_recognizer = get_medical_recognizer()
+            self.flow_manager = get_flow_manager()
+            self.enhanced_features = True
+            
+            logger.info("Enhanced features loaded: Medical NER and Conversation Flows")
+        except ImportError as e:
+            logger.warning(f"Enhanced features not available: {e}")
+            self.medical_recognizer = None
+            self.flow_manager = None
+            self.enhanced_features = False
     
     async def orchestrate_response(
         self, 
@@ -113,7 +137,7 @@ class SafeOrchestrator:
         conversation_history: List[Dict[str, str]] = None
     ) -> ResponseDecision:
         """
-        Main orchestration with crisis detection as first check
+        Enhanced orchestration with medical understanding
         """
         start_time = time.time()
         self.total_requests += 1
@@ -139,10 +163,24 @@ class SafeOrchestrator:
                     crisis_detected=True
                 )
             
-            # Step 2: Check cache (only for non-crisis queries)
+            # Step 2: Extract medical entities and analyze intent
+            entities = []
+            query_intent = {}
+            
+            if self.medical_recognizer:
+                entities = self.medical_recognizer.extract_entities(query)
+                query_intent = self.medical_recognizer.analyze_query_intent(query, entities)
+                
+                logger.info(f"[Request #{self.total_requests}] Found {len(entities)} medical entities")
+                for entity in entities[:3]:  # Log first 3 entities
+                    logger.debug(f"  - {entity.entity_type.value}: {entity.text}")
+            
+            # Step 3: Check cache (with entity-aware key)
             cache_key = None
             if self.cache:
-                cache_key = self.cache.get_key(query)
+                # Include primary drug in cache key if present
+                cache_suffix = query_intent.get("primary_drug", "")
+                cache_key = self.cache.get_key(query + cache_suffix)
                 cached_response = self.cache.get(cache_key)
                 if cached_response:
                     latency = int((time.time() - start_time) * 1000)
@@ -151,10 +189,11 @@ class SafeOrchestrator:
                         final_response=cached_response,
                         strategy_used=ResponseStrategy.CACHED,
                         cache_hit=True,
-                        latency_ms=latency
+                        latency_ms=latency,
+                        entities_found=[{"text": e.text, "type": e.entity_type.value} for e in entities]
                     )
             
-            # Step 3: Retrieve context from RAG
+            # Step 4: Retrieve context from RAG
             logger.info(f"[Request #{self.total_requests}] Retrieving context...")
             rag_start = time.time()
             
@@ -163,32 +202,42 @@ class SafeOrchestrator:
             
             # Get raw retrieval results to check quality
             results = rag_system.retrieve(query)
+            retrieval_scores = [r["score"] for r in results] if results else []
             
-            # Check retrieval quality
+            # Step 5: Check if clarification is needed
+            if self.flow_manager and results:
+                clarifications = self.flow_manager.analyze_ambiguity(query, query_intent)
+                top_score = retrieval_scores[0] if retrieval_scores else 0
+                
+                if self.flow_manager.should_ask_clarification(clarifications, top_score):
+                    clarification_response = self.flow_manager.format_clarification_response(clarifications)
+                    
+                    if clarification_response:
+                        self.clarification_count += 1
+                        logger.info(f"[Request #{self.total_requests}] Requesting clarification")
+                        
+                        return ResponseDecision(
+                            final_response=clarification_response,
+                            strategy_used=ResponseStrategy.CLARIFICATION,
+                            latency_ms=int((time.time() - start_time) * 1000),
+                            clarification_needed=True,
+                            entities_found=[{"text": e.text, "type": e.entity_type.value} for e in entities]
+                        )
+            
+            # Step 6: Check retrieval quality
             if results:
                 if USE_TOP_SCORE_FOR_QUALITY:
-                    # Use the best chunk's score
-                    top_score = results[0]["score"] if results else 0
+                    top_score = retrieval_scores[0] if retrieval_scores else 0
                     if top_score < MIN_TOP_SCORE:
                         logger.warning(f"[Request #{self.total_requests}] Poor retrieval quality: top score {top_score:.3f} < {MIN_TOP_SCORE}")
                         self.fallback_count += 1
+                        
                         return ResponseDecision(
                             final_response=NO_CONTEXT_FALLBACK_MESSAGE,
                             strategy_used=ResponseStrategy.FALLBACK,
                             latency_ms=int((time.time() - start_time) * 1000),
-                            validation_result="poor_retrieval"
-                        )
-                else:
-                    # Use average score
-                    avg_score = sum(r["score"] for r in results) / len(results)
-                    if avg_score < MIN_RETRIEVAL_SCORE:
-                        logger.warning(f"[Request #{self.total_requests}] Poor retrieval quality: {avg_score:.3f} < {MIN_RETRIEVAL_SCORE}")
-                        self.fallback_count += 1
-                        return ResponseDecision(
-                            final_response=NO_CONTEXT_FALLBACK_MESSAGE,
-                            strategy_used=ResponseStrategy.FALLBACK,
-                            latency_ms=int((time.time() - start_time) * 1000),
-                            validation_result="poor_retrieval"
+                            validation_result="poor_retrieval",
+                            entities_found=[{"text": e.text, "type": e.entity_type.value} for e in entities]
                         )
             
             # Format context
@@ -197,15 +246,17 @@ class SafeOrchestrator:
             rag_latency = int((time.time() - rag_start) * 1000)
             logger.info(f"[Request #{self.total_requests}] RAG completed in {rag_latency}ms - {len(context)} chars")
             
-            # Step 4: Generate response
+            # Step 7: Generate response
             if not context or len(context) < 50:
                 logger.info(f"[Request #{self.total_requests}] No context - using fallback")
                 self.fallback_count += 1
+                
                 return ResponseDecision(
                     final_response=NO_CONTEXT_FALLBACK_MESSAGE,
                     strategy_used=ResponseStrategy.FALLBACK,
                     latency_ms=int((time.time() - start_time) * 1000),
-                    validation_result="no_context"
+                    validation_result="no_context",
+                    entities_found=[{"text": e.text, "type": e.entity_type.value} for e in entities]
                 )
             
             logger.info(f"[Request #{self.total_requests}] Generating response...")
@@ -217,7 +268,7 @@ class SafeOrchestrator:
             gen_latency = int((time.time() - gen_start) * 1000)
             logger.info(f"[Request #{self.total_requests}] Generation completed in {gen_latency}ms")
             
-            # Step 5: Validate grounding
+            # Step 8: Validate grounding
             logger.info(f"[Request #{self.total_requests}] Validating grounding...")
             val_start = time.time()
             
@@ -253,7 +304,8 @@ class SafeOrchestrator:
                 grounding_score=validation.grounding_score,
                 latency_ms=total_latency,
                 was_validated=True,
-                validation_result=validation_result
+                validation_result=validation_result,
+                entities_found=[{"text": e.text, "type": e.entity_type.value} for e in entities]
             )
             
         except Exception as e:
@@ -272,8 +324,11 @@ class SafeOrchestrator:
             "total_requests": self.total_requests,
             "fallback_count": self.fallback_count,
             "crisis_count": self.crisis_count,
+            "clarification_count": self.clarification_count,
             "fallback_rate": self.fallback_count / self.total_requests if self.total_requests > 0 else 0,
-            "crisis_rate": self.crisis_count / self.total_requests if self.total_requests > 0 else 0
+            "crisis_rate": self.crisis_count / self.total_requests if self.total_requests > 0 else 0,
+            "clarification_rate": self.clarification_count / self.total_requests if self.total_requests > 0 else 0,
+            "enhanced_features": self.enhanced_features
         }
         
         if self.cache:
@@ -290,14 +345,14 @@ class SafeOrchestrator:
 # SINGLETON MANAGEMENT
 # ============================================================================
 
-_orchestrator_instance: Optional[SafeOrchestrator] = None
+_orchestrator_instance: Optional[EnhancedOrchestrator] = None
 
-def get_orchestrator() -> SafeOrchestrator:
+def get_orchestrator() -> EnhancedOrchestrator:
     """Get singleton orchestrator instance"""
     global _orchestrator_instance
     if _orchestrator_instance is None:
-        _orchestrator_instance = SafeOrchestrator()
-        logger.info("Created SafeOrchestrator singleton")
+        _orchestrator_instance = EnhancedOrchestrator()
+        logger.info("Created EnhancedOrchestrator singleton")
     return _orchestrator_instance
 
 def reset_orchestrator():
@@ -308,4 +363,5 @@ def reset_orchestrator():
     orchestrator.total_requests = 0
     orchestrator.fallback_count = 0
     orchestrator.crisis_count = 0
+    orchestrator.clarification_count = 0
     logger.info("Orchestrator state reset")

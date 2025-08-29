@@ -309,3 +309,45 @@ pharma-assistant/
 **Version**: 2.1.0 (Simplified Safety Model)  
 **Last Updated**: August 29, 2025  
 **Status**: ✅ Operational (485 vectors, 4 documents)
+
+
+1. guard.py - Added Crisis Detection
+
+✅ Added all three tiers of crisis regex patterns (HIGH, MEDIUM, LOW)
+✅ Intelligent detection that combines patterns for better accuracy
+✅ Uses logger.critical() for crisis events (easier to monitor)
+✅ Returns the crisis response message when detected
+
+2. conversational_agent.py - Crisis as First Priority
+
+✅ Crisis check happens FIRST before any other processing
+✅ Added ResponseStrategy.CRISIS enum value
+✅ Tracks crisis_count in statistics
+✅ No caching of crisis responses (always fresh evaluation)
+✅ Added crisis_detected flag to response decision
+
+3. config.py - Added Crisis Message
+
+✅ Added CRISIS_RESPONSE_MESSAGE with the 988 lifeline information
+
+How It Works:
+
+Tiered Detection:
+
+HIGH: Any single match → immediate crisis response
+MEDIUM: 2+ matches → crisis response
+LOW: 2+ matches OR 1 medium + 1 low → crisis response
+
+
+Smart Patterns:
+
+Handles variations (kill myself, end my life, kms, kys, unalive)
+Detects methods/planning language
+Catches euphemisms and indirect expressions
+Excludes prevention/recovery contexts
+
+
+Logging:
+
+Uses logger.critical() for crisis detection
+Easy to monitor with: grep CRITICAL app.log
