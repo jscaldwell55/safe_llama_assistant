@@ -1,7 +1,7 @@
 # Core AI/ML
 anthropic>=0.18.0                    # Claude 3.5 Sonnet API
 sentence-transformers>=2.2.2         # Embedding generation
-pinecone-client>=3.0.0              # Pinecone vector database
+pinecone>=2.0.0                     # Pinecone vector database (renamed from pinecone-client)
 torch>=2.2.0                         # Required by sentence-transformers
 numpy>=1.24.0,<2.0.0                # Numerical operations
 
@@ -35,7 +35,7 @@ python-dotenv>=1.0.0               # Environment variables
 # MIGRATION NOTES FROM FAISS TO PINECONE
 # ============================================================================
 # - Removed: faiss-cpu (replaced by Pinecone cloud service)
-# - Added: pinecone-client for vector database operations
+# - Added: pinecone for vector database operations (formerly pinecone-client)
 # - Total install size reduced: ~1.5GB (no local FAISS index)
 # - First run will still download embedding model (~25MB)
 # - Requires PINECONE_API_KEY environment variable
