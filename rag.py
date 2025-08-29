@@ -392,12 +392,61 @@ def get_rag_system() -> PineconeRAGSystem:
         _rag_instance = PineconeRAGSystem()
     return _rag_instance
 
-def retrieve_and_format_context(query: str, k: int = TOP_K_RETRIEVAL) -> str:
-    """Retrieve and format context for query"""
+def enhance_query_for_retrieval(query: str, conversation_history: List[Dict[str, str]] = None) -> str:
+    """
+    Simple query enhancement for better retrieval of follow-up questions
+    """
+    query_lower = query.lower()
+    
+    # Check if this looks like a follow-up
+    follow_up_indicators = [
+        "which ones", "what about", "those", "they", "them", 
+        "most common", "most severe", "worst", "best", "serious"
+    ]
+    
+    is_followup = any(indicator in query_lower for indicator in follow_up_indicators)
+    
+    if not is_followup or not conversation_history:
+        return query
+    
+    # Look for recent medical topics in the last few messages
+    medical_keywords = []
+    for msg in conversation_history[-4:]:  # Last 2 exchanges
+        content = msg.get("content", "").lower()
+        if "side effect" in content:
+            medical_keywords.append("side effects")
+        if "dosage" in content or "dose" in content:
+            medical_keywords.append("dosage")
+        if "interaction" in content:
+            medical_keywords.append("interactions")
+        if "journvax" in content:
+            medical_keywords.append("Journvax")
+    
+    # If we found relevant context, enhance the query
+    if medical_keywords:
+        # Add the most relevant keyword to the query
+        if "side effect" in " ".join(medical_keywords):
+            enhanced = f"{query} Journvax side effects"
+        elif "dosage" in " ".join(medical_keywords):
+            enhanced = f"{query} Journvax dosage"
+        else:
+            enhanced = f"{query} Journvax"
+        
+        logger.info(f"Enhanced query for retrieval: '{query}' -> '{enhanced}'")
+        return enhanced
+    
+    return query
+
+def retrieve_and_format_context(query: str, k: int = TOP_K_RETRIEVAL, 
+                                conversation_history: List[Dict[str, str]] = None) -> str:
+    """Retrieve and format context for query with follow-up handling"""
     rag_system = get_rag_system()
     
-    # Retrieve chunks
-    results = rag_system.retrieve(query, k)
+    # Enhance query if it looks like a follow-up
+    enhanced_query = enhance_query_for_retrieval(query, conversation_history)
+    
+    # Retrieve chunks using enhanced query
+    results = rag_system.retrieve(enhanced_query, k)
     
     if not results:
         logger.warning("No results retrieved from RAG")
