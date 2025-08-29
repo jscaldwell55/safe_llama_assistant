@@ -119,16 +119,19 @@ class EnhancedOrchestrator:
         try:
             from medical_entity_recognizer import get_medical_recognizer
             from conversation_flow import get_flow_manager
+            from context_enhancer import get_query_enhancer
             
             self.medical_recognizer = get_medical_recognizer()
             self.flow_manager = get_flow_manager()
+            self.query_enhancer = get_query_enhancer()
             self.enhanced_features = True
             
-            logger.info("Enhanced features loaded: Medical NER and Conversation Flows")
+            logger.info("Enhanced features loaded: Medical NER, Conversation Flows, and Query Enhancement")
         except ImportError as e:
             logger.warning(f"Enhanced features not available: {e}")
             self.medical_recognizer = None
             self.flow_manager = None
+            self.query_enhancer = None
             self.enhanced_features = False
     
     async def orchestrate_response(
@@ -163,13 +166,23 @@ class EnhancedOrchestrator:
                     crisis_detected=True
                 )
             
+            # Step 1.5: Enhance query with conversation context if needed
+            enhanced_query = query
+            was_enhanced = False
+            
+            if self.query_enhancer and conversation_history:
+                enhanced_query, was_enhanced = self.query_enhancer.enhance_query(query, conversation_history)
+                if was_enhanced:
+                    logger.info(f"[Request #{self.total_requests}] Query enhanced with context")
+            
             # Step 2: Extract medical entities and analyze intent
             entities = []
             query_intent = {}
             
             if self.medical_recognizer:
-                entities = self.medical_recognizer.extract_entities(query)
-                query_intent = self.medical_recognizer.analyze_query_intent(query, entities)
+                # Use enhanced query for entity extraction
+                entities = self.medical_recognizer.extract_entities(enhanced_query)
+                query_intent = self.medical_recognizer.analyze_query_intent(enhanced_query, entities)
                 
                 logger.info(f"[Request #{self.total_requests}] Found {len(entities)} medical entities")
                 for entity in entities[:3]:  # Log first 3 entities
@@ -200,8 +213,8 @@ class EnhancedOrchestrator:
             from rag import retrieve_and_format_context, get_rag_system
             rag_system = get_rag_system()
             
-            # Get raw retrieval results to check quality
-            results = rag_system.retrieve(query)
+            # Get raw retrieval results using enhanced query
+            results = rag_system.retrieve(enhanced_query)
             retrieval_scores = [r["score"] for r in results] if results else []
             
             # Step 5: Check if clarification is needed
@@ -240,8 +253,8 @@ class EnhancedOrchestrator:
                             entities_found=[{"text": e.text, "type": e.entity_type.value} for e in entities]
                         )
             
-            # Format context
-            context = retrieve_and_format_context(query)
+            # Format context using enhanced query
+            context = retrieve_and_format_context(enhanced_query)
             
             rag_latency = int((time.time() - rag_start) * 1000)
             logger.info(f"[Request #{self.total_requests}] RAG completed in {rag_latency}ms - {len(context)} chars")
