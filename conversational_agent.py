@@ -14,12 +14,9 @@ from config import (
     PERSONAL_MEDICAL_ADVICE_MESSAGE,
     LOG_SLOW_REQUESTS_THRESHOLD_MS,
     MIN_RETRIEVAL_SCORE,
-    USE_TOP_SCORE_FOR_QUALITY,  # Add this
-    MIN_TOP_SCORE  # Add this
+    USE_TOP_SCORE_FOR_QUALITY,
+    MIN_TOP_SCORE
 )
-
-from guard import QueryValidator
-is_blocked, block_message = QueryValidator.validate_query(query)
 
 logger = logging.getLogger(__name__)
 
@@ -126,9 +123,11 @@ class SafeOrchestrator:
         
         try:
             # Step 1: Pre-screen query for emergencies and personal medical advice
-            from guard import query_validator
-
-            is_blocked, block_message = query_validator.validate_query(query)
+            from guard import QueryValidator
+            
+            # Call validate_query as a static method directly on the class
+            is_blocked, block_message = QueryValidator.validate_query(query)
+            
             if is_blocked:
                 self.blocked_count += 1
                 latency = int((time.time() - start_time) * 1000)
