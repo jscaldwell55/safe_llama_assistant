@@ -209,12 +209,15 @@ class EnhancedOrchestrator:
             # Step 4: Retrieve context from RAG
             logger.info(f"[Request #{self.total_requests}] Retrieving context...")
             rag_start = time.time()
-            
+
             from rag import retrieve_and_format_context, get_rag_system
             rag_system = get_rag_system()
-            
-            # Get raw retrieval results using enhanced query
-            results = rag_system.retrieve(enhanced_query)
+
+            # Pass conversation history for better follow-up handling
+            context = retrieve_and_format_context(query, conversation_history=conversation_history)
+
+            # Get raw retrieval results for scoring (using same query)
+            results = rag_system.retrieve(query)
             retrieval_scores = [r["score"] for r in results] if results else []
             
             # Step 5: Check if clarification is needed
