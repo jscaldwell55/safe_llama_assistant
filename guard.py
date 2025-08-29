@@ -73,7 +73,7 @@ class QueryValidator:
         """Check if query indicates a medical emergency"""
         query_lower = query.lower()
 
-        logger.info(f"check_emergency called with: '{query_lower[:100]}...'")
+       
         
         # Check for emergency indicators
         for indicator in QueryValidator.EMERGENCY_INDICATORS:

@@ -18,6 +18,9 @@ from config import (
     MIN_TOP_SCORE  # Add this
 )
 
+from guard import QueryValidator
+is_blocked, block_message = QueryValidator.validate_query(query)
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
