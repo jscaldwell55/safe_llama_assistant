@@ -124,7 +124,7 @@ class SafeOrchestrator:
         try:
             # Step 1: Pre-screen query for emergencies and personal medical advice
             from guard import query_validator
-            
+
             is_blocked, block_message = query_validator.validate_query(query)
             if is_blocked:
                 self.blocked_count += 1
