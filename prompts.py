@@ -7,8 +7,8 @@
 # FALLBACK MESSAGES
 # ============================================================================
 
-NO_CONTEXT_FALLBACK = "I'm sorry, I don't have any information on that. Can I assist you with something else?"
-GUARD_FALLBACK = "I'm sorry, I can't discuss that. Can we talk about something else?"
+NO_CONTEXT_FALLBACK = "I'm sorry, I don't have any information on that. Can I assist you with something else? If this is an emergency or you need immediate medical care, please call 911"
+GUARD_FALLBACK = "I'm sorry, I can't discuss that. Can we talk about something else? If this is an emergency or you need immediate medical care, please call 911"
 
 # ============================================================================
 # LEGACY COMPATIBILITY
