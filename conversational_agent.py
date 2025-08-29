@@ -179,7 +179,7 @@ class EnhancedOrchestrator:
             cache_key = None
             if self.cache:
                 # Include primary drug in cache key if present
-                cache_suffix = query_intent.get("primary_drug", "")
+                cache_suffix = query_intent.get("primary_drug", "") or ""
                 cache_key = self.cache.get_key(query + cache_suffix)
                 cached_response = self.cache.get(cache_key)
                 if cached_response:
