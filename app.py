@@ -1,6 +1,7 @@
 # app.py - Simplified Streamlit UI with Extensive Logging
 
 import os
+import re
 import streamlit as st
 import logging
 import sys
@@ -65,6 +66,11 @@ def load_dependencies():
 # ============================================================================
 # CLEANUP REGISTRATION
 # ============================================================================
+def clean_response(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    return re.sub(r"\s*\(Note:.*?\)\s*$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+
 
 def register_cleanup():
     """Register cleanup handlers for graceful shutdown"""
@@ -159,17 +165,27 @@ async def handle_query(query: str) -> Dict[str, Any]:
     """Handle user query with extensive logging"""
     start_time = time.time()
     request_id = f"REQ_{int(start_time)}_{hash(query) % 10000}"
-    
+
+    def clean_response(text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        # strip any "(Note: ...)" block at the end (case-insensitive)
+        return re.sub(r"\s*\(Note:.*?\)\s*$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+
     logger.info(f"[{request_id}] START Processing query: '{query}'")
-    
+
     try:
         # Get conversation history for context
         conversation_history = conversation_manager.get_turns()
-        
+
         # Orchestrate response
         logger.info(f"[{request_id}] Calling orchestrator...")
         decision = await orchestrator.orchestrate_response(query, conversation_history)
-        
+
+        # Sanitize model output for user-facing UI/history
+        raw_out = getattr(decision, "final_response", "")
+        cleaned = clean_response(raw_out or "")
+
         # Log decision details
         logger.info(f"[{request_id}] Response Decision:")
         logger.info(f"  - Strategy: {decision.strategy_used.value}")
@@ -179,41 +195,44 @@ async def handle_query(query: str) -> Dict[str, Any]:
         logger.info(f"  - Validation result: {decision.validation_result}")
         logger.info(f"  - Cache hit: {decision.cache_hit}")
         logger.info(f"  - Latency: {decision.latency_ms}ms")
-        
-        # Update conversation history
+        logger.info(f"  - Raw (first 200): {str(raw_out)[:200]!r}")
+        logger.info(f"  - Cleaned (first 200): {cleaned[:200]!r}")
+
+        # Update conversation history (cleaned only)
         conversation_manager.add_turn("user", query)
-        conversation_manager.add_turn("assistant", decision.final_response)
-        
+        conversation_manager.add_turn("assistant", cleaned)
+
         total_time = time.time() - start_time
         logger.info(f"[{request_id}] END Request completed in {total_time:.2f}s")
-        
+
         # Get orchestrator stats for logging
         stats = orchestrator.get_stats()
         logger.info(f"[STATS] Orchestrator: {stats}")
-        
+
         return {
             "success": True,
-            "response": decision.final_response,
+            "response": cleaned,
             "strategy": decision.strategy_used.value,
             "grounding_score": decision.grounding_score,
             "latency_ms": decision.latency_ms,
             "cache_hit": decision.cache_hit,
-            "validation_result": decision.validation_result
+            "validation_result": decision.validation_result,
         }
-        
+
     except Exception as e:
         logger.error(f"[{request_id}] ERROR: {e}", exc_info=True)
-        
+
         total_time = time.time() - start_time
         logger.info(f"[{request_id}] END Request failed after {total_time:.2f}s")
-        
+
+        fallback = "I'm sorry, I don't have any information on that. Can I assist you with something else?"
         return {
             "success": False,
-            "response": "I'm sorry, I don't have any information on that. Can I assist you with something else?",
+            "response": fallback,
             "strategy": "error",
             "grounding_score": 0.0,
             "latency_ms": int(total_time * 1000),
-            "error": str(e)
+            "error": str(e),
         }
 
 # ============================================================================
@@ -240,21 +259,7 @@ with st.sidebar:
     
     st.divider()
     
-    # Simplified system status
-    st.subheader("📊 System Status")
     
-    # Essential status
-    rag_stats = deps["get_index_stats"]()
-    if rag_stats["index_loaded"]:
-        st.success("✅ Ready")
-        st.caption(f"{rag_stats['documents']} documents loaded")
-    else:
-        st.error("❌ Index Not Loaded")
-    
-    # Optional: Performance metric
-    orch_stats = orchestrator.get_stats()
-    if orch_stats["total_requests"] > 0:
-        st.caption(f"Sessions today: {orch_stats['total_requests']}")
 
 # ============================================================================
 # MAIN CHAT UI
