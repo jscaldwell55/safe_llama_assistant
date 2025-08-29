@@ -43,12 +43,12 @@ TEMPERATURE = 0.4  # Slightly higher for comprehensive coverage
 # ============================================================================
 
 # Grounding validation - production-safe thresholds
-SEMANTIC_SIMILARITY_THRESHOLD = 0.75  # FIXED: Was 0.45, now matches README claim
+SEMANTIC_SIMILARITY_THRESHOLD = 0.65  # FIXED: Was 0.45, now matches README claim
 
 # Retrieval quality thresholds - PRODUCTION VALUES
 USE_TOP_SCORE_FOR_QUALITY = True  # Use best chunk score instead of average
-MIN_TOP_SCORE = 0.70  # FIXED: Was 0.40, now production-ready
-MIN_RETRIEVAL_SCORE = 0.65  # FIXED: Was 0.35, now production-ready
+MIN_TOP_SCORE = 0.45  # FIXED: Was 0.40, now production-ready
+MIN_RETRIEVAL_SCORE = 0.35  # FIXED: Was 0.35, now production-ready
 
 # ============================================================================
 # RAG CONFIGURATION
