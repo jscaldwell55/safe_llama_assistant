@@ -122,20 +122,30 @@ class SafeOrchestrator:
         logger.info(f"[Request #{self.total_requests}] Processing: '{query[:50]}...'")
         
         try:
-            # Step 1: Pre-screen query for personal medical advice
+            # Step 1: Pre-screen query for emergencies and personal medical advice
             from guard import query_validator
             
-            if query_validator.check_personal_medical(query):
+            is_blocked, block_message = query_validator.validate_query(query)
+            if is_blocked:
                 self.blocked_count += 1
                 latency = int((time.time() - start_time) * 1000)
-                logger.info(f"[Request #{self.total_requests}] Query blocked - personal medical advice")
+                
+                # Determine block reason
+                if "emergency" in block_message.lower() or "911" in block_message:
+                    block_reason = "emergency"
+                    validation_result = "blocked_emergency"
+                else:
+                    block_reason = "personal_medical_advice"
+                    validation_result = "blocked_personal_medical"
+                
+                logger.info(f"[Request #{self.total_requests}] Query blocked - {block_reason}")
                 
                 return ResponseDecision(
-                    final_response=PERSONAL_MEDICAL_ADVICE_MESSAGE,
+                    final_response=block_message,
                     strategy_used=ResponseStrategy.BLOCKED,
                     latency_ms=latency,
-                    validation_result="blocked_personal_medical",
-                    blocked_reason="personal_medical_advice"
+                    validation_result=validation_result,
+                    blocked_reason=block_reason
                 )
             
             # Step 2: Check cache

@@ -1,8 +1,8 @@
-# guard.py - Production-Ready Grounding Validator with Safe Thresholds
+# guard.py - Production-Ready Grounding Validator with Emergency Detection
 
 import logging
 import numpy as np
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -19,6 +19,17 @@ from config import (
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# EMERGENCY MESSAGES
+# ============================================================================
+
+EMERGENCY_MESSAGE = """If this is a medical emergency, please call 911 immediately.
+
+For poison control: 1-800-222-1222
+For mental health crisis: 988 (Suicide & Crisis Lifeline)
+
+I cannot provide emergency medical guidance. Please seek immediate professional help."""
+
+# ============================================================================
 # VALIDATION RESULTS
 # ============================================================================
 
@@ -26,6 +37,7 @@ class ValidationResult(Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
     PERSONAL_MEDICAL = "personal_medical"
+    EMERGENCY = "emergency"
 
 @dataclass
 class GroundingValidation:
@@ -39,27 +51,126 @@ class GroundingValidation:
 # ============================================================================
 
 class QueryValidator:
-    """Pre-screens queries for personal medical advice"""
+    """Pre-screens queries for emergencies and personal medical advice"""
+    
+    # Emergency indicators that suggest immediate help needed
+    EMERGENCY_INDICATORS = [
+        'dying', 'die', 'dead', 'death',
+        'emergency', '911', 'ambulance',
+        'hospital', 'ER', 'emergency room',
+        'unconscious', 'not breathing', 'no pulse',
+        'overdose', 'overdosing', 'OD',
+        'poisoned', 'poison',
+        'heart attack', 'stroke',
+        'seizure', 'seizing',
+        'bleeding out', 'severe bleeding',
+        'can\'t breathe', 'cannot breathe',
+        'anaphylaxis', 'allergic reaction'
+    ]
+    
+    @staticmethod
+    def check_emergency(query: str) -> bool:
+        """Check if query indicates a medical emergency"""
+        query_lower = query.lower()
+        
+        # Check for emergency indicators
+        for indicator in QueryValidator.EMERGENCY_INDICATORS:
+            if indicator in query_lower:
+                logger.warning(f"Emergency query detected: '{query[:50]}...'")
+                return True
+        
+        # Check for crisis patterns
+        crisis_patterns = [
+            'about to die',
+            'going to die',
+            'help me now',
+            'urgent help',
+            'call 911',
+            'need ambulance'
+        ]
+        
+        for pattern in crisis_patterns:
+            if pattern in query_lower:
+                logger.warning(f"Crisis pattern detected: '{query[:50]}...'")
+                return True
+                
+        return False
     
     @staticmethod
     def check_personal_medical(query: str) -> bool:
         """Check if query is asking for personal medical advice"""
-        if not BLOCK_PERSONAL_MEDICAL:
-            return False
-            
         query_lower = query.lower()
         
-        # Check for personal indicators
-        has_personal = any(indicator in query_lower for indicator in PERSONAL_INDICATORS)
+        # First check if it's an emergency - don't block emergencies
+        if QueryValidator.check_emergency(query):
+            return False  # Let emergency handler deal with it
         
-        # Check for medical context
-        has_medical = any(context in query_lower for context in MEDICAL_CONTEXTS)
+        # Allow general interaction/safety questions
+        interaction_terms = [
+            'interaction', 'interact with', 
+            'mixing', 'combine', 'together with',
+            'alcohol', 'other medication', 'other drugs',
+            'food', 'grapefruit', 'caffeine'
+        ]
         
-        if has_personal and has_medical:
+        if any(term in query_lower for term in interaction_terms):
+            logger.debug(f"Interaction query allowed: '{query[:50]}...'")
+            return False  # Let it through to check documentation
+        
+        # Allow general safety/usage questions
+        general_terms = [
+            'what is the dose',
+            'how often',
+            'how to take',
+            'side effects',
+            'warnings',
+            'contraindications',
+            'is it safe for pregnant',  # General population questions
+            'is it safe for elderly',
+            'is it safe for children'
+        ]
+        
+        if any(term in query_lower for term in general_terms):
+            return False
+        
+        # Check for truly personal medical advice
+        personal_medical_phrases = [
+            'should i take',
+            'can i take',
+            'i should take',
+            'my condition',
+            'my symptoms', 
+            'my disease',
+            'i have been diagnosed',
+            'my doctor',
+            'in my case',
+            'for me personally',
+            'my medical history'
+        ]
+        
+        if any(phrase in query_lower for phrase in personal_medical_phrases):
             logger.warning(f"Personal medical advice query detected: '{query[:50]}...'")
             return True
             
         return False
+    
+    @staticmethod
+    def validate_query(query: str) -> Tuple[bool, Optional[str]]:
+        """
+        Validate query and return (is_blocked, message)
+        Returns (True, message) if query should be blocked
+        Returns (False, None) if query can proceed
+        """
+        # Check for emergency first
+        if QueryValidator.check_emergency(query):
+            return True, EMERGENCY_MESSAGE
+        
+        # Then check for personal medical advice
+        if BLOCK_PERSONAL_MEDICAL and QueryValidator.check_personal_medical(query):
+            return True, PERSONAL_MEDICAL_ADVICE_MESSAGE
+        
+        # Query is OK to process
+        return False, None
 
 # ============================================================================
 # GROUNDING VALIDATOR
@@ -72,7 +183,7 @@ class GroundingValidator:
     
     def __init__(self):
         self.enabled = ENABLE_GUARD
-        # Use safe threshold from config (0.75)
+        # Use safe threshold from config (0.45)
         self.threshold = SEMANTIC_SIMILARITY_THRESHOLD
         self.embedding_model = None
         
@@ -97,7 +208,7 @@ class GroundingValidator:
     
     def validate_response(self, response: str, context: str) -> GroundingValidation:
         """
-        Validate response grounding with production-safe threshold (0.75)
+        Validate response grounding with production-safe threshold
         """
         if not self.enabled or not self.embedding_model:
             # Validation disabled - approve with warning
@@ -132,7 +243,7 @@ class GroundingValidator:
             
             logger.info(f"Grounding validation - Score: {similarity:.3f}, Threshold: {self.threshold}")
             
-            # Use production threshold (0.75)
+            # Use production threshold
             if similarity >= self.threshold:
                 logger.info(f"Response APPROVED with grounding score: {similarity:.3f}")
                 return GroundingValidation(
