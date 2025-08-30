@@ -173,27 +173,33 @@ class EnhancedOrchestrator:
             if self.query_enhancer and conversation_history:
                 enhanced_query, was_enhanced = self.query_enhancer.enhance_query(query, conversation_history)
                 if was_enhanced:
-                    logger.info(f"[Request #{self.total_requests}] Query enhanced with context")
+                    logger.info(f"[Request #{self.total_requests}] Query enhanced with context: {enhanced_query!r}")
+
+            # Step 1.6: Resolve follow-ups (ALWAYS use conversation history)
+            from rag import resolve_followup
+            resolved_query = resolve_followup(enhanced_query, conversation_history)
+            if resolved_query != query:
+                logger.info(f"[Request #{self.total_requests}] Resolved follow-up: '{query}' -> '{resolved_query}'")
             
             # Step 2: Extract medical entities and analyze intent
             entities = []
             query_intent = {}
             
             if self.medical_recognizer:
-                # Use enhanced query for entity extraction
-                entities = self.medical_recognizer.extract_entities(enhanced_query)
-                query_intent = self.medical_recognizer.analyze_query_intent(enhanced_query, entities)
+                # Use resolved query for entity extraction
+                entities = self.medical_recognizer.extract_entities(resolved_query)
+                query_intent = self.medical_recognizer.analyze_query_intent(resolved_query, entities)
                 
                 logger.info(f"[Request #{self.total_requests}] Found {len(entities)} medical entities")
                 for entity in entities[:3]:  # Log first 3 entities
                     logger.debug(f"  - {entity.entity_type.value}: {entity.text}")
             
-            # Step 3: Check cache (with entity-aware key)
+            # Step 3: Check cache (entity-aware key)
             cache_key = None
             if self.cache:
-                # Include primary drug in cache key if present
                 cache_suffix = query_intent.get("primary_drug", "") or ""
-                cache_key = self.cache.get_key(query + cache_suffix)
+                # Include resolved query so follow-ups reuse correct cache entries
+                cache_key = self.cache.get_key(resolved_query + cache_suffix)
                 cached_response = self.cache.get(cache_key)
                 if cached_response:
                     latency = int((time.time() - start_time) * 1000)
@@ -206,23 +212,20 @@ class EnhancedOrchestrator:
                         entities_found=[{"text": e.text, "type": e.entity_type.value} for e in entities]
                     )
             
-            # Step 4: Retrieve context from RAG
+            # Step 4: Retrieve context from RAG using the RESOLVED QUERY
             logger.info(f"[Request #{self.total_requests}] Retrieving context...")
             rag_start = time.time()
 
             from rag import retrieve_and_format_context, get_rag_system
             rag_system = get_rag_system()
 
-            # Pass conversation history for better follow-up handling
-            context = retrieve_and_format_context(query, conversation_history=conversation_history)
-
-            # Get raw retrieval results for scoring (using same query)
-            results = rag_system.retrieve(query)
+            # Get raw retrieval results for quality scoring (same resolved query)
+            results = rag_system.retrieve(resolved_query)
             retrieval_scores = [r["score"] for r in results] if results else []
             
-            # Step 5: Check if clarification is needed
+            # Step 5: Clarification (optional flow)
             if self.flow_manager and results:
-                clarifications = self.flow_manager.analyze_ambiguity(query, query_intent)
+                clarifications = self.flow_manager.analyze_ambiguity(resolved_query, query_intent)
                 top_score = retrieval_scores[0] if retrieval_scores else 0
                 
                 if self.flow_manager.should_ask_clarification(clarifications, top_score):
@@ -256,15 +259,18 @@ class EnhancedOrchestrator:
                             entities_found=[{"text": e.text, "type": e.entity_type.value} for e in entities]
                         )
             
-            # Format context using enhanced query
-            context = retrieve_and_format_context(enhanced_query)
+            # Step 7: Format context (ALWAYS pass conversation_history)
+            context = retrieve_and_format_context(
+                resolved_query,
+                conversation_history=conversation_history
+            )
             
             rag_latency = int((time.time() - rag_start) * 1000)
             logger.info(f"[Request #{self.total_requests}] RAG completed in {rag_latency}ms - {len(context)} chars")
             
-            # Step 7: Generate response
+            # Step 8: Generate response
             if not context or len(context) < 50:
-                logger.info(f"[Request #{self.total_requests}] No context - using fallback")
+                logger.info(f"[Request #{self.total_requests}] No/insufficient context - using fallback")
                 self.fallback_count += 1
                 
                 return ResponseDecision(
@@ -279,12 +285,14 @@ class EnhancedOrchestrator:
             gen_start = time.time()
             
             from llm_client import call_claude
+            # We pass the original user query so the reply reads naturally;
+            # grounding comes from the resolved-query context above.
             response = await call_claude(query, context, conversation_history)
             
             gen_latency = int((time.time() - gen_start) * 1000)
             logger.info(f"[Request #{self.total_requests}] Generation completed in {gen_latency}ms")
             
-            # Step 8: Validate grounding
+            # Step 9: Validate grounding
             logger.info(f"[Request #{self.total_requests}] Validating grounding...")
             val_start = time.time()
             
