@@ -1,18 +1,17 @@
-# Pharma Enterprise Assistant
+# Safe LLaMA Assistant
 
-A document-grounded pharmaceutical information system with medical entity recognition and intelligent conversation flows. Ensures all responses are strictly derived from source documentation through mathematical validation. Powered by **Pinecone cloud vector database** for enterprise-scale deployment.
+A document-grounded pharmaceutical information system with medical entity recognition and safety guardrails. Ensures all responses are strictly derived from source documentation through mathematical validation. Powered by **Pinecone cloud vector database** for scalable deployment.
 
 ## 🚀 Current System State
-- ✅ **System Operational**: 485 vectors indexed from 4 PDF documents
-- ✅ **Pinecone Cloud Active**: Serverless vector search ready
-- ✅ **Balanced Thresholds**: 0.65 grounding validation, 0.45 retrieval quality
-- ✅ **Medical NER**: Detects drugs, dosages, conditions, symptoms
-- ✅ **Conversation Flows**: Intelligent clarification for ambiguous queries
-- ✅ **Crisis Detection**: Comprehensive suicide/self-harm detection with 988 resources
-- ⚠️ **Anthropic API Key Required**: Set before running the application
+- ✅ **System Operational**: Pinecone-based vector search active
+- ✅ **Medical NER**: Pattern-based entity recognition for drugs, dosages, conditions
+- ✅ **Crisis Detection**: Multi-tier suicide/self-harm detection with 988 resources
+- ✅ **Response Caching**: LRU cache for improved performance
+- ✅ **Grounding Validation**: 0.65 cosine similarity threshold
+- ⚠️ **API Keys Required**: Pinecone and Anthropic keys needed
 
 ## Purpose
-This system transforms static PDF drug documentation into an intelligent Q&A interface with medical understanding. The assistant recognizes medical entities, asks clarifying questions when needed, and provides crisis intervention resources when appropriate, all while maintaining strict document grounding.
+This system provides a safety-focused Q&A interface for pharmaceutical documentation. It includes medical entity recognition, crisis intervention routing, and strict document grounding to ensure accurate, safe responses.
 
 ## System Architecture
 
